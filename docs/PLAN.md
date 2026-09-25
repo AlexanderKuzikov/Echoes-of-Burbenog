@@ -142,4 +142,4 @@
 
 ## Следующий шаг
 
-Уточнить P0-вопросы в `docs/CONTEXT.md`, затем перейти к этапу Browser bootstrap без добавления лишних игровых систем.
+Перейти к этапу 2: выбрать минимальный subset механик из research brief и собрать pure deterministic simulation core. Первый scenario должен проверять одну карту с небольшим числом маршрутов, одну волну, commands/state/events, fixed tick и seeded random; после этого подключить интерактивный placement и combat к уже проверенной browser-сцене.

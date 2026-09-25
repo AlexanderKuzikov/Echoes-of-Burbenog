@@ -1,6 +1,6 @@
 # Echoes of Burbenog — CONTEXT
 
-> Последнее обновление: 2026-09-25 19:05
+> Последнее обновление: 2026-09-25 20:04
 
 ## Статус
 
@@ -57,6 +57,7 @@
 | 2026-09-25 | Создан Three.js/Vite browser bootstrap со schematic сценой, HUD и Playwright smoke test |
 | 2026-09-25 | Проверены typecheck, production build, E2E и визуальный screenshot; browser console очищен от deprecated warnings |
 | 2026-09-25 | Собран и сохранён подробный research brief по Burbenog TD в `Old-Burbenog/BURBENOG-TD-RESEARCH.md`; закрыт вопрос о точном референсе |
+| 2026-09-25 | План переведён на следующий этап: выбор mechanics subset и pure deterministic simulation core |
 
 ## Структура проекта
 
