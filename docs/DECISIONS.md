@@ -41,3 +41,13 @@
 **Альтернативы:** Client-authoritative multiplayer; deterministic lockstep; peer-to-peer без authoritative server.
 
 **Trade-off:** Snapshots создают сетевой трафик и требуют серверной синхронизации, но упрощают защиту от cheating и согласование правил.
+
+## 2026-09-25: Solo-first scope и schematic art
+
+**Контекст:** Владелец определил Windows 10/11 как целевые платформы, solo как текущий режим, а multiplayer как будущее направление. Визуальные references показывают плотный Warcraft III/Burbenog-бой, build slots, несколько маршрутов, selection и HUD, но итоговые модели будут создаваться самостоятельно.
+
+**Решение:** Первые вертикальные срезы строить как одиночную игру с собственными схематичными placeholder-assets. Сохранить session и protocol seams для будущего multiplayer, но не реализовывать network functionality до отдельного этапа. Визуальный референс использовать как guidance по читаемости и composition, без копирования сторонних моделей, карт и UI.
+
+**Альтернативы:** Сразу реализовывать PvP/co-op; использовать только плоские спрайты; копировать Warcraft III assets и map elements.
+
+**Trade-off:** Solo-first уменьшает стартовую сложность и ускоряет polishing, но часть будущего network design придётся подтверждать позднее.

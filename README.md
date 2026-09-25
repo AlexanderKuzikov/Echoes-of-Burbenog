@@ -17,7 +17,7 @@
 - **3D-ready прототип** — сцена сразу использует XZ-координаты, даже если первый визуальный прототип плоский.
 - **LLM-friendly tooling** — Vite, Playwright, structured state и deterministic scenarios.
 - **Модульная архитектура** — gameplay, presentation, content и networking развиваются независимо.
-- **Расширяемый multiplayer** — сначала offline и local sessions, затем cooperative и PvP.
+- **Solo-first scope** — текущая разработка сфокусирована на одиночной игре; multiplayer остаётся совместимым будущим направлением.
 - **Качественная графика** — GLB/glTF asset pipeline, PBR, освещение и skeletal animation.
 
 ## Быстрый старт

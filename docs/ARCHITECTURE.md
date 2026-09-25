@@ -3,6 +3,7 @@
 ## Цели
 
 - Сохранить независимые границы gameplay, presentation, content и networking.
+- Сохранять solo-first product scope, не закрывая будущие multiplayer seams.
 - Сделать разработку проверяемой LLM через deterministic scenarios и browser automation.
 - Позволить первому прототипу быть плоским, не блокируя переход к 3D.
 - Не вводить распределённые сервисы, ECS, physics или account system без измеримой потребности.
@@ -109,6 +110,15 @@ Wails — поздний desktop adapter: окно, fullscreen, settings, saves 
 - Временные placeholder meshes заменяются GLB без изменения simulation contracts.
 - WebGPU и тяжёлые post-processing остаются последующими оптимизациями.
 
+## Визуальные принципы
+
+References показывают Warcraft III/Burbenog-подачу: angled top-down camera, читаемые lanes и chokepoints, заметные build slots, плотный combat, selection outline, health bars и компактный HUD.
+
+- Первые placeholder-модели должны иметь ясные silhouettes и цветовые роли, а не быть случайными grey boxes.
+- Эффекты не должны закрывать маршруты, selection и состояние башен.
+- HUD первого среза ограничен ресурсами, wave/status, build bar и selected-object panel.
+- Финальные models, textures и animation заменяют placeholders по asset contract, не меняя gameplay.
+
 ## LLM-friendly QA
 
 Каждый этап должен иметь машинно-проверяемый результат:
@@ -122,7 +132,9 @@ Wails — поздний desktop adapter: окно, fullscreen, settings, saves 
 
 Для WebGL сначала проверять availability и smoke behavior, затем сравнивать screenshots с допусками. Не делать pixel-perfect проверки основным критерием gameplay correctness.
 
-## Развитие multiplayer
+## Multiplayer compatibility
+
+Текущий product scope — solo. Multiplayer пока не реализуется, но границы sessions, protocol и mode rules сохраняются, чтобы будущий режим не потребовал переписывания presentation и content.
 
 1. Offline session использует тот же core, что и online session.
 2. Local/private rooms проверяются двумя Playwright browser contexts.
