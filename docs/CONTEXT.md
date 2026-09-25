@@ -1,6 +1,6 @@
 # Echoes of Burbenog — CONTEXT
 
-> Последнее обновление: 2026-09-25 20:04
+> Последнее обновление: 2026-09-25 23:51
 
 ## Статус
 
@@ -10,13 +10,13 @@
 | Репозиторий | Создан | Приватный GitHub remote, ветка `main` синхронизирована; visibility не является требованием |
 | Документация | Базовая завершена | Созданы README, инструкции, архитектура, решения и план |
 | Целевая платформа | Зафиксирована | Windows 10/11; performance budgets уточняются |
-| Gameplay prototype | Bootstrap проверен | 3D-ready сцена, schematic build pads и базовый HUD |
-| Client | Проверен | TypeScript + Three.js + Vite |
-| Simulation | Не начат | Чистый core с deterministic fixed tick |
+| Gameplay prototype | Bootstrap + core проверены | 3D-ready сцена, pure simulation, schematic build pads и базовый HUD |
+| Client | Bootstrap проверен | TypeScript + Three.js + Vite; simulation integration — следующий этап |
+| Simulation | Проверен | Pure core: commands, state, events, fixed tick, seeded RNG, wave transitions |
 | Multiplayer | Отложен | Solo-first; session и protocol seams сохраняются |
 | Asset pipeline | Не начат | Первые assets — собственные схематичные placeholder-модели |
 | Desktop packaging | Отложен | Wails/Go после стабилизации browser client |
-| QA/agent harness | Проверен | Typecheck, build, Playwright E2E и screenshot review прошли |
+| QA/agent harness | Проверен | Core scenario, typecheck, build, Playwright E2E и screenshot review прошли |
 
 ## Глоссарий
 
@@ -44,6 +44,7 @@
 | EOB-007 | P1 | Вернуться к accounts, matchmaking, editor и mods после solo-версии |
 | EOB-008 | P1 | Зафиксировать лицензию и правила использования внешних ассетов |
 | EOB-009 | P1 | Решить, остаётся ли Go/Wails только упаковкой или также используется для dedicated server |
+| EOB-010 | P1 | Перед session layer выбрать replay strategy: command log + seed или restore из snapshot |
 
 ## Журнал работ
 
@@ -58,6 +59,7 @@
 | 2026-09-25 | Проверены typecheck, production build, E2E и визуальный screenshot; browser console очищен от deprecated warnings |
 | 2026-09-25 | Собран и сохранён подробный research brief по Burbenog TD в `Old-Burbenog/BURBENOG-TD-RESEARCH.md`; закрыт вопрос о точном референсе |
 | 2026-09-25 | План переведён на следующий этап: выбор mechanics subset и pure deterministic simulation core |
+| 2026-09-25 | Реализован и проверен pure simulation core; добавлены content validation, wave transitions и focused scenario checks |
 
 ## Структура проекта
 
@@ -70,14 +72,16 @@
 - `docs/ARCHITECTURE.md` — архитектура и границы модулей.
 - `docs/PLAN.md` — этапы разработки и критерии готовности.
 - `Old-Burbenog/BURBENOG-TD-RESEARCH.md` — исследовательский brief по оригинальной карте и рекомендации для ремейка.
+- `src/main.ts` — browser bootstrap и presentation entry point.
+- `src/game-core/` — pure deterministic simulation, content validation и training scenario.
+- `scripts/check-simulation.ts` — один runnable core check.
+- `tests/smoke.spec.ts` — browser E2E smoke test.
 
 Планируемая:
 
-- `src/client/` — Three.js client, input и presentation.
-- `src/game-core/` — pure simulation.
+- `src/client/` — выделенный Three.js client, input и presentation.
 - `src/server/` — sessions и transport.
 - `src/protocol/` — versioned network contract.
 - `content/` — карты, башни, враги и волны.
 - `assets/` — модели, текстуры и анимации.
-- `tests/` — unit, E2E и deterministic scenarios.
 - `tools/` — asset validation и agent utilities.

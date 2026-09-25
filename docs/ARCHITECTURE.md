@@ -42,6 +42,17 @@ Game Core получает команды, выполняет фиксирова
 - waves, objectives и win/lose;
 - server-owned random и fixed tick.
 
+Текущий simulation contract:
+
+- `dispatch(command)` принимает intent и возвращает accept/reason;
+- `step()` и `advance(ticks)` выполняют fixed tick;
+- `getSnapshot()` возвращает defensive presentation projection;
+- `drainEvents()` отдаёт transient события для animation/audio;
+- content проходит fail-fast validation до запуска match;
+- wave bounty и repair начисляются только при отсутствии leaks.
+
+Snapshot restore и command-log replay сознательно отложены до решения перед session layer.
+
 Не отвечает за:
 
 - модели, textures, lights и animation playback;

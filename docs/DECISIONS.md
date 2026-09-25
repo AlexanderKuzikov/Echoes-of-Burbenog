@@ -61,3 +61,13 @@
 **Альтернативы:** Повторить Warcraft III UI и art direction; сделать нейтральные grey-box prototypes; отказаться от визуального reference вообще.
 
 **Trade-off:** Меньше мгновенной узнаваемости на старте, но появляется пространство для собственного стиля и защищённая визуальная identity.
+
+## 2026-09-25: Pure deterministic core boundary
+
+**Контекст:** После browser bootstrap нужен первый gameplay-модуль, который можно проверять без DOM, Three.js и WebView, сохраняя возможность подключить его к client и будущему server.
+
+**Решение:** Реализовать `src/game-core/` как pure TypeScript module с commands, state, events, fixed tick, seeded RNG, wave transitions и fail-fast content validation. Snapshot сделать defensive presentation projection. Bounty/repair начислять только при отсутствии leaks; splash фильтровать по target tags и центрировать на цели; strongest active slow побеждает более слабый.
+
+**Альтернативы:** Начать gameplay внутри Three.js client; использовать client-side флаги вместо simulation state; ввести ECS или общую event bus до появления второй реализации.
+
+**Trade-off:** Core требует отдельного слоя content и сценариев, но даёт headless-проверяемость и сохраняет seam для будущей authoritative session.

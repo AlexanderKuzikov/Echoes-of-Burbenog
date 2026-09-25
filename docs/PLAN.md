@@ -142,4 +142,4 @@
 
 ## Следующий шаг
 
-Перейти к этапу 2: выбрать минимальный subset механик из research brief и собрать pure deterministic simulation core. Первый scenario должен проверять одну карту с небольшим числом маршрутов, одну волну, commands/state/events, fixed tick и seeded random; после этого подключить интерактивный placement и combat к уже проверенной browser-сцене.
+Перейти к этапу 3: подключить pure core к browser-сцене. Сначала связать snapshot с Three.js objects, затем добавить placement через build pads, запуск wave и combat presentation; после каждого изменения сохранять pure check, E2E и screenshot review.

@@ -10,7 +10,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "playwright test",
+    "test": "npm run test:core && playwright test",
+    "test:core": "tsx scripts/check-simulation.ts",
     "test:e2e": "playwright test",
     "typecheck": "tsc --noEmit"
   },
@@ -22,6 +23,7 @@
     "@types/node": "^26.6.2",
     "@types/three": "^0.186.0",
     "typescript": "^7.0.2",
+    "tsx": "^4.23.15",
     "vite": "^8.3.1"
   }
 }

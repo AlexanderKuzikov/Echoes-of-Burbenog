@@ -53,15 +53,15 @@ npm test
 |------|------------|--------|
 | Client | TypeScript + Three.js | planned |
 | Development | Vite | planned |
-| Simulation | TypeScript core | planned |
-| QA | Playwright | planned |
+| Simulation | TypeScript core | verified |
+| QA | Playwright + core check | verified |
 | Server | Node.js, затем при необходимости Go | phased |
 | Desktop | Wails + Go | deferred |
 | Assets | glTF/GLB | planned |
 
 ## Статус
 
-**v0.1.0-alpha** — browser bootstrap Three.js проверен через typecheck, production build, Playwright E2E и screenshot review; чистая gameplay simulation ещё не начата.
+**v0.1.0-alpha** — browser bootstrap и pure deterministic simulation core проверены через typecheck, production build, core scenario, Playwright E2E и screenshot review; client integration — следующий этап.
 
 ## Лицензия
 

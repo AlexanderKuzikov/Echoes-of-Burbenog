@@ -2,11 +2,11 @@
 
 ## Project
 
-Проект — оригинальная 3D Tower Defense игра с LLM-first рабочим процессом. Browser bootstrap уже существует; чистая gameplay simulation и content pipeline пока не начаты. Текущий product scope — solo; multiplayer пока только учитывать в архитектурных seams.
+Проект — оригинальная 3D Tower Defense игра с LLM-first рабочим процессом. Browser bootstrap и pure simulation core уже существуют; следующий шаг — подключить core к Three.js client. Текущий product scope — solo; multiplayer пока только учитывать в архитектурных seams.
 
 ## Commands
 
-- Кодовые команды bootstrap: `npm run dev`, `npm test`, `npm run typecheck`, `npm run build`, `npx playwright test`.
+- Кодовые команды bootstrap: `npm run dev`, `npm test`, `npm run test:core`, `npm run typecheck`, `npm run build`, `npx playwright test`.
 - `npm install` запускать только после отдельного разрешения владельца.
 - Для офлайн-проверки Playwright можно передать путь к установленному Chromium через `PLAYWRIGHT_EXECUTABLE_PATH`; путь не сохранять в проекте.
 - Для desktop проверять тот же frontend-сценарий отдельно в Wails/WebView2.
