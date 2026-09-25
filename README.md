@@ -35,6 +35,7 @@ npm run dev
 Отдельная проверка:
 
 ```bash
+npx playwright install chromium
 npm test
 ```
 
