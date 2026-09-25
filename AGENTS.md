@@ -16,6 +16,7 @@
 - Не изменять соседние проекты в `D:\GitHub`.
 - Не добавлять игровые фичи, зависимости или файлы за пределами согласованного этапа.
 - Не использовать секреты, токены и внешние credentials в коде или документации.
+- Не копировать Warcraft III/Burbenog assets, UI, map topology или silhouettes; использовать только извлечённые design principles.
 
 ## Architecture boundaries
 

@@ -18,7 +18,7 @@
 - **LLM-friendly tooling** — Vite, Playwright, structured state и deterministic scenarios.
 - **Модульная архитектура** — gameplay, presentation, content и networking развиваются независимо.
 - **Solo-first scope** — текущая разработка сфокусирована на одиночной игре; multiplayer остаётся совместимым будущим направлением.
-- **Качественная графика** — GLB/glTF asset pipeline, PBR, освещение и skeletal animation.
+- **Оригинальный visual identity** — собственные модели, арт, палитра и HUD; Burbenog/Warcraft III служат только референсами принципов, а не образцом для копирования.
 
 ## Быстрый старт
 

@@ -114,9 +114,11 @@ Wails — поздний desktop adapter: окно, fullscreen, settings, saves 
 
 References показывают Warcraft III/Burbenog-подачу: angled top-down camera, читаемые lanes и chokepoints, заметные build slots, плотный combat, selection outline, health bars и компактный HUD.
 
+- Это reference для gameplay readability, а не surface design для копирования.
+- Предварительный visual north-star — stylized 3D diorama с собственными models, materials, palette и HUD.
+- Мир должен занимать большую часть экрана; HUD — компактный и контекстный, а не копия панели Warcraft III.
 - Первые placeholder-модели должны иметь ясные silhouettes и цветовые роли, а не быть случайными grey boxes.
 - Эффекты не должны закрывать маршруты, selection и состояние башен.
-- HUD первого среза ограничен ресурсами, wave/status, build bar и selected-object panel.
 - Финальные models, textures и animation заменяют placeholders по asset contract, не меняя gameplay.
 
 ## LLM-friendly QA

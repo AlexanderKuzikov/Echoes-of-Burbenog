@@ -51,3 +51,13 @@
 **Альтернативы:** Сразу реализовывать PvP/co-op; использовать только плоские спрайты; копировать Warcraft III assets и map elements.
 
 **Trade-off:** Solo-first уменьшает стартовую сложность и ускоряет polishing, но часть будущего network design придётся подтверждать позднее.
+
+## 2026-09-25: Оригинальный visual identity
+
+**Контекст:** Burbenog/Warcraft III показывают желаемую плотность и читаемость, но проект не должен воспроизводить их appearance. Финальные модели, карта, палитра и HUD будут создаваться самостоятельно.
+
+**Решение:** Использовать references только для извлечения principles: angled top-down composition, readable lanes, build slots, selection feedback и масштаб боя. Визуальный north-star — самостоятельный stylized 3D diorama с компактным контекстным HUD и читаемыми placeholder-объектами. Не копировать Warcraft III/Burbenog textures, UI, silhouettes, map topology или icons.
+
+**Альтернативы:** Повторить Warcraft III UI и art direction; сделать нейтральные grey-box prototypes; отказаться от визуального reference вообще.
+
+**Trade-off:** Меньше мгновенной узнаваемости на старте, но появляется пространство для собственного стиля и защищённая визуальная identity.
