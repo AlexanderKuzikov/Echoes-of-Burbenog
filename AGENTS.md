@@ -6,8 +6,8 @@
 
 ## Commands
 
-- Сейчас кодовых команд нет: не запускать `npm install` и не создавать код без согласованного следующего шага.
-- После bootstrap ожидаются: `npm run dev`, `npm test`, `npm run typecheck`, `npm run build`, `npx playwright test`.
+- Кодовые команды bootstrap: `npm run dev`, `npm test`, `npm run typecheck`, `npm run build`, `npx playwright test`.
+- `npm install` запускать только после отдельного разрешения владельца.
 - Для desktop проверять тот же frontend-сценарий отдельно в Wails/WebView2.
 
 ## Scope

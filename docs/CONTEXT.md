@@ -10,13 +10,13 @@
 | Репозиторий | Создан | Приватный GitHub remote, ветка `main` синхронизирована; visibility не является требованием |
 | Документация | Базовая завершена | Созданы README, инструкции, архитектура, решения и план |
 | Целевая платформа | Зафиксирована | Windows 10/11; performance budgets уточняются |
-| Gameplay prototype | Не начат | Будет 3D-ready, сначала визуально плоский |
-| Client | Не начат | TypeScript + Three.js |
+| Gameplay prototype | Создан scaffold | 3D-ready сцена, schematic build pads и базовый HUD |
+| Client | Bootstrap готов к проверке | TypeScript + Three.js + Vite |
 | Simulation | Не начат | Чистый core с deterministic fixed tick |
 | Multiplayer | Отложен | Solo-first; session и protocol seams сохраняются |
 | Asset pipeline | Не начат | Первые assets — собственные схематичные placeholder-модели |
 | Desktop packaging | Отложен | Wails/Go после стабилизации browser client |
-| QA/agent harness | Не начат | Playwright, screenshots, structured state |
+| QA/agent harness | Scaffold готов | Playwright smoke test ожидает установки зависимостей |
 
 ## Глоссарий
 
@@ -54,6 +54,7 @@
 | 2026-09-25 | Добавлен базовый `.gitignore` для секретов и build/test-артефактов |
 | 2026-09-25 | Зафиксированы Windows 10/11, solo-first scope, schematic art и визуальные references Burbenog |
 | 2026-09-25 | Зафиксирован visual north-star: Burbenog/Warcraft III — reference principles, не clone; отчёт по механикам ожидается позже |
+| 2026-09-25 | Создан Three.js/Vite browser bootstrap со schematic сценой, HUD и Playwright smoke test |
 
 ## Структура проекта
 

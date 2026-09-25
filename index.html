@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#09131c">
+    <title>Echoes of Burbenog — First Contact</title>
+  </head>
+  <body>
+    <div id="app">
+      <main class="game-shell">
+        <header class="topbar">
+          <div class="brand-lockup">
+            <div class="brand-mark" aria-hidden="true"></div>
+            <div>
+              <p class="eyebrow">Echoes of Burbenog</p>
+              <h1 data-testid="game-title">First Contact</h1>
+            </div>
+          </div>
+          <div class="resource-strip" aria-label="Game resources">
+            <div class="resource-card">
+              <span class="resource-label">Aether</span>
+              <strong>120</strong>
+            </div>
+            <div class="resource-card">
+              <span class="resource-label">Integrity</span>
+              <strong>86%</strong>
+            </div>
+            <div class="resource-card resource-card--accent">
+              <span class="resource-label">Wave</span>
+              <strong data-testid="wave-status">03 / 12</strong>
+            </div>
+          </div>
+        </header>
+
+        <section class="viewport-shell" aria-label="Tactical viewport">
+          <div id="scene"></div>
+          <div class="viewport-vignette" aria-hidden="true"></div>
+          <div class="scene-caption">
+            <span class="caption-kicker">Sector 01 · Verdant Relay</span>
+            <strong>Schematic combat preview</strong>
+            <span>Own visual language / reference-inspired readability</span>
+          </div>
+          <div class="wave-chip">
+            <span class="pulse-dot"></span>
+            <span data-testid="scene-status">Scene online</span>
+          </div>
+          <div class="map-legend" aria-label="Map legend">
+            <span><i class="legend-mark legend-mark--path"></i>Route</span>
+            <span><i class="legend-mark legend-mark--build"></i>Build pad</span>
+            <span><i class="legend-mark legend-mark--threat"></i>Threat</span>
+          </div>
+          <div class="selection-card" data-testid="selection-card">
+            <span class="selection-kicker">Selected structure</span>
+            <strong>Arc Relay</strong>
+            <span>Range 4.2 · Pulse damage</span>
+          </div>
+        </section>
+
+        <footer class="command-dock">
+          <section class="dock-section build-section">
+            <div class="dock-heading">
+              <span>Build palette</span>
+              <small>Choose a schematic module</small>
+            </div>
+            <div class="build-list">
+              <button class="build-card is-selected" type="button" data-build="Pulse Spire" aria-pressed="true">
+                <span class="build-icon build-icon--spire"></span>
+                <span><strong>Pulse Spire</strong><small>Single target</small></span>
+              </button>
+              <button class="build-card" type="button" data-build="Grove Lens" aria-pressed="false">
+                <span class="build-icon build-icon--lens"></span>
+                <span><strong>Grove Lens</strong><small>Area control</small></span>
+              </button>
+              <button class="build-card" type="button" data-build="Frost Relay" aria-pressed="false">
+                <span class="build-icon build-icon--frost"></span>
+                <span><strong>Frost Relay</strong><small>Slow field</small></span>
+              </button>
+            </div>
+          </section>
+          <section class="dock-section status-section">
+            <span class="status-kicker">Tactical status</span>
+            <strong data-testid="selection-status">Pulse Spire ready</strong>
+            <span class="status-detail">Left click a build pad to place</span>
+          </section>
+          <section class="dock-section objective-section">
+            <span class="status-kicker">Current objective</span>
+            <strong>Hold the eastern gate</strong>
+            <span class="status-detail">Next contact in 00:18</span>
+          </section>
+        </footer>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
