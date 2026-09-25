@@ -60,7 +60,7 @@ npm test
 
 ## Статус
 
-**v0.1.0-alpha** — создан browser bootstrap Three.js, добавлены schematic scene, HUD и Playwright smoke test; установка и browser verification ожидают отдельного запуска.
+**v0.1.0-alpha** — browser bootstrap Three.js проверен через typecheck, production build, Playwright E2E и screenshot review; чистая gameplay simulation ещё не начата.
 
 ## Лицензия
 

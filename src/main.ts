@@ -30,7 +30,7 @@ const renderer = new THREE.WebGLRenderer({
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(sceneMount.clientWidth || 1, sceneMount.clientHeight || 1, false);
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.type = THREE.PCFShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.12;
@@ -304,10 +304,11 @@ const resize = () => {
 window.addEventListener('resize', resize);
 resize();
 
-const clock = new THREE.Clock();
+const timer = new THREE.Timer();
 let elapsed = 0;
-const renderFrame = () => {
-  const delta = Math.min(clock.getDelta(), 0.05);
+const renderFrame = (timestamp: number) => {
+  timer.update(timestamp);
+  const delta = Math.min(timer.getDelta(), 0.05);
   elapsed += delta;
   for (const [index, tower] of animatedTowers.entries()) {
     tower.group.rotation.y += delta * (0.34 + index * 0.08);
@@ -332,4 +333,4 @@ window.__ECHOES_DEBUG__ = {
   objectCount: scene.children.length,
   camera: 'orthographic',
 };
-renderFrame();
+requestAnimationFrame(renderFrame);

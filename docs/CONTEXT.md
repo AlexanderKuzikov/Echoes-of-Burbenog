@@ -1,22 +1,22 @@
 # Echoes of Burbenog — CONTEXT
 
-> Последнее обновление: 2026-09-25 16:59
+> Последнее обновление: 2026-09-25 19:05
 
 ## Статус
 
 | Компонент | Статус | Версия/Заметка |
 |-----------|--------|----------------|
-| Концепция | В работе | Получены визуальные references Burbenog/Warcraft III; ассеты не копируются |
+| Концепция | В работе | Получены визуальные и системные references Burbenog/Warcraft III; полный brief сохранён в Old-Burbenog; ассеты не копируются |
 | Репозиторий | Создан | Приватный GitHub remote, ветка `main` синхронизирована; visibility не является требованием |
 | Документация | Базовая завершена | Созданы README, инструкции, архитектура, решения и план |
 | Целевая платформа | Зафиксирована | Windows 10/11; performance budgets уточняются |
-| Gameplay prototype | Создан scaffold | 3D-ready сцена, schematic build pads и базовый HUD |
-| Client | Bootstrap готов к проверке | TypeScript + Three.js + Vite |
+| Gameplay prototype | Bootstrap проверен | 3D-ready сцена, schematic build pads и базовый HUD |
+| Client | Проверен | TypeScript + Three.js + Vite |
 | Simulation | Не начат | Чистый core с deterministic fixed tick |
 | Multiplayer | Отложен | Solo-first; session и protocol seams сохраняются |
 | Asset pipeline | Не начат | Первые assets — собственные схематичные placeholder-модели |
 | Desktop packaging | Отложен | Wails/Go после стабилизации browser client |
-| QA/agent harness | Scaffold готов | Playwright smoke test ожидает установки зависимостей |
+| QA/agent harness | Проверен | Typecheck, build, Playwright E2E и screenshot review прошли |
 
 ## Глоссарий
 
@@ -37,7 +37,7 @@
 | # | Priority | Описание |
 |---|----------|----------|
 | EOB-002 | P1 | Уточнить performance budgets для Windows 10/11 после выбора минимального тестового железа |
-| EOB-003 | P0 | Уточнить точный референс Burbenog и список желаемых механик |
+| EOB-003 | P1 | Выбрать приоритетный subset механик из research brief для первого прототипа |
 | EOB-004 | P1 | Multiplayer отложен; позже определить co-op/PvP и общую или раздельную экономику |
 | EOB-005 | P1 | Art direction и сеттинг отложены; первый прототип использует собственные схематичные assets и visual language |
 | EOB-006 | P1 | Выбрать инструмент подготовки собственных 3D-моделей и анимаций |
@@ -55,6 +55,8 @@
 | 2026-09-25 | Зафиксированы Windows 10/11, solo-first scope, schematic art и визуальные references Burbenog |
 | 2026-09-25 | Зафиксирован visual north-star: Burbenog/Warcraft III — reference principles, не clone; отчёт по механикам ожидается позже |
 | 2026-09-25 | Создан Three.js/Vite browser bootstrap со schematic сценой, HUD и Playwright smoke test |
+| 2026-09-25 | Проверены typecheck, production build, E2E и визуальный screenshot; browser console очищен от deprecated warnings |
+| 2026-09-25 | Собран и сохранён подробный research brief по Burbenog TD в `Old-Burbenog/BURBENOG-TD-RESEARCH.md`; закрыт вопрос о точном референсе |
 
 ## Структура проекта
 
@@ -66,6 +68,7 @@
 - `docs/DECISIONS.md` — append-only решения.
 - `docs/ARCHITECTURE.md` — архитектура и границы модулей.
 - `docs/PLAN.md` — этапы разработки и критерии готовности.
+- `Old-Burbenog/BURBENOG-TD-RESEARCH.md` — исследовательский brief по оригинальной карте и рекомендации для ремейка.
 
 Планируемая:
 
