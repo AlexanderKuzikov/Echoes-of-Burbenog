@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials*
+
+node_modules/
+dist/
+.vite/
+coverage/
+playwright-report/
+test-results/
+*.log
