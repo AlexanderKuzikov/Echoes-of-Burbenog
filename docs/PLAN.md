@@ -2,7 +2,7 @@
 
 > Веду я (штаб). Каждый пункт — одно будущее задание кодовой сессии: отдельно сдаётся, отдельно тестируется и отдельно откатывается.
 > Статусы: `[ ]` — не начато, `[x]` — принято штабом после проверки. Номера заданий сквозные.
-> Следующая задача: `0007` — сдана кодовой сессией, ждёт приёмки. Текущий этап: первый визуальный vertical slice.
+> Следующая задача: `0008`. Текущий этап: первый визуальный vertical slice.
 
 ## Принципы
 
@@ -20,7 +20,7 @@
 | 0. Repository и contracts | Принята | 0002 — visual identity и scope |
 | 1. Browser bootstrap | Принята | 0003 — Three.js scene и QA |
 | 2. Pure simulation core | Принята | 0004 — deterministic core |
-| 3. Первый визуальный vertical slice | В работе | 0006 — placement; следующая: 0007 |
+| 3. Первый визуальный vertical slice | В работе | 0007 — combat presentation; следующая: 0008 |
 | 4. Asset pipeline и 3D polish | Ожидает | — |
 | 5. Offline singleplayer | Ожидает | — |
 | 6. Local cooperative mode | Ожидает | — |
@@ -45,8 +45,8 @@
 
 - [x] 0005 — Связать `MatchSnapshot` с Three.js objects: синхронизировать core, build pads, towers и enemies (принято штабом: typecheck, build, core check, Playwright snapshot contract до victory, screenshots и независимый review; blockers — 0)
 - [x] 0006 — Сделать placement по build pads: выбор tower, command в core, стоимость и занятость pad (принято штабом: typecheck, build, test:core, 3 Playwright, реальные canvas-клики, screenshot и независимый review; blockers — 0; follow-up тестов — `EOB-012`)
-- [ ] 0007 — Подключить запуск волны, движение enemies, targeting, damage и win/lose к HUD (сдана кодовой сессией, на проверке: typecheck, build, test:core, 5 Playwright, victory и defeat реальными кликами, typed event counts, 3 screenshot; blockers не сообщены)
-- [ ] 0008 — Принять vertical slice: pause/resume, seed replay, core check, Playwright E2E и screenshot review (критерий: все проверки зелёные, визуальная композиция читаема)
+- [x] 0007 — Подключить запуск волны, движение enemies, targeting, damage и win/lose к HUD (принято штабом: typecheck, build, test:core, 5 Playwright, victory и defeat реальными кликами, typed event counts, 3 screenshot и независимый review; blockers — 0; follow-ups — `EOB-012`/`EOB-013`)
+- [ ] 0008 — Принять vertical slice: pause/resume, seed replay, core check, Playwright E2E и screenshot review (выдана кодовой сессии; критерий: все проверки зелёные, визуальная композиция читаема)
 
 ## Фаза 4 — Asset pipeline и 3D polish — ожидает
 

@@ -1,6 +1,6 @@
 # Echoes of Burbenog — CONTEXT
 
-> Последнее обновление: 2026-09-26 09:20
+> Последнее обновление: 2026-09-26 07:56
 
 ## Статус
 
@@ -49,6 +49,8 @@
 | EOB-010 | P1 | Перед session layer выбрать replay strategy: command log + seed или restore из snapshot |
 | EOB-011 | P2 | `favicon.ico` даёт 404 в browser console; отдельная задача на favicon или inline data-URL icon |
 | EOB-012 | P2 | Усилить E2E: content-bound selectors, entityId-сопоставление позиций, реальные route-счётчики, typed event и console assertions |
+| EOB-013 | P1 | Определить semantics preparation countdown: увеличить content `prepTicks`, заменить countdown на awaiting-start или изменить phase contract |
+| EOB-014 | P2 | Разнести монолитный `src/main.ts` на presentation/input/HUD модули после приёмки vertical slice |
 
 ## Журнал работ
 
@@ -73,6 +75,8 @@
 | 2026-09-26 | Штаб принял `0006` после независимой проверки; blockers — 0, screenshot-evidence уточнён, follow-up тестов оставлен в `EOB-012` |
 | 2026-09-26 | Выдано задание `0007` кодовой сессии: запуск волны и combat presentation |
 | 2026-09-26 | Кодовая сессия сдала `0007`: Start Wave через общий `dispatchCommand`, HUD phase/timer/hostiles/objective/result как проекция snapshot, combat log и transient feedback из `drainEvents`, typed `eventCounts` в debug seam; typecheck, build, test:core и 5 Playwright прошли, screenshots mid-wave/victory/defeat; задача на проверке штаба |
+| 2026-09-26 | Штаб принял `0007` после независимой проверки; blockers — 0, countdown evidence уточнён, follow-ups `EOB-012` и `EOB-013` |
+| 2026-09-26 | Выдано задание `0008` кодовой сессии: pause/resume, replay и приёмка vertical slice |
 
 ## Структура проекта
 
@@ -91,7 +95,8 @@
 - `tests/smoke.spec.ts` — browser E2E: bootstrap smoke, snapshot binding contract, placement contract, полный цикл до victory и defeat.
 - `docs/tasks/0005-client-snapshot-binding.md` — принятое задание.
 - `docs/tasks/0006-build-pad-placement.md` — принятое задание.
-- `docs/tasks/0007-wave-combat-presentation.md` — сданное задание, ждёт приёмки штабом.
+- `docs/tasks/0007-wave-combat-presentation.md` — принятое задание.
+- `docs/tasks/0008-vertical-slice-acceptance.md` — выданное задание для следующей кодовой сессии.
 
 Планируемая:
 

@@ -61,7 +61,7 @@ npm test
 
 ## Статус
 
-**v0.1.0-alpha** — browser bootstrap, pure deterministic core, snapshot projection, placement и combat presentation реализованы; срез проходит полный игровой цикл в браузере (build → Start Wave → бой → victory/defeat) и ждёт приёмки штабом. Следующий этап — приёмка среза: pause/resume, seed replay и regression.
+**v0.1.0-alpha** — browser bootstrap, pure deterministic core, snapshot projection, placement и combat presentation приняты; срез проходит полный игровой цикл в браузере. Следующий этап — pause/resume, seed replay и regression.
 
 ## Лицензия
 

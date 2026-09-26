@@ -1,9 +1,9 @@
 # 0007 — Подключить запуск волны и combat presentation
 
-> Статус: на проверке
+> Статус: принята
 > Приоритет: P0
 > Фаза: 3 — Первый визуальный vertical slice
-> Следующая приёмка: 0008
+> Следующая приёмка: закрыта; следующая задача `0008`
 
 ## Контекст
 
@@ -65,19 +65,6 @@ E2E должен использовать реальные click по pad и Sta
 
 ## Отчёт сессии
 
-После работы указать:
-
-- изменённые файлы;
-- deterministic scenario и фактические snapshot values;
-- команды и результат;
-- пути к screenshots;
-- что осталось за пределами 0007;
-- статус задачи: `на проверке` или `принята`.
-
-До приёмки задача остаётся `[ ]` в `docs/PLAN.md`.
-
-## Отчёт сессии
-
 ### Изменённые файлы
 
 - `index.html` — Start Wave button в dock, `data-phase` у viewport, блок Match phase
@@ -107,7 +94,7 @@ E2E victory (3 теста, реальные клики, без ручного и
 | Шаг | Действие | Ожидается | Получено |
 |-----|----------|-----------|----------|
 | 1 | три canvas-клика по pads | accept, 3 towers | `towerPlaced` × 3, gold 40, 3 tower-объекта на pads |
-| 2 | HUD до старта | preparation | `data-phase="preparation"`, `T-00:xx`, `Hostiles 0`, banner скрыт, button enabled |
+| 2 | HUD до старта | preparation | `data-phase="preparation"`, `T-00:00` (prep countdown уже истёк), `Hostiles 0`, banner скрыт, button enabled |
 | 3 | click Start Wave | `status = 'wave'` | `waveStarted` × 1, `W+00:00`, button disabled, feedback `Wave 1 started` |
 | 4 | первый spawn | enemies > 0, позиция растёт | `enemySpawned` × 5+, `snapshot.enemies[0].distance` и `x` меняются, projection == snapshot |
 | 5 | первая атака | `towerFired` > 0, health падает | у отслеживаемого врага `distance` вырос, `x` уменьшился, есть враг с `health < maxHealth` |
@@ -157,6 +144,16 @@ warnings и errors нет. Проверено временным прогоно�
 - `test-results/wave-combat-defeat.png` — `Core breached`, красная рамка и красные core-кольцо и
   кристалл, лог `Core hit · -1 integrity`, `Defeat`, `Breached`, integrity `0%`, Aether 220.
 
+## Независимая приёмка штабом
+
+- Проверен commit `03e22dd` и чистое рабочее дерево.
+- `npm run typecheck` — зелёный.
+- `npm run build` — зелёный; остаётся только известное предупреждение Vite о chunk > 500 kB из-за Three.js.
+- `npm test` — `npm run test:core` и 5 Playwright-тестов зелёные.
+- Screenshots mid-wave, victory и defeat проверены визуально: phase, hostiles, combat log, result banners и transient feedback читаются.
+- Code review: blockers — 0; task verdict — принята.
+- Follow-ups: `EOB-012` (E2E hardening) и `EOB-013` (preparation countdown semantics); terminal feedback и canvas reduced-motion guard входят в `0008`.
+
 ### За пределами 0007
 
 - Pause/resume, seed replay и reset — 0008.
@@ -171,4 +168,4 @@ warnings и errors нет. Проверено временным прогоно�
 
 ### Статус
 
-`на проверке`. `docs/PLAN.md` оставляет `0007` в `[ ]` до приёмки штабом; `0008` не выдаётся.
+`принята`. `docs/PLAN.md` переведён на следующую задачу `0008`.
