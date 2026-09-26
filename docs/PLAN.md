@@ -2,7 +2,7 @@
 
 > Веду я (штаб). Каждый пункт — одно будущее задание кодовой сессии: отдельно сдаётся, отдельно тестируется и отдельно откатывается.
 > Статусы: `[ ]` — не начато или сдано и ждёт приёмки, `[x]` — принято штабом после проверки. Номера заданий сквозные.
-> Следующая задача: `0009` — сдана кодовой сессией, ждёт приёмки. Текущий этап: фаза 3 закрыта, фаза 4 (asset pipeline) в работе.
+> Следующая задача: `0010` — не выдана, ждёт решения штаба. Текущий этап: фаза 4 в работе, `0009` принята.
 
 ## Принципы
 
@@ -21,7 +21,7 @@
 | 1. Browser bootstrap | Принята | 0003 — Three.js scene и QA |
 | 2. Pure simulation core | Принята | 0004 — deterministic core |
 | 3. Первый визуальный vertical slice | Принята | 0008 — pause/replay и приёмка slice; принят после точечного fix |
-| 4. Asset pipeline и 3D polish | В работе | 0009 — выдана |
+| 4. Asset pipeline и 3D polish | В работе | 0009 — asset pipeline и первая GLB-модель |
 | 5. Offline singleplayer | Ожидает | — |
 | 6. Local cooperative mode | Ожидает | — |
 | 7. PvP и mode-specific rules | Ожидает | — |
@@ -53,13 +53,14 @@
 
 ## Фаза 4 — Asset pipeline и 3D polish — в работе
 
-- [ ] 0009 — Собственный asset pipeline: генерация GLB, первая модель вместо placeholder (критерий: placeholder заменён моделью без изменения gameplay; `test:core` даёт те же tick 323 и gold 229)
+- [x] 0009 — Собственный asset pipeline: генерация GLB, первая модель вместо placeholder (критерий: placeholder заменён моделью без изменения gameplay; `test:core` даёт те же tick 323 и gold 229)
   - Выдана кодовой сессии. Решения штаба: модели производит zero-dep генератор `scripts/build-assets.ts`, а не DCC — `EOB-006` закрывается этим выбором; артефакты `public/models` генерируются и не коммитятся, `npm test` содержит шаг `test:assets`; реестр моделей — data-контракт `manifest.json`, не путь в коде; только несжатый GLB без текстур; skeletal animation вынесена в `0021`; PBR доводится IBL через `RoomEnvironment`.
   - PBR, тени, свет и tone mapping уже реализованы с `0003`, поэтому в задании только IBL и GLB-часть, а не переработка освещения.
   - Реестр номеров сквозной, но не монотонно-по-этапам: новые задачи получают следующий свободный номер и вставляются в нужную фазу, поэтому `0021` стоит в фазе 4.
   - Сдано кодовой сессией: `scripts/build-assets.ts` (генератор glTF 2.0 binary на голом Node, примитивы cylinder/cone/octahedron/torus, узлы `base`/`stem`/`roof`/`crystal`/`aura`, структурная самопроверка артефакта и детерминизм), `manifest.json` как data-контракт, `src/asset-registry.ts` без Three.js и DOM, two-phase подмена `pulse-spire` на месте, IBL через `RoomEnvironment` с `environmentIntensity = 0.5`, hooks `predev`/`prebuild` и шаг `test:assets` в `npm test`. Evidence: `typecheck` и `build` зелёные, `test:core` — те же `status victory, tick 323, gold 229`, 11 Playwright (46 s), два прогона `build:assets` побайтово идентичны, `git status` после `npm test` чистый, красные проги: сломанный magic, обрезанный chunk, индекс вне accessor, неверная версия контейнера, несовпадение длины — и красный E2E-прогон с отключённым asset status и с отключённой two-phase подменой. Core и content без изменений. Screenshots: `vertical-slice-asset-swap.png` плюс перечитанные `wave-combat-midwave/victory/defeat`, `vertical-slice-paused`, `vertical-slice-replay-reset`, `build-pad-placement`.
 - [ ] 0021 — Skeletal animation и animation states: `SkeletonUtils.clone` при restart/replay, `AnimationMixer`, reduced-motion для клипов (критерий: рестарт с анимированной башней не ломает скелет и не двоит анимацию)
-- [ ] 0010 — Добавить asset validator и performance budgets для минимального Windows 10/11 железа (критерий: несовместимый asset отклоняется)
+- [ ] 0010 — Asset validator и performance budgets для минимального Windows 10/11 железа: отклонять несовместимый ассет на клиенте и в сборке (критерий: несовместимый asset отклоняется)
+  - Обязательный scope из приёмки `0009`: сверять `bytes` и `contentHash` из манифеста при загрузке, отклонять `SkinnedMesh` и прочие узлы, которые `cloneModelNode` не умеет воспроизвести, вместо тихой деградации, и пересмотреть `scene.environmentIntensity = 0.5` — проба сейчас гасится глобально, а материалы, не authored под IBL, получают highlight без задуманной роли.
 
 ## Фаза 5 — Offline singleplayer — ожидает
 

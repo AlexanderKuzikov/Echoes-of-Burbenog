@@ -21,7 +21,7 @@
 | Preparation display | Правдивый | При `preparationTicksLeft === 0` phase clock показывает `Awaiting start`, а не замороженный `T-00:00`; решение по `EOB-013` принято в пользу display |
 | Reduced motion | Проверен | `prefers-reduced-motion: reduce` гасит burst-ring, наведение и вспышку башни, scale-пульс core и ambient-анимацию; позиции, health bars, материалы, combat log и HUD остаются читаемыми |
 | Multiplayer | Отложен | Solo-first; session и protocol seams сохраняются |
-| Asset pipeline | Сдан, на проверке | Собственный zero-dep генератор GLB (`scripts/build-assets.ts`) с самопроверкой и детерминизмом; `manifest.json` как data-контракт; `pulse-spire` заменяет placeholder через two-phase подмену; IBL через `RoomEnvironment`; артефакты `public/models` генерируются и не коммитятся. Решение по инструменту принято — `EOB-006` закрыт |
+| Asset pipeline | Проверен | Zero-dep генератор GLB с самопроверкой и детерминизмом, `manifest.json` как data-контракт, `pulse-spire` заменяет placeholder через two-phase подмену, IBL через `RoomEnvironment`; артефакты `public/models` генерируются и не коммитятся. Решение по инструменту принято — `EOB-006` закрыт |
 | Desktop packaging | Отложен | Wails/Go после стабилизации browser client |
 | QA/agent harness | Проверен | 11 Playwright-сценариев, включая two-phase подмену модели (gated на маршруте GLB) и fail-fast при недоступном манифесте; красные проги обоих подтверждены |
 
@@ -55,6 +55,7 @@
 | EOB-012 | P2 | Усилить E2E: content-bound selectors, entityId-сопоставление позиций, реальные route-счётчики, typed event и console assertions |
 | EOB-014 | P2 | Разнести монолитный `src/main.ts` на presentation/input/HUD модули после приёмки vertical slice |
 | EOB-016 | P2 | Asset contract валидирует только модели, собранные генератором; модели из внешнего редактора потребуют отдельного контура проверки и provenance |
+| EOB-017 | P2 | Замер fixed-step clock в E2E идёт сразу за fullPage screenshot: stall >500 ms даёт ложный fast-forward. Наблюдалось один раз на холодном прогоне; нужно унести замер от скриншота или считать по page-time |
 
 ## Журнал работ
 
@@ -88,6 +89,7 @@
 | 2026-09-26 | Штаб принял решение по инструменту подготовки моделей: собственная генерация GLB вместо DCC, модели как текст в репозитории, артефакты генерируются и не коммитятся, реестр моделей — data-контракт; `EOB-006` закрыт, `0021` добавлена в фазу 4 под skeletal animation |
 | 2026-09-26 | Выдано задание `0009` кодовой сессии: asset pipeline с первой GLB-моделью вместо placeholder |
 | 2026-09-26 | Кодовая сессия сдала `0009`: генератор glTF 2.0 binary на голом Node с примитивами, структурной самопроверкой (magic, chunks, accessor↔bufferView, диапазон индексов, winding против нормалей, emissive-узел, `bytes`/`contentHash`) и красными прогонами на битом файле; `manifest.json` как data-контракт и `src/asset-registry.ts` без Three.js и DOM; two-phase подмена `pulse-spire` на месте с сохранением entity, позиции и idle bob от базовой Y crystal; per-view копии материалов при общей геометрии реестра; fail-fast `data-assets="error"` с читаемой причиной и процедурным продолжением; IBL через `RoomEnvironment` с `environmentIntensity = 0.5`; typecheck, build, test:core (tick 323, gold 229) и 11 Playwright (46 s) зелёные, два прогона генератора побайтово идентичны, `git status` после `npm test` чистый; core и content без изменений; задача на проверке штаба |
+| 2026-09-26 | Штаб принял `0009` после независимой проверки: `typecheck`, `build`, `test:core` (tick 323, gold 229), `test:assets` (5 красных проверок) и 11 Playwright зелёные, 22/22 в нагрузочном прогоне; оба self-decision сессии (глобальный `environmentIntensity = 0.5` и per-view копии материалов) приняты — первое с пересмотром в `0010`, второе следует из решения клиента анимировать `crystal`; blockers — 0. Найдено и заведено: `EOB-017` (замер clock сразу за screenshot даёт ложный fast-forward, воспроизвелось один раз на холодном прогоне), в scope `0010` перенесены сверка `bytes`/`contentHash`, отклонение `SkinnedMesh` и пересмотр области действия IBL |
 
 ## Структура проекта
 
@@ -118,7 +120,7 @@
 - `src/server/` — sessions и transport.
 - `src/protocol/` — versioned network contract.
 - `content/` — карты, башни, враги и волны.
-- `assets/` — модели, текстуры и анимации.
+- `public/models/` — генерируемые GLB и `manifest.json`, под `.gitignore`; исходник моделей — `scripts/build-assets.ts`.
 - `tools/` — asset validation и agent utilities.
 
 Замечание по консоли: IBL добавил один драйверный warning `THREE.WebGLProgram: warning X4122 ... double precision` от компиляции PMREM-шейдера. Это не ошибка и не влияет на рендер; кладётся рядом с известными `[vite]` сообщениями и favicon 404 (`EOB-011`).
