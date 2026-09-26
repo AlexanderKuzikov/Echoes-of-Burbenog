@@ -727,6 +727,12 @@ const loadModel = async (entry: ModelManifestEntry): Promise<LoadedModel> => {
   return { entry, scene: gltf.scene, emissiveNode: entry.emissiveNode };
 };
 
+// The status line is a single line of viewport chrome, and two whole digests are exactly what
+// pushed the sector caption out of the way. Only the display is shortened: `assets.error` and
+// `assetBudgets.failures` keep the full reason, so an operator reading the seam still gets the
+// exact value to compare.
+const viewportRefusal = (reason: string): string => reason.replace(/(sha256:)([0-9a-f]{8})[0-9a-f]+/gi, '$1$2…');
+
 const applyAssetStatus = () => {
   const status = assetRegistry.status;
   viewportShell.dataset.assets = status;
@@ -741,7 +747,7 @@ const applyAssetStatus = () => {
     return;
   }
   if (status === 'error') {
-    statusLabel.textContent = `Scene online · model registry failed: ${assetRegistry.error ?? 'unknown reason'}`;
+    statusLabel.textContent = `Scene online · model registry failed: ${viewportRefusal(assetRegistry.error ?? 'unknown reason')}`;
     return;
   }
   statusLabel.textContent = 'Scene online · loading models';

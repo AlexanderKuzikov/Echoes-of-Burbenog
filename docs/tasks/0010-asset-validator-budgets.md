@@ -225,6 +225,73 @@ npm test            # test:core + test:assets + 13 Playwright, 13 passed (44.7s)
 
 Статус задачи: **на исправлении штабом**.
 
+## Отчёт кодовой сессии: точечный fix
+
+### Изменённые файлы
+
+| Файл | Почему |
+|------|--------|
+| `src/main.ts` | `viewportRefusal` — единственное правило сокращения digest для DOM; применяется только в ветке `status === 'error'` строки статуса. `assets.error` и `assetBudgets.failures` не тронуты, полная причина по-прежнему там |
+| `tests/smoke.spec.ts` | Новый негативный E2E на клиентский отказ по превышению бюджета, помощник `expectNoChromeOverlap` (подпись сектора против chip'а) и проверки сокращённого digest в существующем сценарии на `contentHash` |
+| `src/asset-budgets.ts` | Из английского комментария убрано слово «штаб»; числа, предикаты и тексты причин не тронуты |
+| `docs/ARCHITECTURE.md` | Записана граница охвата проверок: геометрические границы (высота, footprint, pivot Y) проверяет генератор на сборке, picking опирается на pad hit radius из content; и правило двух форм причины отказа (полная в seam, короткая в строке статуса) |
+| `docs/DECISIONS.md`, `docs/CONTEXT.md`, `docs/PLAN.md`, этот файл | Evidence фикс-раунда, решение и статус |
+
+`src/game-core/*` и content не менялись. Новых зависимостей нет, `package-lock.json` пуст в diff. Материалы, свет, `environmentIntensity`, exposure и tone mapping не тронуты.
+
+### Пункт 1: негативный E2E на клиентский отказ по превышению бюджета
+
+Сценарий `refuses a model whose manifest claims more triangles than the model budget allows`: маршрут `**/models/manifest.json` подменяет ответ, и единственное изменённое поле — `triangles = MODEL_BUDGET.triangles + 1` (5001 при лимите 5000). Число берётся из самого `src/asset-budgets.ts`, поэтому тест следует за лимитом, а не за его копией. Артефакт на диске не портится, манифест правится только на уровне ответа.
+
+Что проверяется:
+
+- `data-assets="error"`, статус называет модель, параметр, измеренное значение и лимит: `model registry failed` · `pulse-spire` · `triangles` · `budget allows 5000`;
+- `assets.error` содержит `pulse-spire: triangles is 5001`, та же причина в `assetBudgets.failures` и в `failures` конкретной модели;
+- порядок проверок доказывает, что отказался именно бюджет: `performed.bytes` = true, `performed.contentHash` = true, `performed.nodeTypes` = true, `performed.modelBudget` = true, при этом `contentHash` = `{ performed: true, matches: true }`, `nodeTypes` = `['Group', 'Mesh']`, а сумма по реестру (5001) меньше реестрового лимита — то есть ни `bytes`, ни hash, ни реестр не отказывали;
+- сцена играбельна: башня ставится кликом по pad, `source` = `procedural`, волна стартует (`waveStarted` = 1), `data-assets` остаётся `error`, unhandled rejection нет (`pageErrors` пуст);
+- подпись сектора не перекрыта (см. ниже).
+
+Красный прогон: с временно закомментированным клиентским `checkModelContract` в `loadModel` тест красный — `data-assets` = `ready` вместо `error` (Playwright, таймаут 5 s, `Expected: "error" / Received: "ready"`). До fix'а снятие этой проверки не ломало ни один тест; теперь ломает.
+
+### Пункт 2: короткий digest в статусной строке
+
+В DOM показывается `sha256:25b4af43…` и `sha256:00000000…` — первые 8 hex с многоточием, обе строки в одну. Полная причина осталась в `assets.error` и в `assetBudgets.failures`, что теперь и проверяется явно: в строке статуса `sha256:<64 hex>` отсутствует, в seam присутствует. Существующий сценарий на `contentHash` остался зелёным.
+
+Критерий «подпись сектора читается» закрыт измерением, а не просмотром: `expectNoChromeOverlap` берёт `getClientRects()` строк подписи сектора и сравнивает их с прямоугольником `.wave-chip`. Первая версия сравнивала bounding box элементов и дала ложное «перекрытие» — подпись сделана гридом, и боксы её строк шире слов в них (бокс строки 321 px при тексте ~213 px, chip начинается с 302 px); по глифам перекрытия нет.
+
+Screenshots:
+
+- `test-results/asset-refused-content-hash.png` — переснят: строка статуса в одну строку с короткими digest, `Schematic combat preview` и `OWN VISUAL LANGUAGE / REFERENCE-INSPIRED READABILITY` читаются полностью, волна идёт, башня процедурная;
+- `test-results/asset-refused-model-budget.png` — новый: `model registry failed: pulse-spire: triangles is 5001, budget allows 5000`, подпись сектора читается, волна идёт;
+- `test-results/asset-budgets-scene.png` — переснят, визуал не изменился: victory, `models ready (pulse-spire) · integrity checked`.
+
+### Без блокеров из замечаний штаба
+
+- Геометрические границы записаны в `docs/ARCHITECTURE.md`: счётчики манифест объявляет, поэтому клиент их проверяет; высота, `footprintRadius` и `pivotY` клиент не меряет и подменой ответа такой отказ не воспроизводится — их проверяет генератор на сборке, а в рантайме ту же границу держит picking по pad hit radius из content. Непроверяемый клиентский код не писался.
+- Слово «штаб» убрано из английского комментария в `src/asset-budgets.ts`; в `src/`, `scripts/` и `tests/` других вхождений нет.
+- Отказ по типу узла остаётся в scope `0012` (уже записан в `docs/PLAN.md`), Playwright ждёт ревизию 1243, прогон шёл через `PLAYWRIGHT_EXECUTABLE_PATH`, путь в проекте не сохранён.
+
+### Команды
+
+```text
+npm run typecheck   # зелёный
+npm run build       # зелёный
+npm run test:core   # status victory, tick 323, gold 229 — без изменений
+npm run test:assets # 8 красных проверок, assets: ok (--test), артефакт sha256:25b4af43…, 17996 байт, 580 треугольников
+npm test            # test:core + test:assets + 14 Playwright, 14 passed (45.1s)
+```
+
+Сцена в бюджетах на этом прогоне: 70/400 draw calls, 3 794/250 000 отрисованных треугольников, 7/32 shader-программы, 395 мс/1 500 мс загрузки, реестр 1/64 модели, 17 996/8 388 608 байт, 580/150 000 треугольников. `git status` после `npm test` чистый: четыре изменённых исходника и документация, артефакты и `test-results` под `.gitignore`.
+
+### Остаток
+
+- `0011` — область действия IBL; строка отказа в статусной строке остаётся одной строкой, отдельный блок ошибок не обсуждался.
+- `0012` — скелет и E2E на отказ по типу узла.
+- `EOB-002` — все числа бюджетов предварительные до выбора минимального тестового железа.
+- `EOB-016` — validator проверяет структуру, а не источник; геометрические границы закрываются на сборке, provenance для внешних редакторов не появился.
+
+Статус задачи: **на исправлении штабом** (fix сдан, ждёт приёмки).
+
 ## Независимая проверка штабом
 
 - Проверен commit `3f7d2b3`; `src/game-core/*` и `package-lock.json` в diff отсутствуют.

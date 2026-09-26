@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { createTrainingScenario } from '../src/game-core/index.ts';
 import type { SimulationEvent } from '../src/game-core/index.ts';
+import { MODEL_BUDGET } from '../src/asset-budgets.ts';
 
 const scenario = createTrainingScenario();
 const padById = new Map(scenario.map.buildPads.map((pad) => [pad.id, pad]));
@@ -225,6 +226,38 @@ const armDefendedWave = async (page: Page) => {
 // against a scene that is still swapping placeholders for loaded models.
 const waitForAssetsReady = (page: Page) =>
   expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'ready');
+
+// The refusal reason and the sector caption share one strip of viewport chrome, so "the sector
+// label is still readable" is measurable as "the chip covers none of its text". The comparison is
+// over the glyph rects of every caption line, because the caption is a grid and its boxes are
+// stretched wider than the words in them.
+const expectNoChromeOverlap = async (page: Page) => {
+  const chip = await page.locator('.wave-chip').boundingBox();
+  if (!chip) {
+    throw new Error('viewport chrome has no layout box');
+  }
+  const lines = await page.locator('.scene-caption > *').evaluateAll((nodes) =>
+    nodes.flatMap((node) => {
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      return [...range.getClientRects()].map((rect) => ({
+        text: node.textContent ?? '',
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+      }));
+    }),
+  );
+  const covered = lines.filter(
+    (line) =>
+      line.x < chip.x + chip.width &&
+      chip.x < line.x + line.width &&
+      line.y < chip.y + chip.height &&
+      chip.y < line.y + line.height,
+  );
+  expect(covered.map((line) => line.text)).toEqual([]);
+};
 
 const emptyEventCounts = (): Record<SimulationEvent['type'], number> => ({
   towerPlaced: 0,
@@ -1273,6 +1306,14 @@ test('refuses a model whose content hash the manifest does not match', async ({ 
   expect(failed.assets.models).toEqual([]);
   expect(failed.assets.error).toContain('pulse-spire');
   expect(failed.assets.error).toContain('content hash');
+  // The digest is shortened for the one line of viewport chrome and kept whole where an operator
+  // can act on it: the seam carries the exact value, the caption keeps its place on screen.
+  const displayed = await status.textContent();
+  expect(displayed).toMatch(/sha256:[0-9a-f]{8}…/i);
+  expect(displayed).not.toMatch(/[0-9a-f]{32,}/i);
+  expect(failed.assets.error).toContain(`sha256:${'0'.repeat(64)}`);
+  expect(failed.assetBudgets.failures.join(' ')).toContain(`sha256:${'0'.repeat(64)}`);
+  await expectNoChromeOverlap(page);
   // The seam separates "checked and mismatched" from "not checked at all", so a green runtime
   // can never be produced by skipping the comparison.
   const refused = failed.assetBudgets.checks.models[0];
@@ -1298,5 +1339,75 @@ test('refuses a model whose content hash the manifest does not match', async ({ 
   expect(started.snapshot.status).toBe('wave');
   await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'error');
   await page.screenshot({ path: 'test-results/asset-refused-content-hash.png', fullPage: true });
+  expect(pageErrors).toEqual([]);
+});
+
+test('refuses a model whose manifest claims more triangles than the model budget allows', async ({ page }) => {
+  test.setTimeout(60_000);
+  // Only one manifest field moves, and only on the way out. The client takes `bytes` and
+  // `triangles` from the manifest, so this is the cheapest honest way to reach the runtime budget
+  // refusal: the artifact on disk stays the one the build accepted.
+  await page.route('**/models/manifest.json', async (route) => {
+    const response = await route.fetch();
+    const manifest = (await response.json()) as { models: Array<{ triangles: number }> };
+    for (const model of manifest.models) {
+      model.triangles = MODEL_BUDGET.triangles + 1;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(manifest),
+    });
+  });
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+
+  await page.goto('/');
+  await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'error');
+
+  // The refusal names the model, the measured value and the limit it broke, because "the registry
+  // failed" is not something an operator can act on.
+  const status = page.getByTestId('scene-status');
+  await expect(status).toContainText('model registry failed');
+  await expect(status).toContainText('pulse-spire');
+  await expect(status).toContainText('triangles');
+  await expect(status).toContainText(`budget allows ${MODEL_BUDGET.triangles}`);
+
+  const failed = await readDebugOrThrow(page);
+  expect(failed.assets.status).toBe('error');
+  expect(failed.assets.models).toEqual([]);
+  expect(failed.assets.error).toContain(`pulse-spire: triangles is ${MODEL_BUDGET.triangles + 1}`);
+  // The budget refusal is the model's own reading, so it reaches both the per-model check and the
+  // flat failure list the seam publishes.
+  const refused = failed.assetBudgets.checks.models[0];
+  expect(refused?.modelId).toBe('pulse-spire');
+  expect(refused?.accepted).toBe(false);
+  expect(refused?.failures.join(' ')).toContain(`budget allows ${MODEL_BUDGET.triangles}`);
+  expect(failed.assetBudgets.failures.join(' ')).toContain('budget allows');
+  // A run of checks has to have happened for exactly one of them to have refused: bytes and hash
+  // passed, the tree was read, and the model budget is the one that said no.
+  expect(failed.assetBudgets.checks.performed.bytes).toBe(true);
+  expect(failed.assetBudgets.checks.performed.contentHash).toBe(true);
+  expect(failed.assetBudgets.checks.performed.nodeTypes).toBe(true);
+  expect(failed.assetBudgets.checks.performed.modelBudget).toBe(true);
+  expect(refused?.contentHash).toEqual({ performed: true, matches: true, skippedReason: null });
+  expect(refused?.nodeTypes).toEqual(['Group', 'Mesh']);
+  // A single model is far below the registry total, so the registry budgets are not what refused.
+  expect(failed.assetBudgets.checks.registry?.triangles).toBeLessThanOrEqual(
+    failed.assetBudgets.budgets.registry.triangles,
+  );
+
+  // The match stays playable on procedural placeholders, and the refusal stays local.
+  await page.getByRole('button', { name: 'Pulse Spire' }).click();
+  await clickPad(page, 'pad-east');
+  await page.getByTestId('start-wave').click();
+  const started = await readDebugOrThrow(page);
+  expect(started.snapshot.pads['pad-east']).toBe('pulse-spire');
+  expect(started.towerModels[0]?.source).toBe('procedural');
+  expect(started.snapshot.status).toBe('wave');
+  expect(started.eventCounts.waveStarted).toBe(1);
+  await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'error');
+  await expectNoChromeOverlap(page);
+  await page.screenshot({ path: 'test-results/asset-refused-model-budget.png', fullPage: true });
   expect(pageErrors).toEqual([]);
 });

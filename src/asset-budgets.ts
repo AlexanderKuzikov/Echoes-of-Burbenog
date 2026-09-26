@@ -5,9 +5,9 @@
 
 const MIB = 1024 * 1024;
 
-// The штаб set these numbers for an integrated graphics class (GT 1030 / UHD 620, WebGL2,
-// 8 GB RAM). They are provisional until the owner fixes the minimum test hardware (`EOB-002`),
-// and every consumer of this module inherits that provisional status.
+// These numbers were set for an integrated graphics class (GT 1030 / UHD 620, WebGL2, 8 GB RAM).
+// They are provisional until the owner fixes the minimum test hardware (`EOB-002`), and every
+// consumer of this module inherits that provisional status.
 export type ModelBudget = {
   triangles: number;
   bytes: number;
