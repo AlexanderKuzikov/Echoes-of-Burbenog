@@ -24,6 +24,8 @@ const killRewards = scenario.waves[0].groups.reduce((total, group) => {
 const victoryGold = placedGold + killRewards + scenario.rules.waveBounty;
 const costOf = (towerId: string) => scenario.towers.find((tower) => tower.id === towerId)?.cost ?? 0;
 
+type MatchReport = NonNullable<typeof window.__ECHOES_DEBUG__>['matchReports'][number];
+
 type DebugReading = {
   ready: boolean;
   objectCount: number;
@@ -42,6 +44,13 @@ type DebugReading = {
   padScreenPositions: Array<{ padId: string; x: number; y: number }>;
   eventCounts: Record<SimulationEvent['type'], number>;
   recentEvents: SimulationEvent[];
+  paused: boolean;
+  reducedMotion: boolean;
+  replaying: boolean;
+  replayIndex: number;
+  commandCount: number;
+  matchReports: MatchReport[];
+  motion: { reducedMotion: boolean; combatBursts: number; enemyBob: number };
   snapshot: NonNullable<typeof window.__ECHOES_DEBUG__>['snapshot'];
 };
 
@@ -59,10 +68,19 @@ type HudReading = {
   result: string | null;
   feedTypes: string[];
   startWaveDisabled: boolean;
+  pauseLabel: string | null;
+  pausePressed: string | null;
+  pauseDisabled: boolean;
+  restartDisabled: boolean;
+  stateState: string | null;
+  stateHidden: boolean | null;
+  viewportPaused: string | null;
+  viewportReplay: string | null;
   status: DebugReading['snapshot']['status'];
   snapshotGold: number;
   snapshotEnemyCount: number;
   snapshotIntegrity: string;
+  preparationTicksLeft: number;
 };
 
 const readDebug = (page: Page) =>
@@ -89,6 +107,13 @@ const readDebug = (page: Page) =>
       padScreenPositions: debug.padScreenPositions,
       eventCounts: debug.eventCounts,
       recentEvents: debug.recentEvents,
+      paused: debug.paused,
+      reducedMotion: debug.reducedMotion,
+      replaying: debug.replaying,
+      replayIndex: debug.replayIndex,
+      commandCount: debug.commandCount,
+      matchReports: debug.matchReports,
+      motion: debug.motion,
       snapshot: debug.snapshot,
     };
   });
@@ -105,7 +130,11 @@ const readHud = (page: Page) =>
     const attribute = (testId: string, name: string) =>
       document.querySelector(`[data-testid="${testId}"]`)?.getAttribute(name) ?? null;
     const banner = document.querySelector<HTMLElement>('[data-testid="match-result"]');
+    const badge = document.querySelector<HTMLElement>('[data-testid="state-badge"]');
     const startWave = document.querySelector<HTMLButtonElement>('[data-testid="start-wave"]');
+    const pause = document.querySelector<HTMLButtonElement>('[data-testid="pause-toggle"]');
+    const restart = document.querySelector<HTMLButtonElement>('[data-testid="restart-match"]');
+    const viewport = document.querySelector<HTMLElement>('[data-testid="viewport"]');
     const snapshot = debug.snapshot;
     const integrity = snapshot.maxCoreHealth > 0 ? Math.round((snapshot.coreHealth / snapshot.maxCoreHealth) * 100) : 0;
     return {
@@ -124,10 +153,19 @@ const readHud = (page: Page) =>
         (item as HTMLElement).dataset.eventType ?? '',
       ),
       startWaveDisabled: startWave?.disabled ?? false,
+      pauseLabel: text('pause-toggle'),
+      pausePressed: attribute('pause-toggle', 'aria-pressed'),
+      pauseDisabled: pause?.disabled ?? false,
+      restartDisabled: restart?.disabled ?? false,
+      stateState: badge?.dataset.state ?? null,
+      stateHidden: badge ? badge.hasAttribute('hidden') : null,
+      viewportPaused: viewport?.dataset.paused ?? null,
+      viewportReplay: viewport?.dataset.replay ?? null,
       status: snapshot.status,
       snapshotGold: snapshot.gold,
       snapshotEnemyCount: snapshot.enemies.length,
       snapshotIntegrity: `${integrity}%`,
+      preparationTicksLeft: snapshot.preparationTicksLeft,
     };
   });
 
@@ -154,6 +192,28 @@ const clickPad = async (page: Page, padId: string) => {
   }
   await page.mouse.click(box.x + point.x, box.y + point.y);
 };
+
+const armDefendedWave = async (page: Page) => {
+  await page.getByRole('button', { name: 'Pulse Spire' }).click();
+  await clickPad(page, 'pad-east');
+  await page.getByRole('button', { name: 'Grove Lens' }).click();
+  await clickPad(page, 'pad-north');
+  await page.getByRole('button', { name: 'Frost Relay' }).click();
+  await clickPad(page, 'pad-south');
+};
+
+const emptyEventCounts = (): Record<SimulationEvent['type'], number> => ({
+  towerPlaced: 0,
+  preparationEnded: 0,
+  waveStarted: 0,
+  enemySpawned: 0,
+  towerFired: 0,
+  enemyKilled: 0,
+  coreDamaged: 0,
+  waveCleared: 0,
+  victory: 0,
+  defeat: 0,
+});
 
 const expectProjectionMatchesSnapshot = (debug: DebugReading) => {
   expect(debug.rendered.pads).toBe(Object.keys(debug.snapshot.pads).length);
@@ -388,6 +448,8 @@ test('places the selected tower on a clicked build pad through the command contr
   // The pad rejection flash is a short cosmetic pulse; let the earlier one expire
   // so the screenshot only shows the flash of the final rejected pad.
   await page.waitForTimeout(900);
+  // By now the short prep window is over, so the phase clock reports the neutral state.
+  await expect(page.getByTestId('phase-timer')).toHaveText('Awaiting start');
   await page.screenshot({ path: 'test-results/build-pad-placement.png', fullPage: true });
 });
 
@@ -418,7 +480,10 @@ test('plays a defended wave from real clicks and reports victory from the snapsh
   expect(armedHud.phase).toBe('preparation');
   expect(armedHud.phaseLabel).toBe('Preparation');
   expect(armedHud.phaseTimerKind).toBe('preparation');
-  expect(armedHud.phaseTimer).toMatch(/^T-\d{2}:\d{2}$/);
+  // The content prep window is short: once it elapses the clock must read as a neutral
+  // awaiting-start label instead of a frozen `T-00:00` that looks like a live timer.
+  expect(armedHud.phaseTimer).toMatch(/^(T-\d{2}:\d{2}|Awaiting start)$/);
+  expect(armedHud.phaseTimer === 'Awaiting start').toBe(armedHud.preparationTicksLeft === 0);
   expect(armedHud.enemyCount).toBe('0');
   expect(armedHud.gold).toBe(String(placedGold));
   expect(armedHud.resultHidden).toBe(true);
@@ -581,5 +646,226 @@ test('reports defeat when an undefended wave reaches the core', async ({ page })
   await expect(page.getByTestId('match-result')).toHaveText('Core breached');
   await expect(page.getByTestId('viewport')).toHaveAttribute('data-phase', 'defeat');
 
+  // The result outranks the stale `Wave 1 started` command feedback.
+  await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'terminal');
+  await expect(page.getByTestId('command-feedback')).toHaveText('Core breached · restart replays the same seed');
+
   await page.screenshot({ path: 'test-results/wave-combat-defeat.png', fullPage: true });
+});
+
+test('freezes and resumes the fixed-step clock without drift', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto('/');
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+
+  await armDefendedWave(page);
+  await page.getByTestId('start-wave').click();
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.enemies.length ?? 0) > 0);
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.eventCounts.towerFired ?? 0) > 0);
+
+  await expect(page.getByTestId('pause-toggle')).toHaveText('Pause');
+  await expect(page.getByTestId('state-badge')).toBeHidden();
+  await page.getByTestId('pause-toggle').click();
+
+  const frozen = await readDebugOrThrow(page);
+  expect(frozen.paused).toBe(true);
+  expect(frozen.snapshot.status).toBe('wave');
+  expect(frozen.snapshot.waveTick).toBeGreaterThan(0);
+  expect(frozen.snapshot.enemies.length).toBeGreaterThan(0);
+  await expect(page.getByTestId('pause-toggle')).toHaveText('Resume');
+  await expect(page.getByTestId('pause-toggle')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByTestId('viewport')).toHaveAttribute('data-paused', 'true');
+  await expect(page.getByTestId('state-badge')).toBeVisible();
+  await expect(page.getByTestId('state-badge')).toHaveText('Paused');
+  const frozenHud = await readHud(page);
+  if (!frozenHud) {
+    throw new Error('hud contract missing');
+  }
+  expect(frozenHud.pauseDisabled).toBe(false);
+  expect(frozenHud?.pausePressed).toBe('true');
+  expect(frozenHud?.stateState).toBe('paused');
+  expect(frozenHud?.stateHidden).toBe(false);
+  expect(frozenHud?.viewportPaused).toBe('true');
+  expect(frozenHud?.viewportReplay).toBe('idle');
+  expect(frozenHud?.enemyCount).toBe(String(frozenHud.snapshotEnemyCount));
+  expectProjectionMatchesSnapshot(frozen);
+
+  await page.waitForTimeout(1200);
+
+  const held = await readDebugOrThrow(page);
+  expect(held.snapshot.tick).toBe(frozen.snapshot.tick);
+  expect(held.snapshot.waveTick).toBe(frozen.snapshot.waveTick);
+  expect(held.snapshot.rngState).toBe(frozen.snapshot.rngState);
+  expect(held.snapshot.enemies).toEqual(frozen.snapshot.enemies);
+  expect(held.enemyPositions).toEqual(frozen.enemyPositions);
+  expect(held.towerPositions).toEqual(frozen.towerPositions);
+  expect(held.rendered).toEqual(frozen.rendered);
+  expect(held.eventCounts).toEqual(frozen.eventCounts);
+  expect(held.recentEvents).toEqual(frozen.recentEvents);
+  expectProjectionMatchesSnapshot(held);
+
+  await page.screenshot({ path: 'test-results/vertical-slice-paused.png', fullPage: true });
+
+  await page.getByTestId('pause-toggle').click();
+  const resumed = await readDebugOrThrow(page);
+  expect(resumed.paused).toBe(false);
+  // The accumulator keeps its sub-tick remainder, so resuming must not fast-forward.
+  expect(resumed.snapshot.tick).toBeLessThanOrEqual(frozen.snapshot.tick + 6);
+  expect(resumed.snapshot.waveTick).toBeLessThanOrEqual(frozen.snapshot.waveTick + 6);
+  await expect(page.getByTestId('state-badge')).toBeHidden();
+  await expect(page.getByTestId('viewport')).toHaveAttribute('data-paused', 'false');
+  await expect(page.getByTestId('pause-toggle')).toHaveText('Pause');
+
+  await page.waitForTimeout(1000);
+
+  const running = await readDebugOrThrow(page);
+  const advanced = running.snapshot.tick - resumed.snapshot.tick;
+  // 20 ticks per second: the clock has to run on, but not faster than real time.
+  expect(advanced).toBeGreaterThanOrEqual(12);
+  expect(advanced).toBeLessThanOrEqual(30);
+  expect(running.snapshot.waveTick).toBeGreaterThan(frozen.snapshot.waveTick);
+  expect(running.enemyPositions).not.toEqual(frozen.enemyPositions);
+  expectProjectionMatchesSnapshot(running);
+});
+
+test('restarts from the same seed and replays the recorded command log', async ({ page }) => {
+  test.setTimeout(150_000);
+  await page.goto('/');
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+
+  await expect(page.getByTestId('restart-match')).toBeDisabled();
+  await armDefendedWave(page);
+  await expect(page.getByTestId('restart-match')).toBeEnabled();
+  await page.getByTestId('start-wave').click();
+  await page.waitForFunction(() => window.__ECHOES_DEBUG__?.snapshot.status === 'victory', undefined, {
+    timeout: 90_000,
+  });
+
+  const first = await readDebugOrThrow(page);
+  expect(first.matchReports).toHaveLength(1);
+  const firstReport = first.matchReports[0];
+  expect(firstReport?.status).toBe('victory');
+  expect(firstReport?.gold).toBe(victoryGold);
+  expect(firstReport?.leaksThisWave).toBe(0);
+  expect(firstReport?.coreHealth).toBe(scenario.map.coreHealth);
+  expect(firstReport?.eventCounts.waveStarted).toBe(1);
+  expect(firstReport?.eventCounts.victory).toBe(1);
+  expect(firstReport?.eventCounts.towerPlaced).toBe(placements.length);
+  expect(firstReport?.eventCounts.enemySpawned).toBe(waveEnemyCount);
+  expect(firstReport?.eventCounts.enemyKilled).toBe(waveEnemyCount);
+  expect(firstReport?.eventCounts.coreDamaged).toBe(0);
+  expect(first.commandCount).toBe(placements.length + 1);
+  await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'terminal');
+  await expect(page.getByTestId('command-feedback')).toHaveText('Sector secured · restart replays the same seed');
+
+  // Freeze the clock first so the restarted match can be inspected before the recorded
+  // commands start landing on their original ticks.
+  await page.getByTestId('pause-toggle').click();
+  await page.getByTestId('restart-match').click();
+
+  const restarted = await readDebugOrThrow(page);
+  expect(restarted.paused).toBe(true);
+  expect(restarted.replaying).toBe(true);
+  expect(restarted.replayIndex).toBe(0);
+  expect(restarted.commandCount).toBe(placements.length + 1);
+  expect(restarted.snapshot.status).toBe('preparation');
+  expect(restarted.snapshot.tick).toBe(0);
+  expect(restarted.snapshot.gold).toBe(startingGold);
+  expect(restarted.snapshot.rngState).toBe(scenario.seed);
+  expect(restarted.snapshot.towers).toEqual([]);
+  expect(restarted.snapshot.enemies).toEqual([]);
+  expect(restarted.rendered.towers).toBe(0);
+  expect(restarted.rendered.enemies).toBe(0);
+  expect(restarted.eventCounts).toEqual(emptyEventCounts());
+  expect(restarted.matchReports).toHaveLength(1);
+  expect(restarted.motion.combatBursts).toBe(0);
+  expectProjectionMatchesSnapshot(restarted);
+  await expect(page.getByTestId('match-result')).toBeHidden();
+  await expect(page.getByTestId('viewport')).toHaveAttribute('data-replay', 'running');
+  await expect(page.getByTestId('start-wave')).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Grove Lens' })).toBeDisabled();
+  await expect(page.getByTestId('command-feedback')).toHaveText('Replaying recorded commands');
+  await expect(page.getByTestId('gold-value')).toHaveText(String(startingGold));
+  await page.screenshot({ path: 'test-results/vertical-slice-replay-reset.png', fullPage: true });
+
+  await page.getByTestId('pause-toggle').click();
+  await page.waitForFunction(
+    (count) => (window.__ECHOES_DEBUG__?.snapshot.towers.length ?? 0) === count,
+    placements.length,
+    { timeout: 30_000 },
+  );
+
+  const replaying = await readDebugOrThrow(page);
+  expect(replaying.replaying).toBe(true);
+  expect(replaying.snapshot.pads['pad-east']).toBe('pulse-spire');
+  expect(replaying.snapshot.pads['pad-north']).toBe('grove-lens');
+  expect(replaying.snapshot.pads['pad-south']).toBe('frost-relay');
+  expect(replaying.eventCounts.towerPlaced).toBe(placements.length);
+  expectProjectionMatchesSnapshot(replaying);
+
+  await page.waitForFunction(() => window.__ECHOES_DEBUG__?.snapshot.status === 'victory', undefined, {
+    timeout: 90_000,
+  });
+
+  const second = await readDebugOrThrow(page);
+  expect(second.matchReports).toHaveLength(2);
+  expect(second.matchReports[1]).toEqual(firstReport);
+  expect(second.snapshot.gold).toBe(victoryGold);
+  expect(second.snapshot.status).toBe('victory');
+  expect(second.replaying).toBe(false);
+  expect(second.replayIndex).toBe(second.commandCount);
+  expect(second.paused).toBe(false);
+  expect(second.rendered.towers).toBe(placements.length);
+  expect(second.rendered.enemies).toBe(0);
+  await expect(page.getByTestId('viewport')).toHaveAttribute('data-replay', 'idle');
+  await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'terminal');
+  await expect(page.getByTestId('match-result')).toHaveText('Sector secured');
+  await page.screenshot({ path: 'test-results/vertical-slice-replay-victory.png', fullPage: true });
+});
+
+test('drops transient canvas effects under prefers-reduced-motion', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto('/');
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+
+  const initial = await readDebugOrThrow(page);
+  expect(initial.reducedMotion).toBe(true);
+  expect(initial.motion.reducedMotion).toBe(true);
+
+  await armDefendedWave(page);
+  await page.getByTestId('start-wave').click();
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.eventCounts.enemyKilled ?? 0) > 0, undefined, {
+    timeout: 60_000,
+  });
+
+  const fighting = await readDebugOrThrow(page);
+  expect(fighting.snapshot.status).toBe('wave');
+  expect(fighting.snapshot.enemies.length).toBeGreaterThan(0);
+  expect(fighting.eventCounts.towerFired).toBeGreaterThan(0);
+  // Kills happened, yet no burst rings, no aim snap and no idle drift are rendered.
+  expect(fighting.motion.combatBursts).toBe(0);
+  expect(fighting.motion.enemyBob).toBe(0);
+  expect(fighting.reducedMotion).toBe(true);
+  expectProjectionMatchesSnapshot(fighting);
+
+  await page.waitForTimeout(500);
+
+  const settled = await readDebugOrThrow(page);
+  expect(settled.motion.combatBursts).toBe(0);
+  expect(settled.motion.enemyBob).toBe(0);
+  expect(settled.eventCounts.enemyKilled).toBeGreaterThan(0);
+  // Static state stays readable: health bars and HUD still track the snapshot.
+  const hud = await readHud(page);
+  if (!hud) {
+    throw new Error('hud contract missing');
+  }
+  expect(hud.phase).toBe('wave');
+  expect(hud.enemyCount).toBe(String(hud.snapshotEnemyCount));
+  expect(hud.gold).toBe(String(hud.snapshotGold));
+  expect(hud.integrity).toBe(hud.snapshotIntegrity);
+  expect(hud.feedTypes).toContain('enemySpawned');
+
+
+  await page.screenshot({ path: 'test-results/vertical-slice-reduced-motion.png', fullPage: true });
 });

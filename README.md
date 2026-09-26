@@ -23,7 +23,7 @@
 
 ## Быстрый старт
 
-Репозиторий содержит первый вертикальный срез: 3D-ready сцена, schematic build pads, запуск волны, combat и HUD — всё поверх детерминированного pure core.
+Репозиторий содержит первый вертикальный срез: 3D-ready сцена, schematic build pads, запуск волны, combat, pause/resume, replay по seed и HUD — всё поверх детерминированного pure core.
 
 ```bash
 git clone https://github.com/AlexanderKuzikov/Echoes-of-Burbenog.git
@@ -61,7 +61,7 @@ npm test
 
 ## Статус
 
-**v0.1.0-alpha** — browser bootstrap, pure deterministic core, snapshot projection, placement и combat presentation приняты; срез проходит полный игровой цикл в браузере. Следующий этап — pause/resume, seed replay и regression.
+**v0.1.0-alpha** — browser bootstrap, pure deterministic core, snapshot projection, placement, combat presentation, pause/resume и seed replay реализованы и покрыты E2E; срез проходит полный игровой цикл в браузере. Далее — фаза 4: asset pipeline и 3D polish.
 
 ## Лицензия
 

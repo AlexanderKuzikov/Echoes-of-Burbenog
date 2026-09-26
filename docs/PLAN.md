@@ -1,8 +1,8 @@
 # Echoes of Burbenog — Plan (штаб)
 
 > Веду я (штаб). Каждый пункт — одно будущее задание кодовой сессии: отдельно сдаётся, отдельно тестируется и отдельно откатывается.
-> Статусы: `[ ]` — не начато, `[x]` — принято штабом после проверки. Номера заданий сквозные.
-> Следующая задача: `0008`. Текущий этап: первый визуальный vertical slice.
+> Статусы: `[ ]` — не начато или сдано и ждёт приёмки, `[x]` — принято штабом после проверки. Номера заданий сквозные.
+> Следующая задача: `0008` — сдана кодовой сессией, ждёт приёмки штаба. Текущий этап: первый визуальный vertical slice.
 
 ## Принципы
 
@@ -20,7 +20,7 @@
 | 0. Repository и contracts | Принята | 0002 — visual identity и scope |
 | 1. Browser bootstrap | Принята | 0003 — Three.js scene и QA |
 | 2. Pure simulation core | Принята | 0004 — deterministic core |
-| 3. Первый визуальный vertical slice | В работе | 0007 — combat presentation; следующая: 0008 |
+| 3. Первый визуальный vertical slice | В работе | 0008 — pause/replay и приёмка slice; сдана, ждёт приёмки |
 | 4. Asset pipeline и 3D polish | Ожидает | — |
 | 5. Offline singleplayer | Ожидает | — |
 | 6. Local cooperative mode | Ожидает | — |
@@ -47,6 +47,7 @@
 - [x] 0006 — Сделать placement по build pads: выбор tower, command в core, стоимость и занятость pad (принято штабом: typecheck, build, test:core, 3 Playwright, реальные canvas-клики, screenshot и независимый review; blockers — 0; follow-up тестов — `EOB-012`)
 - [x] 0007 — Подключить запуск волны, движение enemies, targeting, damage и win/lose к HUD (принято штабом: typecheck, build, test:core, 5 Playwright, victory и defeat реальными кликами, typed event counts, 3 screenshot и независимый review; blockers — 0; follow-ups — `EOB-012`/`EOB-013`)
 - [ ] 0008 — Принять vertical slice: pause/resume, seed replay, core check, Playwright E2E и screenshot review (выдана кодовой сессии; критерий: все проверки зелёные, визуальная композиция читаема)
+  - Сдана кодовой сессией, ждёт приёмки штаба. Evidence: pause замораживает `snapshot.tick` (47 → 47 за 1.2 s), enemy/tower positions, rendered-счётчики, `eventCounts` и `recentEvents`; resume стартует с того же тика (47) и даёт +21 тик за 1.0 s — без скачка и без stall. Restart пересоздаёт core из того же seed и проигрывает tick-упорядоченный command log; terminal-отчёты двух прогонов совпали полностью: `victory`, tick 304, gold 229, integrity 100%, leaks 0, `eventCounts` = towerPlaced 3 / waveStarted 1 / enemySpawned 16 / towerFired 65 / enemyKilled 16 / waveCleared 1 / victory 1 / coreDamaged 0. Terminal feedback перекрывает `Wave 1 started`; prep-clock показывает `Awaiting start` вместо `T-00:00`; `prefers-reduced-motion` даёт `combatBursts = 0` и `enemyBob = 0` при живых kills. Core без изменений, зависимостей нет. Команды: `npm run typecheck`, `npm run build`, `npm test` (core check + 8 Playwright) — зелёные, 3 повтора новых тестов — зелёные. Screenshots прочитаны: `test-results/vertical-slice-paused.png`, `test-results/vertical-slice-replay-reset.png`, `test-results/vertical-slice-replay-victory.png`, `test-results/vertical-slice-reduced-motion.png`, плюс прежние `wave-combat-midwave.png` / `wave-combat-victory.png` / `wave-combat-defeat.png`.
 
 ## Фаза 4 — Asset pipeline и 3D polish — ожидает
 

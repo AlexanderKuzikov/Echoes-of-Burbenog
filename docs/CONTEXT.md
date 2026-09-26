@@ -1,6 +1,6 @@
 # Echoes of Burbenog — CONTEXT
 
-> Последнее обновление: 2026-09-26 07:56
+> Последнее обновление: 2026-09-26 08:20
 
 ## Статус
 
@@ -12,13 +12,18 @@
 | Целевая платформа | Зафиксирована | Windows 10/11; performance budgets уточняются |
 | Gameplay prototype | Полный цикл в браузере | Bootstrap, pure simulation, placement по pads и combat presentation: запуск волны, движение, targeting, damage, victory/defeat в одном сценарии |
 | Client | Привязан к core | Один `Simulation` из training scenario; сцена, pads, path, core, towers и enemies строятся из `MatchSnapshot`; HUD (phase, timer, hostiles, objective, result) — проекция snapshot; ручных tower/enemy массивов нет |
-| Simulation | Проверен | Pure core: commands, state, events, fixed tick, seeded RNG, wave transitions; reason-коды `placeTower` и `startWave` закреплены pure check; значения victory не менялись (tick 323, gold 229) |
+| Simulation | Проверен | Pure core: commands, state, events, fixed tick, seeded RNG, wave transitions; reason-коды `placeTower` и `startWave` закреплены pure check; значения victory не менялись (tick 323, gold 229); в `0008` core не менялся |
 | Build palette | Content-bound | Кнопки хранят `data-tower-id`, selection идёт через `aria-pressed`; canvas-клик по pad шлёт `placeTower` тем же `dispatchCommand`, что и debug |
 | Combat presentation | Событийная | `drainEvents` даёт typed-счётчики, bounded combat log и transient 3D feedback: наведение и вспышка башни (`towerFired`), burst-ring (`enemyKilled`), flash core (`coreDamaged`); события не меняют state |
+| Pause/resume | Проверен | Pause — только control часов: `step()` не вызывается, accumulator хранит дробную часть, поэтому tick и позиции замерли, а resume продолжил с того же тика без fast-forward; команды при паузе доходят до core |
+| Replay | Client-side QA | Restart пересоздаёт core из того же seed и проигрывает tick-упорядоченный `commandLog` тем же `dispatchCommand`; player-команды на время replay заблокированы; persistence и network replay не входят |
+| Terminal feedback | Приоритет у результата | После victory/defeat строка статуса показывает результат и подсказку про restart, а не устаревший `Wave 1 started` |
+| Preparation display | Правдивый | При `preparationTicksLeft === 0` phase clock показывает `Awaiting start`, а не замороженный `T-00:00`; решение по `EOB-013` принято в пользу display |
+| Reduced motion | Проверен | `prefers-reduced-motion: reduce` гасит burst-ring, наведение и вспышку башни, scale-пульс core и ambient-анимацию; позиции, health bars, материалы, combat log и HUD остаются читаемыми |
 | Multiplayer | Отложен | Solo-first; session и protocol seams сохраняются |
 | Asset pipeline | Не начат | Первые assets — собственные схематичные placeholder-модели |
 | Desktop packaging | Отложен | Wails/Go после стабилизации browser client |
-| QA/agent harness | Проверен | Core scenario, typecheck, build, Playwright E2E из пяти сценариев, snapshot contract, placement contract, victory/defeat contract с typed events и screenshot review прошли |
+| QA/agent harness | Проверен | Core scenario, typecheck, build, Playwright E2E из восьми сценариев (bootstrap, snapshot, placement, victory, defeat, pause/resume, replay determinism, reduced motion), snapshot/placement/pause/replay contracts и screenshot review прошли |
 
 ## Глоссарий
 
@@ -46,10 +51,9 @@
 | EOB-007 | P1 | Вернуться к accounts, matchmaking, editor и mods после solo-версии |
 | EOB-008 | P1 | Зафиксировать лицензию и правила использования внешних ассетов |
 | EOB-009 | P1 | Решить, остаётся ли Go/Wails только упаковкой или также используется для dedicated server |
-| EOB-010 | P1 | Перед session layer выбрать replay strategy: command log + seed или restore из snapshot |
+| EOB-010 | P2 | Session-level replay (restore из snapshot против command log) не решён: client QA replay уже работает на command log + seed, но для server-сессии нужен отдельный выбор |
 | EOB-011 | P2 | `favicon.ico` даёт 404 в browser console; отдельная задача на favicon или inline data-URL icon |
 | EOB-012 | P2 | Усилить E2E: content-bound selectors, entityId-сопоставление позиций, реальные route-счётчики, typed event и console assertions |
-| EOB-013 | P1 | Определить semantics preparation countdown: увеличить content `prepTicks`, заменить countdown на awaiting-start или изменить phase contract |
 | EOB-014 | P2 | Разнести монолитный `src/main.ts` на presentation/input/HUD модули после приёмки vertical slice |
 
 ## Журнал работ
@@ -77,6 +81,7 @@
 | 2026-09-26 | Кодовая сессия сдала `0007`: Start Wave через общий `dispatchCommand`, HUD phase/timer/hostiles/objective/result как проекция snapshot, combat log и transient feedback из `drainEvents`, typed `eventCounts` в debug seam; typecheck, build, test:core и 5 Playwright прошли, screenshots mid-wave/victory/defeat; задача на проверке штаба |
 | 2026-09-26 | Штаб принял `0007` после независимой проверки; blockers — 0, countdown evidence уточнён, follow-ups `EOB-012` и `EOB-013` |
 | 2026-09-26 | Выдано задание `0008` кодовой сессии: pause/resume, replay и приёмка vertical slice |
+| 2026-09-26 | Кодовая сессия сдала `0008`: Pause как control часов без fast-forward и drift, Restart с replay tick-упорядоченного command log по тому же seed, terminal feedback с приоритетом над command feedback, `Awaiting start` вместо `T-00:00`, `prefers-reduced-motion` без transient-эффектов; typecheck, build, test:core и 8 Playwright прошли, два terminal-отчёта прогона и replay совпали (victory, tick 304, gold 229); screenshots paused/replay/reduced-motion прочитаны; core без изменений; задача на проверке штаба |
 
 ## Структура проекта
 
@@ -89,14 +94,14 @@
 - `docs/ARCHITECTURE.md` — архитектура и границы модулей.
 - `docs/PLAN.md` — этапы разработки и критерии готовности.
 - `Old-Burbenog/BURBENOG-TD-RESEARCH.md` — исследовательский brief по оригинальной карте и рекомендации для ремейка.
-- `src/main.ts` — browser bootstrap, presentation entry point, snapshot projection, build palette, pad picking, запуск волны и combat presentation.
+- `src/main.ts` — browser bootstrap, presentation entry point, snapshot projection, build palette, pad picking, запуск волны, combat presentation, pause/resume, replay по command log и reduced-motion guard.
 - `src/game-core/` — pure deterministic simulation, content validation и training scenario.
 - `scripts/check-simulation.ts` — один runnable core check.
-- `tests/smoke.spec.ts` — browser E2E: bootstrap smoke, snapshot binding contract, placement contract, полный цикл до victory и defeat.
+- `tests/smoke.spec.ts` — browser E2E: bootstrap smoke, snapshot binding contract, placement contract, полный цикл до victory и defeat, pause/resume без drift, replay determinism, prefers-reduced-motion.
 - `docs/tasks/0005-client-snapshot-binding.md` — принятое задание.
 - `docs/tasks/0006-build-pad-placement.md` — принятое задание.
 - `docs/tasks/0007-wave-combat-presentation.md` — принятое задание.
-- `docs/tasks/0008-vertical-slice-acceptance.md` — выданное задание для следующей кодовой сессии.
+- `docs/tasks/0008-vertical-slice-acceptance.md` — сданное задание, ждёт приёмки штаба.
 
 Планируемая:
 

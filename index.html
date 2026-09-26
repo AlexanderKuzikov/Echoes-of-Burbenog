@@ -33,7 +33,7 @@
           </div>
         </header>
 
-        <section class="viewport-shell" aria-label="Tactical viewport" data-testid="viewport" data-phase="preparation">
+        <section class="viewport-shell" aria-label="Tactical viewport" data-testid="viewport" data-phase="preparation" data-paused="false" data-replay="idle">
           <div id="scene"></div>
           <div class="viewport-vignette" aria-hidden="true"></div>
           <div class="scene-caption">
@@ -46,6 +46,7 @@
             <span data-testid="scene-status">Scene online</span>
           </div>
           <div class="result-banner" data-testid="match-result" data-result="none" role="status" hidden>Sector secured</div>
+          <div class="state-badge" data-testid="state-badge" data-state="idle" role="status" hidden>Paused</div>
           <ul class="combat-log" data-testid="event-feed" aria-label="Combat log"></ul>
           <div class="map-legend" aria-label="Map legend">
             <span><i class="legend-mark legend-mark--path"></i>Route</span>
@@ -96,10 +97,28 @@
               <strong data-testid="match-phase" data-phase="preparation">Preparation</strong>
             </div>
             <div class="wave-metrics">
-              <span class="wave-clock" data-testid="phase-timer" data-kind="preparation">T-00:00</span>
+              <span class="wave-clock" data-testid="phase-timer" data-kind="preparation">Awaiting start</span>
               <span class="wave-threat">Hostiles <b data-testid="enemy-count">0</b></span>
             </div>
-            <button class="wave-button" type="button" data-testid="start-wave">Start Wave</button>
+            <div class="wave-actions">
+              <button class="wave-button" type="button" data-testid="start-wave">Start Wave</button>
+              <div class="wave-controls">
+                <button
+                  class="wave-button wave-button--ghost"
+                  type="button"
+                  data-testid="pause-toggle"
+                  aria-pressed="false"
+                  title="Freeze the fixed-step clock; commands still apply"
+                >Pause</button>
+                <button
+                  class="wave-button wave-button--ghost"
+                  type="button"
+                  data-testid="restart-match"
+                  title="Restart from the same seed and replay the recorded commands"
+                  disabled
+                >Restart</button>
+              </div>
+            </div>
           </section>
         </footer>
       </main>

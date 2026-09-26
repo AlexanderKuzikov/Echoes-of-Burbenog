@@ -89,7 +89,8 @@ button {
 .status-detail,
 .scene-caption span,
 .map-legend,
-.wave-chip {
+.wave-chip,
+.state-badge {
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -189,6 +190,15 @@ h1 {
   box-shadow: 0 22px 60px rgba(0, 0, 0, 0.26), inset 0 0 48px rgba(228, 108, 98, 0.16);
 }
 
+.viewport-shell[data-paused="true"] {
+  border-color: rgba(255, 197, 107, 0.5);
+  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.26), inset 0 0 40px rgba(255, 197, 107, 0.1);
+}
+
+.viewport-shell[data-paused="true"] .pulse-dot {
+  animation: none;
+}
+
 .viewport-shell[data-phase="wave"] .pulse-dot {
   background: #ffc56b;
   box-shadow: 0 0 0 4px rgba(255, 197, 107, 0.14), 0 0 14px #ffc56b;
@@ -246,6 +256,31 @@ h1 {
 .result-banner[data-result="defeat"] {
   border-color: rgba(228, 108, 98, 0.6);
   color: #ffb3a7;
+}
+
+.state-badge {
+  position: absolute;
+  z-index: 2;
+  bottom: 22px;
+  left: 50%;
+  padding: 9px 18px;
+  border: 1px solid rgba(255, 197, 107, 0.45);
+  border-radius: 999px;
+  background: rgba(7, 20, 27, 0.84);
+  color: #ffe2ae;
+  font-size: 0.6rem;
+  font-weight: 700;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.state-badge[hidden] {
+  display: none;
+}
+
+.state-badge[data-state="replay"] {
+  border-color: rgba(110, 226, 207, 0.45);
+  color: #c7e7df;
 }
 
 .combat-log {
@@ -459,6 +494,11 @@ h1 {
   color: #ff9a8c;
 }
 
+.status-detail[data-feedback="terminal"] {
+  color: #74e0b4;
+  font-weight: 700;
+}
+
 .build-list {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -497,6 +537,12 @@ h1 {
 .build-card[aria-pressed="false"]:hover,
 .build-card[aria-pressed="false"]:focus-visible {
   opacity: 1;
+}
+
+.build-card:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
 }
 
 .build-card > span:last-child {
@@ -580,6 +626,17 @@ h1 {
   font-size: 0.58rem;
 }
 
+.wave-actions {
+  display: grid;
+  gap: 6px;
+}
+
+.wave-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
 .wave-clock {
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.06em;
@@ -619,6 +676,20 @@ h1 {
   color: #6d8688;
   cursor: not-allowed;
   transform: none;
+}
+
+.wave-button--ghost {
+  border-color: rgba(143, 184, 184, 0.24);
+  background: rgba(9, 24, 31, 0.62);
+  color: #bcd6d2;
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+}
+
+.wave-button--ghost[aria-pressed="true"] {
+  border-color: rgba(255, 197, 107, 0.55);
+  background: rgba(48, 38, 28, 0.72);
+  color: #ffe2ae;
 }
 
 .status-section strong,

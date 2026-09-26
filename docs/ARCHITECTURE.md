@@ -51,7 +51,7 @@ Game Core получает команды, выполняет фиксирова
 - content проходит fail-fast validation до запуска match;
 - wave bounty и repair начисляются только при отсутствии leaks.
 
-Snapshot restore и command-log replay сознательно отложены до решения перед session layer.
+Snapshot restore и command-log replay в core сознательно отложены до решения перед session layer. Client-side QA replay мага существует только в presentation-слое и core не меняет.
 
 Не отвечает за:
 
@@ -75,11 +75,17 @@ Snapshot restore и command-log replay сознательно отложены �
 
 - Client держит один локальный `Simulation` и тикает его fixed-step accumulator, который накапливает реальное время в `requestAnimationFrame`; core получает только целые тики.
 - `MatchSnapshot` — единственный источник presentation state. Towers и enemies — presentation-объекты, адресуемые по `entityId`; они создаются, обновляются и удаляются вместе с snapshot.
-- HUD (phase, phase clock, enemy count, objective, result) — проекция snapshot. DOM не считает значения сам и дублирует счётчики; `data-phase` и `data-kind` зеркалят `snapshot.status` как проверяемый contract.
+- HUD (phase, phase clock, enemy count, objective, result) — проекция snapshot. DOM не считает значения сам и не дублирует счётчики; `data-phase`, `data-kind`, `data-paused` и `data-replay` зеркалят `snapshot.status` и client clock state как проверяемый contract.
+- Preparation clock показывает `Awaiting start`, когда `preparationTicksLeft === 0`: content prep-окно короткое, и замороженный `T-00:00` читался как живой таймер.
+- Pause — только control часов клиента: `step()` не вызывается, accumulator сохраняет дробную часть, поэтому resume продолжает с того же тика без fast-forward и drift. Commands при паузе продолжают доходить до core.
+- Restart — client-side QA replay: новый `Simulation` из того же `config` плюс tick-упорядоченный `commandLog`, который проигрывается тем же `dispatchCommand` на исходных тиках. Пока replay идёт, player-команды заблокированы. Persistence и network replay в это не входят.
+- Каждый terminal-матч пишет один `matchReport` (status, tick, gold, integrity, leaks, `eventCounts`), поэтому повторный прогон сравнивается с исходным напрямую.
+- Terminal feedback имеет приоритет над command feedback: после victory/defeat строка статуса описывает результат, а не последнюю команду.
 - Events из `drainEvents` — только transient presentation: typed-счётчики, bounded combat log, вспышка и наведение башни, burst-ring убийства, flash core. События не меняют state и не используются как источник значений.
+- `prefers-reduced-motion: reduce` отключает transient-эффекты и ambient-анимацию в canvas, сохраняя статичное читаемое состояние из snapshot.
 - Command events потребляются в той же task, что и сам command, поэтому feedback и счётчики не отстают от ввода на кадр.
 - Позднее источник snapshots заменяется на session, а projection остаётся прежней.
-- `window.__ECHOES_DEBUG__` — QA seam для browser E2E: snapshot, rendered-счётчики, позиции, screen-координаты build pads, выбранный tower, feedback, `eventCounts` по типам, `recentEvents` и dispatch. Это не gameplay API.
+- `window.__ECHOES_DEBUG__` — QA seam для browser E2E: snapshot, rendered-счётчики, позиции, screen-координаты build pads, выбранный tower, feedback, `eventCounts` по типам, `recentEvents`, clock/replay state, `matchReports`, `motion` и dispatch. Это не gameplay API.
 
 ### Server и Session
 

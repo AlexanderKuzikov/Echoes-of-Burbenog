@@ -10,6 +10,20 @@ type RenderCounters = {
   routeSegments: number;
 };
 
+type CommandLogEntry = {
+  tick: number;
+  command: Command;
+};
+
+type MatchReport = {
+  status: MatchStatus;
+  tick: number;
+  gold: number;
+  coreHealth: number;
+  leaksThisWave: number;
+  eventCounts: Record<SimulationEvent['type'], number>;
+};
+
 type DebugState = {
   ready: boolean;
   renderer: string;
@@ -32,9 +46,16 @@ type DebugState = {
   readonly padScreenPositions: Array<{ padId: string; x: number; y: number }>;
   readonly eventCounts: Record<SimulationEvent['type'], number>;
   readonly recentEvents: SimulationEvent[];
+  readonly paused: boolean;
+  readonly reducedMotion: boolean;
+  readonly replaying: boolean;
+  readonly replayIndex: number;
+  readonly commandCount: number;
+  readonly matchReports: MatchReport[];
+  readonly motion: { reducedMotion: boolean; combatBursts: number; enemyBob: number };
 };
 
-type FeedbackState = 'idle' | 'accepted' | 'rejected';
+type FeedbackState = 'idle' | 'accepted' | 'rejected' | 'terminal';
 
 type CombatBurst = {
   mesh: THREE.Mesh;
@@ -97,7 +118,10 @@ const enemyCount = document.querySelector<HTMLElement>('[data-testid="enemy-coun
 const objectiveDetail = document.querySelector<HTMLElement>('[data-testid="objective-detail"]');
 const eventFeed = document.querySelector<HTMLUListElement>('[data-testid="event-feed"]');
 const resultBanner = document.querySelector<HTMLElement>('[data-testid="match-result"]');
+const stateBadge = document.querySelector<HTMLElement>('[data-testid="state-badge"]');
 const startWaveButton = document.querySelector<HTMLButtonElement>('[data-testid="start-wave"]');
+const pauseToggle = document.querySelector<HTMLButtonElement>('[data-testid="pause-toggle"]');
+const restartButton = document.querySelector<HTMLButtonElement>('[data-testid="restart-match"]');
 
 if (
   !sceneMount ||
@@ -116,18 +140,29 @@ if (
   !objectiveDetail ||
   !eventFeed ||
   !resultBanner ||
-  !startWaveButton
+  !stateBadge ||
+  !startWaveButton ||
+  !pauseToggle ||
+  !restartButton
 ) {
   throw new Error('Bootstrap DOM is incomplete');
 }
 
 const config = createTrainingScenario();
-const simulation = createSimulation(config);
+let simulation = createSimulation(config);
 const padDefinitions = new Map(config.map.buildPads.map((pad) => [pad.id, pad]));
 const towerDefinitions = new Map(config.towers.map((tower) => [tower.id, tower]));
 const enemyDefinitions = new Map(config.enemies.map((enemy) => [enemy.id, enemy]));
 const waveCount = config.waves.length;
 const STEP_SECONDS = 1 / TICK_RATE;
+const reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+let reducedMotion = reducedMotionQuery.matches;
+let paused = false;
+let replaying = false;
+let replayIndex = 0;
+let terminalReported = false;
+const commandLog: CommandLogEntry[] = [];
+const matchReports: MatchReport[] = [];
 
 const renderer = new THREE.WebGLRenderer({
   antialias: true,
@@ -531,6 +566,7 @@ const RECENT_EVENT_LIMIT = 16;
 const MAX_COMBAT_BURSTS = 14;
 
 let elapsed = 0;
+let enemyBobOffset = 0;
 
 const refreshPadStyle = (padView: PadView) => {
   const flashing = elapsed < padView.errorUntil;
@@ -564,7 +600,9 @@ const formatClock = (ticks: number): string => {
 
 const phaseTimerText = (state: MatchSnapshot): string => {
   if (state.status === 'preparation') {
-    return `T-${formatClock(state.preparationTicksLeft)}`;
+    // The content prep window is short, so an elapsed countdown is shown as a neutral
+    // awaiting-start label instead of a frozen `T-00:00` that reads as a live timer.
+    return state.preparationTicksLeft > 0 ? `T-${formatClock(state.preparationTicksLeft)}` : 'Awaiting start';
   }
   if (state.status === 'wave') {
     return `W+${formatClock(state.waveTick)}`;
@@ -589,6 +627,11 @@ let coreDefeated = false;
 let coreDamagedUntil = 0;
 let snapshot = simulation.getSnapshot();
 
+const terminalFeedbackLabels: Record<'victory' | 'defeat', string> = {
+  victory: 'Sector secured · restart replays the same seed',
+  defeat: 'Core breached · restart replays the same seed',
+};
+
 const syncHud = () => {
   goldValue.textContent = String(snapshot.gold);
   const integrity = snapshot.maxCoreHealth > 0 ? snapshot.coreHealth / snapshot.maxCoreHealth : 0;
@@ -601,11 +644,33 @@ const syncHud = () => {
   phaseTimer.textContent = phaseTimerText(snapshot);
   enemyCount.textContent = String(snapshot.enemies.length);
   objectiveDetail.textContent = objectiveSummary(snapshot);
-  startWaveButton.disabled = snapshot.status !== 'preparation';
+  startWaveButton.disabled = snapshot.status !== 'preparation' || replaying;
+  restartButton.disabled = commandLog.length === 0;
+  pauseToggle.textContent = paused ? 'Resume' : 'Pause';
+  pauseToggle.setAttribute('aria-pressed', String(paused));
+  viewportShell.dataset.paused = String(paused);
+  viewportShell.dataset.replay = replaying ? 'running' : 'idle';
+  stateBadge.dataset.state = replaying ? 'replay' : paused ? 'paused' : 'idle';
+  if (replaying) {
+    stateBadge.textContent = `Replay · ${replayIndex} / ${commandLog.length} commands`;
+    stateBadge.hidden = false;
+  } else if (paused) {
+    stateBadge.textContent = 'Paused';
+    stateBadge.hidden = false;
+  } else {
+    stateBadge.hidden = true;
+  }
+  for (const option of buildOptions) {
+    option.button.disabled = replaying;
+  }
   if (snapshot.status === 'victory' || snapshot.status === 'defeat') {
     resultBanner.hidden = false;
     resultBanner.dataset.result = snapshot.status;
     resultBanner.textContent = resultLabels[snapshot.status];
+    // The terminal result outranks whatever command feedback was still on screen.
+    if (feedbackState !== 'terminal') {
+      setFeedback('terminal', terminalFeedbackLabels[snapshot.status]);
+    }
   } else {
     resultBanner.hidden = true;
     resultBanner.dataset.result = 'none';
@@ -682,6 +747,20 @@ const applySnapshot = (next: MatchSnapshot) => {
     coreCrystal.material.emissive.copy(defeated ? coreFailing : coreHealthy);
   }
 
+  // One report per match, captured while the frame is still in sync with the events of
+  // the terminal tick, so a replay can be compared against the run it reproduced.
+  if (!terminalReported && (next.status === 'victory' || next.status === 'defeat')) {
+    terminalReported = true;
+    matchReports.push({
+      status: next.status,
+      tick: next.tick,
+      gold: next.gold,
+      coreHealth: next.coreHealth,
+      leaksThisWave: next.leaksThisWave,
+      eventCounts: { ...eventCounts },
+    });
+  }
+
   syncHud();
 };
 
@@ -700,6 +779,62 @@ const dispatchCommand = (command: Command): CommandResult => {
   eventsDrained += consumeEvents();
   applySnapshot(simulation.getSnapshot());
   return result;
+};
+
+// Player intent is logged with the tick it was issued on. Seed plus the tick-ordered
+// log is the whole input of a match, so replaying the log on a fresh core reproduces it.
+const dispatchPlayerCommand = (command: Command): CommandResult => {
+  commandLog.push({ tick: snapshot.tick, command });
+  return dispatchCommand(command);
+};
+
+const clearCombatBursts = () => {
+  for (const burst of combatBursts) {
+    removeCombatBurst(burst);
+  }
+  combatBursts.length = 0;
+};
+
+const resetEventPresentations = () => {
+  for (const type of Object.keys(eventCounts) as Array<keyof typeof eventCounts>) {
+    eventCounts[type] = 0;
+  }
+  recentEvents.length = 0;
+  eventFeedEntries.length = 0;
+  renderEventFeed();
+  eventsDrained = 0;
+  coreDamagedUntil = 0;
+  clearCombatBursts();
+  for (const view of towerViews.values()) {
+    view.firedUntil = 0;
+  }
+};
+
+// Client-side QA restart: a new core from the same seed and content, with the recorded
+// commands re-applied at their original ticks by the frame loop. No persistence involved,
+// and the pause state stays as the player left it, so a frozen clock stays frozen.
+const restartMatch = () => {
+  simulation = createSimulation(config);
+  terminalReported = false;
+  accumulator = 0;
+  resetEventPresentations();
+  replayIndex = 0;
+  replaying = commandLog.length > 0;
+  setFeedback('idle', replaying ? 'Replaying recorded commands' : 'Nothing recorded yet · place a module first');
+  applySnapshot(simulation.getSnapshot());
+};
+
+const applyReplayPlan = () => {
+  while (replayIndex < commandLog.length && snapshot.tick >= commandLog[replayIndex].tick) {
+    const entry = commandLog[replayIndex];
+    replayIndex += 1;
+    dispatchCommand(entry.command);
+  }
+  if (replayIndex >= commandLog.length) {
+    replaying = false;
+    setFeedback('idle', `Replay finished · ${commandLog.length} commands applied`);
+    syncHud();
+  }
 };
 
 let eventsDrained = 0;
@@ -786,7 +921,7 @@ const spawnCombatBurst = (position: THREE.Vector3) => {
 const applyEventPresentation = (event: SimulationEvent) => {
   if (event.type === 'towerFired') {
     const view = towerViews.get(event.entityId);
-    if (!view) {
+    if (!view || reducedMotion) {
       return;
     }
     view.firedUntil = elapsed + towerFireFlashSeconds;
@@ -802,7 +937,7 @@ const applyEventPresentation = (event: SimulationEvent) => {
   }
   if (event.type === 'enemyKilled') {
     const view = enemyViews.get(event.entityId);
-    if (view) {
+    if (view && !reducedMotion) {
       spawnCombatBurst(view.group.position);
     }
     return;
@@ -905,8 +1040,14 @@ const flashPadError = (padId: string) => {
   }
 };
 
+const replayBlockedFeedback = 'Replay in progress · restart again to change the run';
+
 const attemptPlacement = (padId: string) => {
-  const result = dispatchCommand({ type: 'placeTower', padId, towerId: selectedTowerId });
+  if (replaying) {
+    setFeedback('rejected', replayBlockedFeedback, 'replay-in-progress');
+    return;
+  }
+  const result = dispatchPlayerCommand({ type: 'placeTower', padId, towerId: selectedTowerId });
   const name = towerDefinitions.get(selectedTowerId)?.name ?? selectedTowerId;
   if (result.accepted) {
     setFeedback('accepted', `${name} built on ${padId}`);
@@ -925,7 +1066,11 @@ renderer.domElement.addEventListener('click', (event) => {
 });
 
 const attemptWaveStart = () => {
-  const result = dispatchCommand({ type: 'startWave' });
+  if (replaying) {
+    setFeedback('rejected', replayBlockedFeedback, 'replay-in-progress');
+    return;
+  }
+  const result = dispatchPlayerCommand({ type: 'startWave' });
   if (result.accepted) {
     setFeedback('accepted', `Wave ${snapshot.waveIndex + 1} started`);
     return;
@@ -935,6 +1080,21 @@ const attemptWaveStart = () => {
 };
 
 startWaveButton.addEventListener('click', attemptWaveStart);
+
+// Pause is a clock control only: commands still reach the core, but `step()` does not
+// run, so the snapshot, the projection and the rendered positions stay frozen.
+const setPaused = (next: boolean) => {
+  paused = next;
+  syncHud();
+};
+
+pauseToggle.addEventListener('click', () => {
+  setPaused(!paused);
+});
+restartButton.addEventListener('click', restartMatch);
+reducedMotionQuery.addEventListener('change', (event) => {
+  reducedMotion = event.matches;
+});
 
 syncSelection();
 setFeedback('idle', 'Left click a build pad to place');
@@ -998,25 +1158,57 @@ window.__ECHOES_DEBUG__ = {
   get recentEvents() {
     return [...recentEvents];
   },
-  dispatch: dispatchCommand,
+  get paused() {
+    return paused;
+  },
+  get reducedMotion() {
+    return reducedMotion;
+  },
+  get replaying() {
+    return replaying;
+  },
+  get replayIndex() {
+    return replayIndex;
+  },
+  get commandCount() {
+    return commandLog.length;
+  },
+  get matchReports() {
+    return matchReports.map((report) => ({ ...report, eventCounts: { ...report.eventCounts } }));
+  },
+  get motion() {
+    return { reducedMotion, combatBursts: combatBursts.length, enemyBob: enemyBobOffset };
+  },
+  // The QA seam goes through the logging path as well, so the command log always stays
+  // the complete input of the match that Restart replays.
+  dispatch: dispatchPlayerCommand,
 };
 
 const renderFrame = (timestamp: number) => {
   const frameDelta = Math.min((timestamp - previousTimestamp) / 1000, 0.25);
   previousTimestamp = timestamp;
-  accumulator += frameDelta;
-  let stepped = false;
-  while (accumulator >= STEP_SECONDS) {
-    simulation.step();
-    accumulator -= STEP_SECONDS;
-    stepped = true;
-  }
-  if (stepped) {
-    eventsDrained += consumeEvents();
-    syncFromCore();
+  if (!paused) {
+    accumulator += frameDelta;
+    let stepped = false;
+    while (accumulator >= STEP_SECONDS) {
+      simulation.step();
+      accumulator -= STEP_SECONDS;
+      stepped = true;
+    }
+    if (stepped) {
+      eventsDrained += consumeEvents();
+      syncFromCore();
+    }
+    if (replaying) {
+      applyReplayPlan();
+    }
   }
 
   elapsed += frameDelta;
+  // Reduced motion freezes ambient movement and transient effects; the projected
+  // positions, health and materials stay readable because they come from the snapshot.
+  const ambientDelta = reducedMotion ? 0 : frameDelta;
+  enemyBobOffset = 0;
   for (const padView of padViews.values()) {
     if (padView.errorUntil > 0 && elapsed >= padView.errorUntil) {
       padView.errorUntil = 0;
@@ -1030,17 +1222,19 @@ const renderFrame = (timestamp: number) => {
       view.crystal.scale.setScalar(1.55);
       view.crystalMaterial.emissiveIntensity = towerCrystalFireIntensity;
     } else {
-      view.group.rotation.y += frameDelta * (0.34 + towerSlot * 0.08);
+      view.group.rotation.y += ambientDelta * (0.34 + towerSlot * 0.08);
       view.crystal.scale.setScalar(1);
       view.crystalMaterial.emissiveIntensity = towerCrystalIdleIntensity;
     }
-    view.crystal.position.y = 1.43 + Math.sin(elapsed * 2.1 + towerSlot) * 0.07;
+    view.crystal.position.y = 1.43 + (reducedMotion ? 0 : Math.sin(elapsed * 2.1 + towerSlot) * 0.07);
     towerSlot += 1;
   }
   let enemySlot = 0;
   for (const view of enemyViews.values()) {
-    view.group.rotation.y += frameDelta * (0.7 + enemySlot * 0.12);
-    view.group.position.y = enemyBaseY + Math.sin(elapsed * 2.8 + enemySlot * 0.7) * 0.045;
+    view.group.rotation.y += ambientDelta * (0.7 + enemySlot * 0.12);
+    const bob = reducedMotion ? 0 : Math.sin(elapsed * 2.8 + enemySlot * 0.7) * 0.045;
+    view.group.position.y = enemyBaseY + bob;
+    enemyBobOffset = Math.max(enemyBobOffset, Math.abs(bob));
     enemySlot += 1;
   }
   for (let index = combatBursts.length - 1; index >= 0; index -= 1) {
@@ -1057,13 +1251,15 @@ const renderFrame = (timestamp: number) => {
     (burst.mesh.material as THREE.MeshBasicMaterial).opacity = 0.85 * (1 - progress);
     burst.mesh.scale.setScalar(1 + progress * 1.9);
   }
-  // The terminal state wins over the transient damage pulse.
+  // The terminal state wins over the transient damage pulse, and reduced motion keeps
+  // the readable colour change without the scale pulse.
   const coreFlashing = elapsed < coreDamagedUntil && !coreDefeated;
   coreRing.material.color.copy(coreFlashing ? coreWarningRing : coreDefeated ? coreFailing : coreHealthyRing);
-  coreRing.scale.setScalar(coreFlashing ? 1 + 0.18 * (1 - (coreDamagedUntil - elapsed) / coreDamageFlashSeconds) : 1);
-  coreCrystal.rotation.y += frameDelta * 0.6;
-  coreRing.rotation.z += frameDelta * 0.25;
-  particles.rotation.y += frameDelta * 0.08;
+  const corePulse = coreFlashing && !reducedMotion ? 1 + 0.18 * (1 - (coreDamagedUntil - elapsed) / coreDamageFlashSeconds) : 1;
+  coreRing.scale.setScalar(corePulse);
+  coreCrystal.rotation.y += ambientDelta * 0.6;
+  coreRing.rotation.z += ambientDelta * 0.25;
+  particles.rotation.y += ambientDelta * 0.08;
   renderer.render(scene, camera);
   requestAnimationFrame(renderFrame);
 };
