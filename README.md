@@ -21,6 +21,15 @@
 - **Solo-first scope** — текущая разработка сфокусирована на одиночной игре; multiplayer остаётся совместимым будущим направлением.
 - **Оригинальный visual identity** — собственные модели, арт, палитра и HUD; Burbenog/Warcraft III служат только референсами принципов, а не образцом для копирования.
 
+## Скриншоты
+
+| Середина волны | Победа | Replay с тем же seed |
+|:-:|:-:|:-:|
+| ![Середина волны](docs/screenshots/wave-combat-midwave.png) | ![Победа](docs/screenshots/wave-combat-victory.png) | ![Replay](docs/screenshots/vertical-slice-replay-reset.png) |
+| Route, build pads, combat log и HUD — проекция `MatchSnapshot` | Terminal state, `Sector secured`, `restart repeats this run exactly` | Тот же матч перезапускается по command log: `REPLAY · 0 / 4 COMMANDS`, палитра и Start Wave заблокированы |
+
+Снимки — копии `test-results/`, которые снимает E2E-сьютка. Обновляются на приёмке задачи, меняющей картинку.
+
 ## Быстрый старт
 
 Репозиторий содержит первый вертикальный срез: 3D-ready сцена, schematic build pads, запуск волны, combat, pause/resume, replay по seed и HUD — всё поверх детерминированного pure core.
@@ -51,17 +60,17 @@ npm test
 
 | Слой | Технология | Статус |
 |------|------------|--------|
-| Client | TypeScript + Three.js | planned |
-| Development | Vite | planned |
+| Client | TypeScript + Three.js | verified |
+| Development | Vite | verified |
 | Simulation | TypeScript core | verified |
-| QA | Playwright + core check | verified |
+| QA | Playwright + core check + asset validator | verified |
 | Server | Node.js, затем при необходимости Go | phased |
 | Desktop | Wails + Go | deferred |
-| Assets | glTF/GLB | planned |
+| Assets | glTF/GLB, свой генератор, budgets | verified |
 
 ## Статус
 
-**v0.1.0-alpha** — browser bootstrap, pure deterministic core, snapshot projection, placement, combat presentation, pause/resume и seed replay реализованы и покрыты E2E; срез проходит полный игровой цикл в браузере. Далее — фаза 4: asset pipeline и 3D polish.
+**v0.1.0-alpha** — browser bootstrap, pure deterministic core, snapshot projection, placement, combat presentation, pause/resume, seed replay и asset pipeline с генератором GLB и budgets реализованы и покрыты E2E. Срез проходит полный игровой цикл в браузере. Далее — фаза 4: 3D polish и skeletal animation.
 
 ## Лицензия
 
