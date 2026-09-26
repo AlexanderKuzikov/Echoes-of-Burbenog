@@ -1,6 +1,6 @@
 # Echoes of Burbenog — CONTEXT
 
-> Последнее обновление: 2026-09-26 07:40
+> Последнее обновление: 2026-09-26 07:08
 
 ## Статус
 
@@ -46,6 +46,7 @@
 | EOB-009 | P1 | Решить, остаётся ли Go/Wails только упаковкой или также используется для dedicated server |
 | EOB-010 | P1 | Перед session layer выбрать replay strategy: command log + seed или restore из snapshot |
 | EOB-011 | P2 | `favicon.ico` даёт 404 в browser console; отдельная задача на favicon или inline data-URL icon |
+| EOB-012 | P2 | Усилить projection E2E: сопоставлять позиции по `entityId`, считать реальные route objects, проверять typed events и console |
 
 ## Журнал работ
 
@@ -64,6 +65,8 @@
 | 2026-09-26 | План переведён в формат штаба с сквозными заданиями и отметками `[x]/[ ]`; следующая задача `0005` |
 | 2026-09-26 | Выдано задание `0005` кодовой сессии: привязка `MatchSnapshot` к Three.js client |
 | 2026-09-26 | Принято задание `0005`: client синхронизируется с `MatchSnapshot`, сцена строится из content, HUD берёт значения из snapshot; Playwright проверяет projection до victory |
+| 2026-09-26 | Штаб независимо проверил `0005`, screenshots и regression suite; blockers не найдены, follow-up тестов вынесен в `EOB-012` |
+| 2026-09-26 | Выдано задание `0006` кодовой сессии: placement по build pads через commands и snapshot |
 
 ## Структура проекта
 
@@ -81,6 +84,7 @@
 - `scripts/check-simulation.ts` — один runnable core check.
 - `tests/smoke.spec.ts` — browser E2E: bootstrap smoke и snapshot binding contract.
 - `docs/tasks/0005-client-snapshot-binding.md` — принятое задание.
+- `docs/tasks/0006-build-pad-placement.md` — выданное задание для следующей кодовой сессии.
 
 Планируемая:
 

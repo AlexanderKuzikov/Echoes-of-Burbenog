@@ -88,6 +88,16 @@ Screenshots:
 - Создание, обновление и удаление объектов: волна доходит до victory, `rendered.enemies` становится 0, `gold` совпадает с детерминированным значением 229.
 - HUD: Aether, Integrity и Wave берутся из snapshot.
 
+## Независимая приёмка штабом
+
+- Проверен commit `572ee8c` и чистое рабочее дерево.
+- `npm run typecheck` — зелёный.
+- `npm run build` — зелёный; остаётся только известное предупреждение Vite о chunk > 500 kB из-за Three.js.
+- `npm test` — `npm run test:core` и 2 Playwright-теста зелёные.
+- Screenshots `test-results/bootstrap.png` и `test-results/snapshot-binding.png` проверены визуально: data-driven core, pads, routes, towers и enemies читаются.
+- Code review: blockers — 0; task verdict — принята.
+- Follow-up качества тестов вынесен в `EOB-012`: entityId-сопоставление позиций, реальные route-счётчики, typed event assertions и console assertions.
+
 Что осталось за пределами 0005:
 
 - Кликовый placement и стоимость — 0006.
