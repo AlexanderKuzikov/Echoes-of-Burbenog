@@ -1,6 +1,6 @@
 # Echoes of Burbenog — CONTEXT
 
-> Последнее обновление: 2026-09-26 06:24
+> Последнее обновление: 2026-09-26 06:26
 
 ## Статус
 
@@ -61,6 +61,7 @@
 | 2026-09-25 | План переведён на следующий этап: выбор mechanics subset и pure deterministic simulation core |
 | 2026-09-25 | Реализован и проверен pure simulation core; добавлены content validation, wave transitions и focused scenario checks |
 | 2026-09-26 | План переведён в формат штаба с сквозными заданиями и отметками `[x]/[ ]`; следующая задача `0005` |
+| 2026-09-26 | Выдано задание `0005` кодовой сессии: привязка `MatchSnapshot` к Three.js client |
 
 ## Структура проекта
 
@@ -77,6 +78,7 @@
 - `src/game-core/` — pure deterministic simulation, content validation и training scenario.
 - `scripts/check-simulation.ts` — один runnable core check.
 - `tests/smoke.spec.ts` — browser E2E smoke test.
+- `docs/tasks/0005-client-snapshot-binding.md` — задание для следующей кодовой сессии.
 
 Планируемая:
 

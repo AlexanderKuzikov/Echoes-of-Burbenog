@@ -43,7 +43,7 @@
 
 ## Фаза 3 — Первый визуальный vertical slice — следующая
 
-- [ ] 0005 — Связать `MatchSnapshot` с Three.js objects: синхронизировать core, build pads, towers и enemies (критерий: client отображает состояние core без ручного дублирования)
+- [ ] 0005 — Связать `MatchSnapshot` с Three.js objects: синхронизировать core, build pads, towers и enemies (выдана кодовой сессии; критерий: client отображает состояние core без ручного дублирования)
 - [ ] 0006 — Сделать placement по build pads: выбор tower, command в core, стоимость и занятость pad (критерий: placement проходит pure check и E2E)
 - [ ] 0007 — Подключить запуск волны, движение enemies, targeting, damage и win/lose к HUD (критерий: полный игровой цикл воспроизводится в браузере)
 - [ ] 0008 — Принять vertical slice: pause/resume, seed replay, core check, Playwright E2E и screenshot review (критерий: все проверки зелёные, визуальная композиция читаема)
