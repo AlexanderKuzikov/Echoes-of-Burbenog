@@ -20,6 +20,7 @@ const killRewards = scenario.waves[0].groups.reduce((total, group) => {
   return total + (enemy?.reward ?? 0) * group.count;
 }, 0);
 const victoryGold = placedGold + killRewards + scenario.rules.waveBounty;
+const costOf = (towerId: string) => scenario.towers.find((tower) => tower.id === towerId)?.cost ?? 0;
 
 type DebugReading = {
   ready: boolean;
@@ -31,9 +32,12 @@ type DebugReading = {
   padIds: string[];
   waveCount: number;
   eventsDrained: number;
+  selectedTowerId: string;
+  feedback: { state: string; message: string; reason: string | null };
   rendered: { pads: number; towers: number; enemies: number; routeSegments: number };
   towerPositions: Array<{ x: number; z: number }>;
   enemyPositions: Array<{ x: number; z: number }>;
+  padScreenPositions: Array<{ padId: string; x: number; y: number }>;
   snapshot: NonNullable<typeof window.__ECHOES_DEBUG__>['snapshot'];
 };
 
@@ -53,12 +57,39 @@ const readDebug = (page: Page) =>
       padIds: debug.padIds,
       waveCount: debug.waveCount,
       eventsDrained: debug.eventsDrained,
+      selectedTowerId: debug.selectedTowerId,
+      feedback: debug.feedback,
       rendered: debug.rendered,
       towerPositions: debug.towerPositions,
       enemyPositions: debug.enemyPositions,
+      padScreenPositions: debug.padScreenPositions,
       snapshot: debug.snapshot,
     };
   });
+
+const readDebugOrThrow = async (page: Page): Promise<DebugReading> => {
+  const reading = await readDebug(page);
+  if (!reading) {
+    throw new Error('debug contract missing');
+  }
+  return reading;
+};
+
+const clickPad = async (page: Page, padId: string) => {
+  const canvas = page.getByTestId('scene-canvas');
+  const box = await canvas.boundingBox();
+  if (!box) {
+    throw new Error('scene canvas has no layout box');
+  }
+  const point = await page.evaluate(
+    (id) => window.__ECHOES_DEBUG__?.padScreenPositions.find((entry) => entry.padId === id) ?? null,
+    padId,
+  );
+  if (!point) {
+    throw new Error(`pad ${padId} has no screen position`);
+  }
+  await page.mouse.click(box.x + point.x, box.y + point.y);
+};
 
 const expectProjectionMatchesSnapshot = (debug: DebugReading) => {
   expect(debug.rendered.pads).toBe(Object.keys(debug.snapshot.pads).length);
@@ -206,4 +237,92 @@ test('drives presentation from MatchSnapshot without duplicated state', async ({
   expectProjectionMatchesSnapshot(finished);
   await expect(page.getByTestId('core-integrity')).toHaveText('100%');
   await expect(page.getByTestId('gold-value')).toHaveText(String(victoryGold));
+});
+
+test('places the selected tower on a clicked build pad through the command contract', async ({ page }) => {
+  test.setTimeout(60_000);
+  await page.goto('/');
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+
+  const initial = await readDebugOrThrow(page);
+  expect(initial.selectedTowerId).toBe('pulse-spire');
+  expect(initial.feedback.state).toBe('idle');
+  expect(initial.snapshot.towers).toEqual([]);
+  expect(initial.snapshot.pads['pad-east']).toBeNull();
+  expect(initial.padScreenPositions.map((entry) => entry.padId).sort()).toEqual([...initial.padIds].sort());
+  await expect(page.getByTestId('gold-value')).toHaveText(String(startingGold));
+
+  await page.getByRole('button', { name: 'Grove Lens' }).click();
+  await expect(page.getByRole('button', { name: 'Grove Lens' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: 'Pulse Spire' })).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.getByTestId('selection-status')).toHaveText('Grove Lens ready');
+  await expect(page.getByTestId('selection-card-name')).toHaveText('Grove Lens');
+
+  const groveLensGold = startingGold - costOf('grove-lens');
+  await clickPad(page, 'pad-east');
+
+  const placed = await readDebugOrThrow(page);
+  expect(placed.snapshot.pads['pad-east']).toBe('grove-lens');
+  expect(placed.snapshot.towers).toHaveLength(1);
+  expect(placed.snapshot.towers[0]?.towerId).toBe('grove-lens');
+  expect(placed.snapshot.towers[0]?.padId).toBe('pad-east');
+  expect(placed.snapshot.gold).toBe(groveLensGold);
+  expect(placed.rendered.towers).toBe(1);
+  expect(placed.towerPositions[0]?.x).toBeCloseTo(padById.get('pad-east')?.position.x ?? 0, 3);
+  expect(placed.towerPositions[0]?.z).toBeCloseTo(padById.get('pad-east')?.position.z ?? 0, 3);
+  expect(placed.feedback).toEqual({
+    state: 'accepted',
+    message: 'Grove Lens built on pad-east',
+    reason: null,
+  });
+  await expect(page.getByTestId('gold-value')).toHaveText(String(groveLensGold));
+  await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
+
+  await clickPad(page, 'pad-east');
+
+  const occupied = await readDebugOrThrow(page);
+  expect(occupied.snapshot.pads['pad-east']).toBe('grove-lens');
+  expect(occupied.snapshot.towers).toHaveLength(1);
+  expect(occupied.snapshot.gold).toBe(groveLensGold);
+  expect(occupied.rendered.towers).toBe(1);
+  expect(occupied.feedback.state).toBe('rejected');
+  expect(occupied.feedback.reason).toBe('pad-occupied');
+  await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-reason', 'pad-occupied');
+  await expect(page.getByTestId('command-feedback')).toHaveText('Pad already occupied');
+  await expect(page.getByTestId('gold-value')).toHaveText(String(groveLensGold));
+
+  await page.getByRole('button', { name: 'Frost Relay' }).click();
+  await clickPad(page, 'pad-north');
+  await page.getByRole('button', { name: 'Pulse Spire' }).click();
+  await clickPad(page, 'pad-south');
+
+  const filled = await readDebugOrThrow(page);
+  const affordableGold = groveLensGold - costOf('frost-relay') - costOf('pulse-spire');
+  expect(filled.snapshot.pads['pad-north']).toBe('frost-relay');
+  expect(filled.snapshot.pads['pad-south']).toBe('pulse-spire');
+  expect(filled.snapshot.pads['pad-core']).toBeNull();
+  expect(filled.snapshot.towers).toHaveLength(3);
+  expect(filled.snapshot.gold).toBe(affordableGold);
+  expect(filled.rendered.towers).toBe(3);
+  expect(costOf('grove-lens')).toBeGreaterThan(affordableGold);
+  await expect(page.getByTestId('gold-value')).toHaveText(String(affordableGold));
+
+  await page.getByRole('button', { name: 'Grove Lens' }).click();
+  await clickPad(page, 'pad-core');
+
+  const broke = await readDebugOrThrow(page);
+  expect(broke.snapshot.pads['pad-core']).toBeNull();
+  expect(broke.snapshot.towers).toHaveLength(3);
+  expect(broke.snapshot.gold).toBe(affordableGold);
+  expect(broke.rendered.towers).toBe(3);
+  expect(broke.feedback.state).toBe('rejected');
+  expect(broke.feedback.reason).toBe('not-enough-gold');
+  await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-reason', 'not-enough-gold');
+  await expect(page.getByTestId('command-feedback')).toHaveText('Not enough aether');
+  await expect(page.getByTestId('gold-value')).toHaveText(String(affordableGold));
+
+  // The pad rejection flash is a short cosmetic pulse; let the earlier one expire
+  // so the screenshot only shows the flash of the final rejected pad.
+  await page.waitForTimeout(900);
+  await page.screenshot({ path: 'test-results/build-pad-placement.png', fullPage: true });
 });

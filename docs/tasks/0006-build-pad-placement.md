@@ -1,6 +1,6 @@
 # 0006 — Сделать placement по build pads
 
-> Статус: выдана
+> Статус: на проверке
 > Приоритет: P0
 > Фаза: 3 — Первый визуальный vertical slice
 > Следующая приёмка: 0007
@@ -65,13 +65,68 @@ E2E должен использовать реальный canvas click/picking,
 
 ## Отчёт сессии
 
-После работы указать:
+### Изменённые файлы
 
-- изменённые файлы;
-- фактический pad/tower scenario и ожидаемые/полученные значения;
-- команды и результат;
-- путь к screenshot;
-- что осталось за пределами 0006;
-- статус задачи: `на проверке` или `принята`.
+- `index.html` — build buttons получили `data-tower-id` из content; selection card привязан к выбранной башне; `command-feedback` с `data-feedback`/`data-reason`.
+- `src/main.ts` — build options из content с fail-fast сверкой, single `selectedTowerId`, raycast по pad base/ring с plane fallback, единственный `dispatchCommand` для клика и debug, reason → текст, error flash pad, debug-проброс `selectedTowerId`/`feedback`/`padScreenPositions`.
+- `src/styles.css` — цвета feedback `accepted`/`rejected`, dim невыбранных build cards.
+- `tests/smoke.spec.ts` — E2E placement contract реальными canvas-кликами.
+- `scripts/check-simulation.ts` — pure check на reason-коды placement.
+- `docs/ARCHITECTURE.md`, `docs/PLAN.md`, `docs/CONTEXT.md`, этот файл — контракт QA seam, статус и evidence.
 
-До приёмки задача остаётся `[ ]` в `docs/PLAN.md`.
+`src/game-core/*` не менялся: размещение использует существующий `placeTower` и его reason-коды.
+
+### Scenario и значения
+
+Pure check (`npm run test:core`), отдельный `Simulation`, стартовое золото 220:
+
+| Шаг | Команда | Ожидается | Результат |
+|-----|---------|-----------|-----------|
+| 1 | `pad-nowhere` + `pulse-spire` | reject | `unknown-pad` |
+| 2 | `pad-east` + `ghost-spire` | reject | `unknown-tower` |
+| 3 | `pad-east` + `pulse-spire` (50) | accept | gold 170, `pads['pad-east']='pulse-spire'`, 1 entity |
+| 4 | `pad-east` + `frost-relay` | reject | `pad-occupied`, gold 170, 1 entity |
+| 5 | `pad-north`, `pad-south` + `pulse-spire` | accept | gold 120 → 70 |
+| 6 | `pad-core` + `grove-lens` (70) | accept | gold 0 — cost совпадает с остатком точно |
+| 7 | `pad-west` + `pulse-spire` | reject | `not-enough-gold`, `pads['pad-west']=null`, gold 0 |
+
+E2E placement contract, реальные клики мыши по canvas (seed 1337, viewport 1280×720):
+
+| Шаг | Действие | Ожидается | Получено |
+|-----|----------|-----------|----------|
+| 1 | выбрать Grove Lens, кликнуть `pad-east` | accept, gold 150 | gold 150, 1 tower, проекция tower на позиции pad, feedback `accepted` |
+| 2 | кликнуть `pad-east` ещё раз | `pad-occupied` | reason `pad-occupied`, 1 tower, gold 150, pad мигает красным |
+| 3 | Frost Relay → `pad-north` | accept, gold 90 | gold 90 |
+| 4 | Pulse Spire → `pad-south` | accept, gold 40 | gold 40, 3 towers |
+| 5 | Grove Lens → `pad-core` при 40 золота | `not-enough-gold` | reason `not-enough-gold`, `pads['pad-core']=null`, 3 towers, gold 40 |
+
+Стоимости считаются из content (`pulse-spire` 50, `frost-relay` 60, `grove-lens` 70), а не из literals в тесте.
+
+### Команды и результат
+
+```text
+npm run typecheck   ok
+npm run build       ok (11 modules, 567 kB js; warning о chunk size — pre-existing от three)
+npm run test:core   ok (victory tick 323, gold 229 — прежние значения не изменились)
+npm test            3 passed: bootstrap smoke, placement contract, snapshot binding до victory
+```
+
+Console: только `[vite] connecting/connected` и известный favicon 404 (`EOB-011`); новых warnings и errors нет. Проверено временным прогоном console-проверки, файл удалён.
+
+### Screenshot
+
+`test-results/build-pad-placement.png` — три башни на `pad-east`/`pad-north`/`pad-south`, свободный `pad-core` подсвечен ошибкой, Aether 40, `Grove Lens ready` + `NOT ENOUGH AETHER`, выбранный card `Range 2.4 · Damage 10` из content.
+
+### За пределами 0006
+
+- Start-wave, движение, targeting, damage и win/lose presentation — 0007.
+- Selling, upgrade, repair, transfer.
+- Новые tower/enemy types, waves, economy, assets.
+- Hover-подсветка pad, drag-rotate и zoom камеры, выбор башни кликом.
+- Keyboard-размещение по pad — не сделано, pointer-only как указано в задании; кандидат на отдельное решение вместе с остальными controls.
+- Console-проверки в постоянном E2E остаются в `EOB-012`.
+- Фиксированный hit radius 0.85 без occlusion помечен `techdebt:` в коде.
+
+### Статус
+
+`на проверке`. `docs/PLAN.md` держит `[ ]` до приёмки штабом.

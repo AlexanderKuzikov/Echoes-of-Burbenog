@@ -330,6 +330,14 @@ h1 {
   font-size: 0.58rem;
 }
 
+.status-detail[data-feedback="accepted"] {
+  color: #74e0b4;
+}
+
+.status-detail[data-feedback="rejected"] {
+  color: #ff9a8c;
+}
+
 .build-list {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -359,6 +367,15 @@ h1 {
 .build-card.is-selected {
   border-color: rgba(110, 226, 207, 0.72);
   background: rgba(29, 81, 79, 0.62);
+}
+
+.build-card[aria-pressed="false"] {
+  opacity: 0.72;
+}
+
+.build-card[aria-pressed="false"]:hover,
+.build-card[aria-pressed="false"]:focus-visible {
+  opacity: 1;
 }
 
 .build-card > span:last-child {

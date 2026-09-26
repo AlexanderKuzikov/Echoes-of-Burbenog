@@ -1,6 +1,6 @@
 # Echoes of Burbenog — CONTEXT
 
-> Последнее обновление: 2026-09-26 07:08
+> Последнее обновление: 2026-09-26
 
 ## Статус
 
@@ -10,13 +10,14 @@
 | Репозиторий | Создан | Приватный GitHub remote, ветка `main` синхронизирована; visibility не является требованием |
 | Документация | Базовая завершена | Созданы README, инструкции, архитектура, решения и план |
 | Целевая платформа | Зафиксирована | Windows 10/11; performance budgets уточняются |
-| Gameplay prototype | Bootstrap + core проверены | 3D-ready сцена, pure simulation, schematic build pads и базовый HUD |
+| Gameplay prototype | Bootstrap + core проверены | 3D-ready сцена, pure simulation, schematic build pads, placement по pads и базовый HUD |
 | Client | Привязан к core | Один `Simulation` из training scenario; сцена, pads, path, core, towers и enemies строятся из `MatchSnapshot`; ручных tower/enemy массивов нет |
-| Simulation | Проверен | Pure core: commands, state, events, fixed tick, seeded RNG, wave transitions |
+| Simulation | Проверен | Pure core: commands, state, events, fixed tick, seeded RNG, wave transitions; reason-коды `placeTower` закреплены pure check |
+| Build palette | Content-bound | Кнопки хранят `data-tower-id`, selection идёт через `aria-pressed`; canvas-клик по pad шлёт `placeTower` тем же `dispatchCommand`, что и debug |
 | Multiplayer | Отложен | Solo-first; session и protocol seams сохраняются |
 | Asset pipeline | Не начат | Первые assets — собственные схематичные placeholder-модели |
 | Desktop packaging | Отложен | Wails/Go после стабилизации browser client |
-| QA/agent harness | Проверен | Core scenario, typecheck, build, Playwright E2E, snapshot contract и screenshot review прошли |
+| QA/agent harness | Проверен | Core scenario, typecheck, build, Playwright E2E из трёх сценариев, snapshot contract, placement contract и screenshot review прошли |
 
 ## Глоссарий
 
@@ -67,6 +68,7 @@
 | 2026-09-26 | Принято задание `0005`: client синхронизируется с `MatchSnapshot`, сцена строится из content, HUD берёт значения из snapshot; Playwright проверяет projection до victory |
 | 2026-09-26 | Штаб независимо проверил `0005`, screenshots и regression suite; blockers не найдены, follow-up тестов вынесен в `EOB-012` |
 | 2026-09-26 | Выдано задание `0006` кодовой сессии: placement по build pads через commands и snapshot |
+| 2026-09-26 | Кодовая сессия сдала `0006`: build palette привязан к content `towerId`, canvas picking по pad, единственный command path, feedback accepted/rejected с reason; typecheck, build, test:core и 3 Playwright прошли, screenshot `test-results/build-pad-placement.png`; задача на проверке штаба |
 
 ## Структура проекта
 
@@ -79,12 +81,12 @@
 - `docs/ARCHITECTURE.md` — архитектура и границы модулей.
 - `docs/PLAN.md` — этапы разработки и критерии готовности.
 - `Old-Burbenog/BURBENOG-TD-RESEARCH.md` — исследовательский brief по оригинальной карте и рекомендации для ремейка.
-- `src/main.ts` — browser bootstrap, presentation entry point и snapshot projection.
+- `src/main.ts` — browser bootstrap, presentation entry point, snapshot projection, build palette и pad picking.
 - `src/game-core/` — pure deterministic simulation, content validation и training scenario.
 - `scripts/check-simulation.ts` — один runnable core check.
-- `tests/smoke.spec.ts` — browser E2E: bootstrap smoke и snapshot binding contract.
+- `tests/smoke.spec.ts` — browser E2E: bootstrap smoke, snapshot binding contract и placement contract.
 - `docs/tasks/0005-client-snapshot-binding.md` — принятое задание.
-- `docs/tasks/0006-build-pad-placement.md` — выданное задание для следующей кодовой сессии.
+- `docs/tasks/0006-build-pad-placement.md` — задание со статусом «на проверке».
 
 Планируемая:
 

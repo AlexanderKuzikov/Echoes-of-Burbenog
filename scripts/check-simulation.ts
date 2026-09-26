@@ -178,6 +178,49 @@ const runSlowScenario = () => {
   assert.ok((enemy?.slowTicks ?? 0) > 0);
 };
 
+const runPlacementScenario = () => {
+  const config = createTrainingScenario();
+  const simulation = createSimulation(config);
+  const costOf = (towerId: string) => config.towers.find((tower) => tower.id === towerId)?.cost ?? 0;
+
+  const unknownPad = simulation.dispatch({ type: 'placeTower', padId: 'pad-nowhere', towerId: 'pulse-spire' });
+  assert.deepEqual(unknownPad, { accepted: false, reason: 'unknown-pad' });
+
+  const unknownTower = simulation.dispatch({ type: 'placeTower', padId: 'pad-east', towerId: 'ghost-spire' });
+  assert.deepEqual(unknownTower, { accepted: false, reason: 'unknown-tower' });
+
+  const accepted = simulation.dispatch({ type: 'placeTower', padId: 'pad-east', towerId: 'pulse-spire' });
+  assert.deepEqual(accepted, { accepted: true });
+  const afterAccepted = simulation.getSnapshot();
+  assert.equal(afterAccepted.pads['pad-east'], 'pulse-spire');
+  assert.equal(afterAccepted.towers.length, 1);
+  assert.equal(afterAccepted.towers[0]?.padId, 'pad-east');
+  assert.equal(afterAccepted.gold, config.rules.startingGold - costOf('pulse-spire'));
+
+  const occupied = simulation.dispatch({ type: 'placeTower', padId: 'pad-east', towerId: 'frost-relay' });
+  assert.deepEqual(occupied, { accepted: false, reason: 'pad-occupied' });
+  const afterOccupied = simulation.getSnapshot();
+  assert.equal(afterOccupied.pads['pad-east'], 'pulse-spire');
+  assert.equal(afterOccupied.towers.length, 1);
+  assert.equal(afterOccupied.gold, afterAccepted.gold);
+
+  for (const padId of ['pad-north', 'pad-south'] as const) {
+    const result = simulation.dispatch({ type: 'placeTower', padId, towerId: 'pulse-spire' });
+    assert.equal(result.accepted, true, `expected ${padId} to be filled`);
+  }
+  const drained = simulation.dispatch({ type: 'placeTower', padId: 'pad-core', towerId: 'grove-lens' });
+  assert.equal(drained.accepted, true);
+  assert.equal(simulation.getSnapshot().gold, 0);
+
+  const broke = simulation.dispatch({ type: 'placeTower', padId: 'pad-west', towerId: 'pulse-spire' });
+  assert.deepEqual(broke, { accepted: false, reason: 'not-enough-gold' });
+  const afterBroke = simulation.getSnapshot();
+  assert.equal(afterBroke.pads['pad-west'], null);
+  assert.equal(afterBroke.towers.length, 4);
+  assert.equal(afterBroke.gold, 0);
+  assert.equal(costOf('grove-lens'), 70);
+};
+
 const runValidationScenario = () => {
   const invalid = createTrainingScenario();
   invalid.map = { ...invalid.map, coreHealth: Number.NaN };
@@ -199,6 +242,7 @@ runDefeatScenario();
 runTwoWaveScenario();
 runTagScenario();
 runSlowScenario();
+runPlacementScenario();
 runValidationScenario();
 
 console.log(JSON.stringify({

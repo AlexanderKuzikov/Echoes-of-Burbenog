@@ -23,10 +23,21 @@ type DebugState = {
   eventsDrained: number;
   snapshot: MatchSnapshot;
   dispatch: (command: Command) => CommandResult;
+  readonly selectedTowerId: string;
+  readonly feedback: { state: FeedbackState; message: string; reason: string | null };
   readonly objectCount: number;
   readonly rendered: RenderCounters;
   readonly towerPositions: Array<{ x: number; z: number }>;
   readonly enemyPositions: Array<{ x: number; z: number }>;
+  readonly padScreenPositions: Array<{ padId: string; x: number; y: number }>;
+};
+
+type FeedbackState = 'idle' | 'accepted' | 'rejected';
+
+type BuildOption = {
+  button: HTMLButtonElement;
+  towerId: string;
+  name: string;
 };
 
 type PadView = {
@@ -34,6 +45,7 @@ type PadView = {
   base: THREE.Mesh;
   ring: THREE.Mesh;
   occupied: boolean;
+  errorUntil: number;
 };
 
 type TowerView = {
@@ -56,17 +68,31 @@ declare global {
 const sceneMount = document.querySelector<HTMLDivElement>('#scene');
 const statusLabel = document.querySelector<HTMLSpanElement>('[data-testid="scene-status"]');
 const selectionStatus = document.querySelector<HTMLElement>('[data-testid="selection-status"]');
+const commandFeedback = document.querySelector<HTMLElement>('[data-testid="command-feedback"]');
+const selectionCardName = document.querySelector<HTMLElement>('[data-testid="selection-card-name"]');
+const selectionCardDetail = document.querySelector<HTMLElement>('[data-testid="selection-card-detail"]');
 const goldValue = document.querySelector<HTMLElement>('[data-testid="gold-value"]');
 const integrityValue = document.querySelector<HTMLElement>('[data-testid="core-integrity"]');
 const waveValue = document.querySelector<HTMLElement>('[data-testid="wave-status"]');
 
-if (!sceneMount || !statusLabel || !selectionStatus || !goldValue || !integrityValue || !waveValue) {
+if (
+  !sceneMount ||
+  !statusLabel ||
+  !selectionStatus ||
+  !commandFeedback ||
+  !selectionCardName ||
+  !selectionCardDetail ||
+  !goldValue ||
+  !integrityValue ||
+  !waveValue
+) {
   throw new Error('Bootstrap DOM is incomplete');
 }
 
 const config = createTrainingScenario();
 const simulation = createSimulation(config);
 const padDefinitions = new Map(config.map.buildPads.map((pad) => [pad.id, pad]));
+const towerDefinitions = new Map(config.towers.map((tower) => [tower.id, tower]));
 const waveCount = config.waves.length;
 const STEP_SECONDS = 1 / TICK_RATE;
 
@@ -152,6 +178,7 @@ for (const [routeIndex, route] of config.map.routes.entries()) {
 
 const padGeometry = new THREE.CylinderGeometry(0.62, 0.72, 0.14, 6);
 const padViews = new Map<string, PadView>();
+const padPickTargets: THREE.Mesh[] = [];
 for (const pad of config.map.buildPads) {
   const group = new THREE.Group();
   group.position.set(pad.position.x, 0, pad.position.z);
@@ -170,6 +197,7 @@ for (const pad of config.map.buildPads) {
   base.position.y = 0.12;
   base.castShadow = true;
   base.receiveShadow = true;
+  base.name = `pad-base:${pad.id}`;
   group.add(base);
 
   const ring = new THREE.Mesh(
@@ -178,10 +206,15 @@ for (const pad of config.map.buildPads) {
   );
   ring.rotation.x = -Math.PI / 2;
   ring.position.y = 0.205;
+  ring.name = `pad-ring:${pad.id}`;
   group.add(ring);
 
+  base.userData.padId = pad.id;
+  ring.userData.padId = pad.id;
+  padPickTargets.push(base, ring);
+
   scene.add(group);
-  padViews.set(pad.id, { id: pad.id, base, ring, occupied: false });
+  padViews.set(pad.id, { id: pad.id, base, ring, occupied: false, errorUntil: 0 });
 }
 
 const towerVisuals: Record<string, { accent: number; roof: number; scale: number }> = {
@@ -352,16 +385,64 @@ for (let index = 0; index < 54; index += 1) {
 particles.geometry.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
 scene.add(particles);
 
-const buildButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-build]'));
-for (const button of buildButtons) {
-  button.addEventListener('click', () => {
-    const buildName = button.dataset.build ?? 'Module';
-    selectionStatus.textContent = `${buildName} ready`;
-    for (const candidate of buildButtons) {
-      const isSelected = candidate === button;
-      candidate.classList.toggle('is-selected', isSelected);
-      candidate.setAttribute('aria-pressed', String(isSelected));
-    }
+const buildButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-tower-id]'));
+const buildOptions: BuildOption[] = buildButtons.map((button) => {
+  const towerId = button.dataset.towerId ?? '';
+  const definition = towerDefinitions.get(towerId);
+  if (!definition) {
+    throw new Error(`Build button references unknown tower ${towerId}`);
+  }
+  return { button, towerId, name: definition.name };
+});
+for (const tower of config.towers) {
+  if (!buildOptions.some((option) => option.towerId === tower.id)) {
+    throw new Error(`Tower ${tower.id} has no build button`);
+  }
+}
+
+const rejectionMessages: Record<string, string> = {
+  'pad-occupied': 'Pad already occupied',
+  'not-enough-gold': 'Not enough aether',
+  'unknown-pad': 'Unknown build pad',
+  'unknown-tower': 'Unknown module',
+  'match-finished': 'Match already finished',
+};
+
+let selectedTowerId = buildOptions[0]?.towerId ?? '';
+let feedbackState: FeedbackState = 'idle';
+
+const setFeedback = (state: FeedbackState, message: string, reason?: string) => {
+  feedbackState = state;
+  commandFeedback.textContent = message;
+  commandFeedback.setAttribute('data-feedback', state);
+  if (reason) {
+    commandFeedback.setAttribute('data-reason', reason);
+  } else {
+    commandFeedback.removeAttribute('data-reason');
+  }
+};
+
+const syncSelection = () => {
+  for (const option of buildOptions) {
+    const isSelected = option.towerId === selectedTowerId;
+    option.button.classList.toggle('is-selected', isSelected);
+    option.button.setAttribute('aria-pressed', String(isSelected));
+  }
+  const definition = towerDefinitions.get(selectedTowerId);
+  if (!definition) {
+    return;
+  }
+  selectionStatus.textContent = `${definition.name} ready`;
+  selectionCardName.textContent = definition.name;
+  const damageLabel = Number.isInteger(definition.damage) ? String(definition.damage) : definition.damage.toFixed(1);
+  selectionCardDetail.textContent = `Range ${definition.range} · Damage ${damageLabel}`;
+};
+
+for (const option of buildOptions) {
+  option.button.addEventListener('click', () => {
+    selectedTowerId = option.towerId;
+    syncSelection();
+    setFeedback('idle', `${option.name} selected`);
   });
 }
 
@@ -387,11 +468,27 @@ const padOccupiedColor = new THREE.Color(0x3a4b55);
 const padOccupiedEmissive = new THREE.Color(0x0a1a1e);
 const padFreeRing = new THREE.Color(0x6ee2cf);
 const padOccupiedRing = new THREE.Color(0xffc56b);
+const padErrorEmissive = new THREE.Color(0x5a1410);
+const padErrorRing = new THREE.Color(0xff6f61);
 const coreHealthy = new THREE.Color(0x2ac7b5);
 const coreFailing = new THREE.Color(0xe46c62);
 const baseBodyEmissive = 0.45;
 const slowedBodyEmissive = 1.15;
 const enemyBaseY = 0.28;
+const padErrorFlashSeconds = 0.7;
+
+let elapsed = 0;
+
+const refreshPadStyle = (padView: PadView) => {
+  const flashing = elapsed < padView.errorUntil;
+  const baseMaterial = padView.base.material as THREE.MeshStandardMaterial;
+  const ringMaterial = padView.ring.material as THREE.MeshBasicMaterial;
+  baseMaterial.color.copy(padView.occupied ? padOccupiedColor : padFreeColor);
+  baseMaterial.emissive.copy(flashing ? padErrorEmissive : padView.occupied ? padOccupiedEmissive : padFreeEmissive);
+  baseMaterial.emissiveIntensity = flashing ? 1.3 : padView.occupied ? 0.4 : 0.9;
+  ringMaterial.color.copy(flashing ? padErrorRing : padView.occupied ? padOccupiedRing : padFreeRing);
+  ringMaterial.opacity = flashing ? 0.95 : padView.occupied ? 0.72 : 0.48;
+};
 
 let coreDefeated = false;
 let snapshot = simulation.getSnapshot();
@@ -413,13 +510,7 @@ const applySnapshot = (next: MatchSnapshot) => {
       continue;
     }
     padView.occupied = occupied;
-    const baseMaterial = padView.base.material as THREE.MeshStandardMaterial;
-    const ringMaterial = padView.ring.material as THREE.MeshBasicMaterial;
-    baseMaterial.color.copy(occupied ? padOccupiedColor : padFreeColor);
-    baseMaterial.emissive.copy(occupied ? padOccupiedEmissive : padFreeEmissive);
-    baseMaterial.emissiveIntensity = occupied ? 0.4 : 0.9;
-    ringMaterial.color.copy(occupied ? padOccupiedRing : padFreeRing);
-    ringMaterial.opacity = occupied ? 0.72 : 0.48;
+    refreshPadStyle(padView);
   }
 
   const aliveTowers = new Set<number>();
@@ -497,11 +588,95 @@ const dispatchCommand = (command: Command): CommandResult => {
   return result;
 };
 
+const PAD_PICK_HEIGHT = 0.19;
+// techdebt: fixed generous hit radius, no occlusion test against towers; revisit when camera zoom or drag-rotate lands.
+const PAD_PICK_RADIUS = 0.85;
+const padPickPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -PAD_PICK_HEIGHT);
+const padRaycaster = new THREE.Raycaster();
+const pointerNdc = new THREE.Vector2();
+const planeHit = new THREE.Vector3();
+const projectedPad = new THREE.Vector3();
+
+const pickPad = (clientX: number, clientY: number): string | null => {
+  const rect = renderer.domElement.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) {
+    return null;
+  }
+  pointerNdc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  pointerNdc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  padRaycaster.setFromCamera(pointerNdc, camera);
+
+  const [direct] = padRaycaster.intersectObjects(padPickTargets, false);
+  const directPadId = direct?.object.userData.padId;
+  if (typeof directPadId === 'string') {
+    return directPadId;
+  }
+
+  if (!padRaycaster.ray.intersectPlane(padPickPlane, planeHit)) {
+    return null;
+  }
+  let nearestPadId: string | null = null;
+  let nearestDistance = PAD_PICK_RADIUS;
+  for (const pad of config.map.buildPads) {
+    const distance = Math.hypot(planeHit.x - pad.position.x, planeHit.z - pad.position.z);
+    if (distance <= nearestDistance) {
+      nearestDistance = distance;
+      nearestPadId = pad.id;
+    }
+  }
+  return nearestPadId;
+};
+
+const projectPadToCanvas = (padId: string): { padId: string; x: number; y: number } | null => {
+  const pad = padDefinitions.get(padId);
+  if (!pad) {
+    return null;
+  }
+  const rect = renderer.domElement.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) {
+    return null;
+  }
+  projectedPad.set(pad.position.x, PAD_PICK_HEIGHT, pad.position.z).project(camera);
+  return {
+    padId: pad.id,
+    x: ((projectedPad.x + 1) / 2) * rect.width,
+    y: ((1 - projectedPad.y) / 2) * rect.height,
+  };
+};
+
+const flashPadError = (padId: string) => {
+  const padView = padViews.get(padId);
+  if (padView) {
+    padView.errorUntil = elapsed + padErrorFlashSeconds;
+    refreshPadStyle(padView);
+  }
+};
+
+const attemptPlacement = (padId: string) => {
+  const result = dispatchCommand({ type: 'placeTower', padId, towerId: selectedTowerId });
+  const name = towerDefinitions.get(selectedTowerId)?.name ?? selectedTowerId;
+  if (result.accepted) {
+    setFeedback('accepted', `${name} built on ${padId}`);
+    return;
+  }
+  const reason = result.reason ?? 'rejected';
+  flashPadError(padId);
+  setFeedback('rejected', rejectionMessages[reason] ?? `Rejected: ${reason}`, reason);
+};
+
+renderer.domElement.addEventListener('click', (event) => {
+  const padId = pickPad(event.clientX, event.clientY);
+  if (padId) {
+    attemptPlacement(padId);
+  }
+});
+
+syncSelection();
+setFeedback('idle', 'Left click a build pad to place');
 applySnapshot(snapshot);
 
 let eventsDrained = 0;
 let accumulator = 0;
-let elapsed = 0;
 let previousTimestamp = performance.now();
 
 statusLabel.textContent = 'Scene online';
@@ -521,6 +696,16 @@ window.__ECHOES_DEBUG__ = {
   get snapshot() {
     return snapshot;
   },
+  get selectedTowerId() {
+    return selectedTowerId;
+  },
+  get feedback() {
+    return {
+      state: feedbackState,
+      message: commandFeedback.textContent ?? '',
+      reason: commandFeedback.getAttribute('data-reason'),
+    };
+  },
   get objectCount() {
     return scene.children.length;
   },
@@ -537,6 +722,11 @@ window.__ECHOES_DEBUG__ = {
   },
   get enemyPositions() {
     return Array.from(enemyViews.values(), (view) => ({ x: view.group.position.x, z: view.group.position.z }));
+  },
+  get padScreenPositions() {
+    return config.map.buildPads
+      .map((pad) => projectPadToCanvas(pad.id))
+      .filter((point): point is { padId: string; x: number; y: number } => point !== null);
   },
   dispatch: dispatchCommand,
 };
@@ -557,6 +747,12 @@ const renderFrame = (timestamp: number) => {
   }
 
   elapsed += frameDelta;
+  for (const padView of padViews.values()) {
+    if (padView.errorUntil > 0 && elapsed >= padView.errorUntil) {
+      padView.errorUntil = 0;
+      refreshPadStyle(padView);
+    }
+  }
   let towerSlot = 0;
   for (const view of towerViews.values()) {
     view.group.rotation.y += frameDelta * (0.34 + towerSlot * 0.08);

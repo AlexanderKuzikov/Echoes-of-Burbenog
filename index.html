@@ -52,8 +52,8 @@
           </div>
           <div class="selection-card" data-testid="selection-card">
             <span class="selection-kicker">Selected structure</span>
-            <strong>Arc Relay</strong>
-            <span>Range 4.2 · Pulse damage</span>
+            <strong data-testid="selection-card-name">Pulse Spire</strong>
+            <span data-testid="selection-card-detail">Range 2.8 · Damage 18</span>
           </div>
         </section>
 
@@ -64,15 +64,15 @@
               <small>Choose a schematic module</small>
             </div>
             <div class="build-list">
-              <button class="build-card is-selected" type="button" data-build="Pulse Spire" aria-pressed="true">
+              <button class="build-card is-selected" type="button" data-tower-id="pulse-spire" aria-pressed="true">
                 <span class="build-icon build-icon--spire"></span>
                 <span><strong>Pulse Spire</strong><small>Single target</small></span>
               </button>
-              <button class="build-card" type="button" data-build="Grove Lens" aria-pressed="false">
+              <button class="build-card" type="button" data-tower-id="grove-lens" aria-pressed="false">
                 <span class="build-icon build-icon--lens"></span>
                 <span><strong>Grove Lens</strong><small>Area control</small></span>
               </button>
-              <button class="build-card" type="button" data-build="Frost Relay" aria-pressed="false">
+              <button class="build-card" type="button" data-tower-id="frost-relay" aria-pressed="false">
                 <span class="build-icon build-icon--frost"></span>
                 <span><strong>Frost Relay</strong><small>Slow field</small></span>
               </button>
@@ -81,7 +81,7 @@
           <section class="dock-section status-section">
             <span class="status-kicker">Tactical status</span>
             <strong data-testid="selection-status">Pulse Spire ready</strong>
-            <span class="status-detail">Left click a build pad to place</span>
+            <span class="status-detail" data-testid="command-feedback" data-feedback="idle">Left click a build pad to place</span>
           </section>
           <section class="dock-section objective-section">
             <span class="status-kicker">Current objective</span>

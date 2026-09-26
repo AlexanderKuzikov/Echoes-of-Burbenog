@@ -81,3 +81,13 @@
 **Альтернативы:** Оставить ручные массивы и синхронизировать их вручную; тикать core по `requestAnimationFrame` напрямую; интерполировать snapshot по времени; перенести локальный core в отдельный worker сразу.
 
 **Trade-off:** Появляется presentation-слой projection и debug-контракт, который нужно поддерживать, а client временно владеет simulation instance. Зато browser E2E может проверять gameplay детерминированно, а будущий server layer заменит источник snapshots, не трогая projection.
+
+## 2026-09-26: Build palette по content id, единственный command path и reason как UI contract
+
+**Контекст:** После `0005` build pads только отображались, а build palette хранила display name строкой. Player intent нельзя было превратить в `placeTower` command, и клиенту негде было взять текст отказа. Core уже возвращал `CommandResult.reason`, но эти строки нигде не были закреплены как contract.
+
+**Решение:** Кнопки палитры хранят `data-tower-id` из content; client падает на старте, если кнопка ссылается на неизвестную башню или если для башни нет кнопки. Выбранный tower — одно значение `selectedTowerId`, отражённое через `aria-pressed`. Клик по pad определяется raycast по pad base/ring с позициями из content и мягким fallback на плоскость; клик отправляет `placeTower` через тот же `dispatchCommand`, что и QA seam, поэтому отдельного клиентского пути мутации state нет. `CommandResult.reason` считается UI contract: клиент показывает текст отказа и reason в DOM, pad мигает при отказе, а state не меняется.
+
+**Альтернативы:** Клиентская мутация snapshot без command; предпросмотр занятости и стоимости до отправки command; отдельный `placeTowerAtPointer` command с мировыми координатами; параллельный `startWave`-путь.
+
+**Trade-off:** Picking требует позиций pads из content и остаётся чувствительным к росту башен и будущему zoom камеры — фиксированный hit radius помечен `techdebt:`. Привязка к content id убирает статические mock-строки, но требует синхронизировать палитру и content. Причина отказа теперь часть UI, поэтому новые commands обязаны заводить стабильные reason-коды.

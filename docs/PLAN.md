@@ -44,7 +44,7 @@
 ## Фаза 3 — Первый визуальный vertical slice — следующая
 
 - [x] 0005 — Связать `MatchSnapshot` с Three.js objects: синхронизировать core, build pads, towers и enemies (принято штабом: typecheck, build, core check, Playwright snapshot contract до victory, screenshots и независимый review; blockers — 0)
-- [ ] 0006 — Сделать placement по build pads: выбор tower, command в core, стоимость и занятость pad (выдана кодовой сессии; критерий: placement проходит pure check и E2E)
+- [ ] 0006 — Сделать placement по build pads: выбор tower, command в core, стоимость и занятость pad (кодовая сессия сдала: content-bound build palette, canvas picking по pad, единственный `dispatchCommand`, reason feedback; evidence: typecheck, build, test:core, 3 Playwright passed, screenshot `test-results/build-pad-placement.png`, console чистый; статус — на проверке, ждёт приёмки штаба)
 - [ ] 0007 — Подключить запуск волны, движение enemies, targeting, damage и win/lose к HUD (критерий: полный игровой цикл воспроизводится в браузере)
 - [ ] 0008 — Принять vertical slice: pause/resume, seed replay, core check, Playwright E2E и screenshot review (критерий: все проверки зелёные, визуальная композиция читаема)
 
