@@ -169,11 +169,43 @@ Wails — поздний desktop adapter: окно, fullscreen, settings, saves 
 - Мир — XZ plane с высотой по Y, даже когда визуальные объекты плоские.
 - Grid — placement layer, а не система координат движения.
 - Временные placeholder meshes заменяются GLB без изменения simulation contracts.
-- PBR доводится IBL: `RoomEnvironment` + PMREM дают `scene.environment`. Проба — новый источник света, а сцена намеренно тёмная tactical read, поэтому её вклад ограничен `scene.environmentIntensity = 0.5`; lights, exposure и tone mapping не перенастраиваются.
+- PBR доводится IBL: `RoomEnvironment` + PMREM дают `scene.environment`. Проба — новый источник света, поэтому её вклад задаётся на материале, а не на сцене; lights, exposure и tone mapping не перенастраиваются.
 - WebGPU и тяжёлые post-processing остаются последующими оптимизациями.
 
-## Визуальные принципы
+### Вес environment probe — свойство материала
 
+Сцена намеренно тёмная tactical read, поэтому проба не применяется к ней целиком. Доля пробы задаётся
+`material.envMapIntensity` на каждом материале, который её видит, и объявлена одним списком
+`PROBE_WEIGHTS` в `main.ts`: земля и маршруты почти не берут пробы (0.1 и 0.15 — грубая
+почти-диэлектрическая поверхность не выигрывает от мягкой комнаты и только теряет свой slate),
+доля растёт с metalness детали, а загруженная GLB-модель забирает пробу целиком — ради неё проба и
+введена. Множителя на уровне сцены в коде нет.
+
+Одна строка в `withProbeWeight` несущая, и её нельзя «чистить»:
+
+```ts
+material.envMap = environmentTarget.texture;
+```
+
+Three.js читает `material.envMapIntensity` **только если материал сам владеет `envMap`**. При
+`envMap === null` и пробе на `scene.environment` renderer перезаписывает этот uniform значением
+`scene.environmentIntensity`, и объявленный вес молча игнорируется. Это не опечатка, а правило
+движка (`WebGLRenderer` при `material.envMap === null` и `MaterialProperties` для node-пути), и
+проверяется только измерением: без этой строки земля на замороженном midwave-кадре светлеет примерно
+на 16 единиц люминации вместо потемнения, при том что seam продолжает показывать вес как
+объявленный. Поэтому seam публикует не только вес, но и `ownsProbe`, и E2E требует его у каждого
+стандартного материала: отчёт не может сертифицировать значение, которого картинка не видела.
+
+Побочный эффект, который и был целью: когда каждый стандартный материал читает пробу сам, сценовый
+множитель теряет последний объект приложения и становится инертным. Возврат
+`scene.environmentIntensity` в коде ничего не меняет — измерено на одинаковом кадре.
+
+`MeshBasicMaterial` веса не несёт и не читает `envMapIntensity` вовсе: для него renderer вызывает
+только `refreshUniformsCommon` и uniform не заполняет. Такие материалы (кольца pads, ауры, health
+bars, burst-rings) остаются на `scene.environment` и пробу не гасят — они и не проектировались под
+неё, и гасить их нечем.
+
+## Визуальные принципы
 References показывают Warcraft III/Burbenog-подачу: angled top-down camera, читаемые lanes и chokepoints, заметные build slots, плотный combat, selection outline, health bars и компактный HUD.
 
 - Это reference для gameplay readability, а не surface design для копирования.

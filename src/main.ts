@@ -70,6 +70,14 @@ type DebugState = {
   readonly matchReports: MatchReport[];
   readonly motion: { reducedMotion: boolean; combatBursts: number; enemyBob: number };
   readonly assets: { status: AssetStatus; models: string[]; error: string | null };
+  // The environment probe sits on the scene at full strength, so what dims it is a property of
+  // each material. The seam publishes every standard material of the live scene with the weight it
+  // actually carries, so a material left on the silent default of 1 is visible without reading code.
+  readonly probe: {
+    environment: boolean;
+    materials: ProbeMaterialReading[];
+    undeclared: number;
+  };
   // Budgets, what was measured, and which checks actually ran. `renderer.info` and the load
   // time are the only non-deterministic numbers here, so a test may only check that they land
   // inside the budget, never their exact value.
@@ -125,6 +133,26 @@ type TowerModelReading = {
   crystalY: number;
   crystalScale: number;
   crystalEmissive: number;
+};
+
+type ProbeMaterialReading = {
+  // Scene-graph path of the mesh that owns the material, which is what localises a material whose
+  // role was never declared.
+  path: string;
+  className: string;
+  // The role that declared this material's weight, or null when nothing declared one.
+  role: string | null;
+  envMapIntensity: number;
+  // Whether the material owns the probe itself. A standard material without its own `envMap` has
+  // its `envMapIntensity` overwritten by the renderer, so a weight reported without this flag is
+  // a value the picture never saw.
+  ownsProbe: boolean;
+  // Instance identity: two views of one model must never report the same one, or they would be
+  // sharing a material and a crystal flash would light every view of that tower at once.
+  materialId: string;
+  // True only when a declared role is present, the material carries that role's weight, and the
+  // renderer will actually read it.
+  explicit: boolean;
 };
 
 type TowerView = {
@@ -239,17 +267,63 @@ scene.background = new THREE.Color(0x08131b);
 scene.fog = new THREE.Fog(0x08131b, 15, 31);
 
 // Image based lighting: metalness and roughness only read as metal under an environment, so
-// the PBR materials of the generated models get a prefiltered room probe.
+// the PBR materials of the generated models get a prefiltered room probe. There is no scene-wide
+// share of it: a scene multiplier applies to every material in the frame, including materials added
+// later, and leaves no record of why a surface looks the way it does. The share belongs to the
+// material, next to the colour and roughness it modifies.
 const pmremGenerator = new THREE.PMREMGenerator(renderer);
 const roomEnvironment = new RoomEnvironment();
 const environmentTarget = pmremGenerator.fromScene(roomEnvironment, 0.04);
 scene.environment = environmentTarget.texture;
-// The probe is a new light source, and the scene is a deliberately dark tactical read, so its
-// contribution is capped instead of being applied at full strength. Lights, exposure and tone
-// mapping stay exactly as they were.
-scene.environmentIntensity = 0.5;
 roomEnvironment.dispose();
 pmremGenerator.dispose();
+
+// The share of the environment probe each material takes, and the only dimmer left in the scene.
+// `envMapIntensity` defaults to 1, so leaving a material unset would read as "full probe" — the
+// wrong default for a deliberately dark tactical read. Ground and routes take almost none of it:
+// a rough near-dielectric surface gains nothing from a soft room and only loses the slate it was
+// authored as. The share grows with the metalness of the part, and the generated model keeps the
+// whole probe, because it is the reason the probe exists.
+const PROBE_WEIGHTS = {
+  ground: 0.1,
+  path: 0.15,
+  padBase: 0.2,
+  towerBase: 0.25,
+  towerStem: 0.35,
+  towerRoof: 0.4,
+  towerCrystal: 0.3,
+  enemyBody: 0.2,
+  enemyCrest: 0.25,
+  coreBase: 0.3,
+  coreCrystal: 0.45,
+  model: 1,
+} as const;
+
+type ProbeRole = keyof typeof PROBE_WEIGHTS;
+
+// Writes the declared weight onto the material and names the role that declared it. The stamp is
+// what tells "set on purpose" apart from "inherited": 1 is both the Three.js default and the
+// weight of the generated model, so the value alone cannot.
+//
+// The `envMap` line is load-bearing and must not be "cleaned up". Three.js only reads
+// `material.envMapIntensity` when the material owns an `envMap`: with `envMap === null` and the
+// probe on `scene.environment`, the renderer overwrites that uniform with the scene's own
+// `environmentIntensity` and the weight below is silently ignored. Measured on a frozen midwave
+// frame, dropping this line brightens the ground by about 16 levels of luminance instead of
+// darkening it, while every reported weight still reads as declared. Owning the probe is what
+// makes this the last dimmer in the scene: with no material left on the scene path, a scene-wide
+// multiplier has nothing left to multiply.
+const withProbeWeight = <T extends THREE.MeshStandardMaterial>(material: T, role: ProbeRole): T => {
+  material.envMap = environmentTarget.texture;
+  material.envMapIntensity = PROBE_WEIGHTS[role];
+  material.userData.probeRole = role;
+  return material;
+};
+
+// `MeshPhysicalMaterial` extends `MeshStandardMaterial`, so this single check covers both classes
+// that sample the probe. `MeshBasicMaterial` and `PointsMaterial` never read it and stay untouched.
+const isProbeMaterial = (material: THREE.Material): material is THREE.MeshStandardMaterial =>
+  material instanceof THREE.MeshStandardMaterial;
 
 const camera = new THREE.OrthographicCamera(-8, 8, 5, -5, 0.1, 100);
 camera.position.set(9, 10, 9);
@@ -272,11 +346,14 @@ const fillLight = new THREE.PointLight(0x2ac7b5, 3.2, 12, 2);
 fillLight.position.set(4, 3, -4);
 scene.add(fillLight);
 
-const groundMaterial = new THREE.MeshStandardMaterial({
-  color: 0x163039,
-  roughness: 0.92,
-  metalness: 0.04,
-});
+const groundMaterial = withProbeWeight(
+  new THREE.MeshStandardMaterial({
+    color: 0x163039,
+    roughness: 0.92,
+    metalness: 0.04,
+  }),
+  'ground',
+);
 const ground = new THREE.Mesh(new THREE.PlaneGeometry(config.map.width, config.map.depth), groundMaterial);
 ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
@@ -286,12 +363,15 @@ const grid = new THREE.GridHelper(config.map.width, config.map.width, 0x3d7376, 
 grid.position.y = 0.012;
 scene.add(grid);
 
-const pathMaterial = new THREE.MeshStandardMaterial({
-  color: 0x2e5c5c,
-  emissive: 0x0c2425,
-  emissiveIntensity: 0.65,
-  roughness: 0.82,
-});
+const pathMaterial = withProbeWeight(
+  new THREE.MeshStandardMaterial({
+    color: 0x2e5c5c,
+    emissive: 0x0c2425,
+    emissiveIntensity: 0.65,
+    roughness: 0.82,
+  }),
+  'path',
+);
 const PATH_Y = 0.08;
 const routeSegmentCount = config.map.routes.reduce((total, route) => total + route.points.length - 1, 0);
 for (const [routeIndex, route] of config.map.routes.entries()) {
@@ -321,13 +401,16 @@ for (const pad of config.map.buildPads) {
 
   const base = new THREE.Mesh(
     padGeometry,
-    new THREE.MeshStandardMaterial({
-      color: 0x2b7073,
-      emissive: 0x0b3135,
-      emissiveIntensity: 0.9,
-      roughness: 0.48,
-      metalness: 0.18,
-    }),
+    withProbeWeight(
+      new THREE.MeshStandardMaterial({
+        color: 0x2b7073,
+        emissive: 0x0b3135,
+        emissiveIntensity: 0.9,
+        roughness: 0.48,
+        metalness: 0.18,
+      }),
+      'padBase',
+    ),
   );
   base.position.y = 0.12;
   base.castShadow = true;
@@ -431,7 +514,10 @@ const createProceduralTowerView = (towerId: string): TowerView => {
 
   const base = new THREE.Mesh(
     new THREE.CylinderGeometry(0.46, 0.56, 0.3, 6),
-    new THREE.MeshStandardMaterial({ color: 0x1d4651, roughness: 0.46, metalness: 0.34 }),
+    withProbeWeight(
+      new THREE.MeshStandardMaterial({ color: 0x1d4651, roughness: 0.46, metalness: 0.34 }),
+      'towerBase',
+    ),
   );
   base.position.y = 0.15;
   base.castShadow = true;
@@ -440,7 +526,10 @@ const createProceduralTowerView = (towerId: string): TowerView => {
 
   const stem = new THREE.Mesh(
     new THREE.CylinderGeometry(0.2, 0.28, 0.78, 6),
-    new THREE.MeshStandardMaterial({ color: 0x346f75, roughness: 0.34, metalness: 0.5 }),
+    withProbeWeight(
+      new THREE.MeshStandardMaterial({ color: 0x346f75, roughness: 0.34, metalness: 0.5 }),
+      'towerStem',
+    ),
   );
   stem.position.y = 0.5;
   stem.castShadow = true;
@@ -448,7 +537,10 @@ const createProceduralTowerView = (towerId: string): TowerView => {
 
   const roof = new THREE.Mesh(
     new THREE.ConeGeometry(0.45, 0.42, 6),
-    new THREE.MeshStandardMaterial({ color: visual.roof, roughness: 0.3, metalness: 0.3 }),
+    withProbeWeight(
+      new THREE.MeshStandardMaterial({ color: visual.roof, roughness: 0.3, metalness: 0.3 }),
+      'towerRoof',
+    ),
   );
   roof.position.y = 1.08;
   roof.castShadow = true;
@@ -456,13 +548,16 @@ const createProceduralTowerView = (towerId: string): TowerView => {
 
   const crystal = new THREE.Mesh(
     new THREE.OctahedronGeometry(0.18, 0),
-    new THREE.MeshStandardMaterial({
-      color: visual.accent,
-      emissive: visual.accent,
-      emissiveIntensity: towerCrystalIdleIntensity,
-      roughness: 0.18,
-      metalness: 0.15,
-    }),
+    withProbeWeight(
+      new THREE.MeshStandardMaterial({
+        color: visual.accent,
+        emissive: visual.accent,
+        emissiveIntensity: towerCrystalIdleIntensity,
+        roughness: 0.18,
+        metalness: 0.15,
+      }),
+      'towerCrystal',
+    ),
   );
   crystal.position.y = 1.43;
   group.add(crystal);
@@ -510,14 +605,17 @@ const createEnemyView = (enemyId: string): EnemyView => {
 
   const body = new THREE.Mesh(
     new THREE.IcosahedronGeometry(0.32, 1),
-    new THREE.MeshStandardMaterial({ color: visual.color, emissive: visual.color, emissiveIntensity: 0.45, roughness: 0.62 }),
+    withProbeWeight(
+      new THREE.MeshStandardMaterial({ color: visual.color, emissive: visual.color, emissiveIntensity: 0.45, roughness: 0.62 }),
+      'enemyBody',
+    ),
   );
   body.castShadow = true;
   group.add(body);
 
   const crest = new THREE.Mesh(
     new THREE.ConeGeometry(0.18, 0.42, 5),
-    new THREE.MeshStandardMaterial({ color: 0xf3b77b, roughness: 0.5 }),
+    withProbeWeight(new THREE.MeshStandardMaterial({ color: 0xf3b77b, roughness: 0.5 }), 'enemyCrest'),
   );
   crest.position.y = 0.34;
   crest.rotation.z = Math.PI;
@@ -569,19 +667,25 @@ core.position.set(config.map.corePosition.x, 0.3, config.map.corePosition.z);
 core.name = 'core';
 const coreBase = new THREE.Mesh(
   new THREE.CylinderGeometry(0.8, 0.95, 0.32, 8),
-  new THREE.MeshStandardMaterial({ color: 0x285a62, roughness: 0.38, metalness: 0.42 }),
+  withProbeWeight(
+    new THREE.MeshStandardMaterial({ color: 0x285a62, roughness: 0.38, metalness: 0.42 }),
+    'coreBase',
+  ),
 );
 coreBase.castShadow = true;
 core.add(coreBase);
 const coreCrystal = new THREE.Mesh(
   new THREE.OctahedronGeometry(0.7, 1),
-  new THREE.MeshStandardMaterial({
-    color: 0x7ce7d2,
-    emissive: 0x2ac7b5,
-    emissiveIntensity: 1.8,
-    roughness: 0.16,
-    metalness: 0.22,
-  }),
+  withProbeWeight(
+    new THREE.MeshStandardMaterial({
+      color: 0x7ce7d2,
+      emissive: 0x2ac7b5,
+      emissiveIntensity: 1.8,
+      roughness: 0.16,
+      metalness: 0.22,
+    }),
+    'coreCrystal',
+  ),
 );
 coreCrystal.position.y = 1.05;
 coreCrystal.castShadow = true;
@@ -671,6 +775,24 @@ const refuseModel = (entry: ModelManifestEntry, reading: ModelReading, reason: s
   throw new AssetContractError(reason);
 };
 
+// The generated model is the reason the probe exists, so its materials take all of it. Stating it
+// here rather than leaning on the default of 1 is the whole point: a model material that arrives
+// with a different weight has to be a decision on record, not an accident of the constructor.
+const declareModelProbe = (root: THREE.Object3D) => {
+  root.traverse((child) => {
+    const material = (child as THREE.Mesh).material;
+    if (!material) {
+      return;
+    }
+    for (const entry of Array.isArray(material) ? material : [material]) {
+      if (isProbeMaterial(entry)) {
+        entry.envMap = environmentTarget.texture;
+        withProbeWeight(entry, 'model');
+      }
+    }
+  });
+};
+
 const loadModel = async (entry: ModelManifestEntry): Promise<LoadedModel> => {
   const response = await fetch(resolveModelUrl(entry));
   if (!response.ok) {
@@ -723,6 +845,7 @@ const loadModel = async (entry: ModelManifestEntry): Promise<LoadedModel> => {
   if (!gltf.scene.getObjectByName(entry.emissiveNode)) {
     return refuseModel(entry, reading, `model ${entry.id} has no ${entry.emissiveNode} node to animate`);
   }
+  declareModelProbe(gltf.scene);
   assetRegistry.recordModelCheck({ modelId: entry.id, accepted: true, ...reading, failures: [] });
   return { entry, scene: gltf.scene, emissiveNode: entry.emissiveNode };
 };
@@ -781,6 +904,45 @@ const countMeshes = (object: THREE.Object3D): number => {
     }
   });
   return total;
+};
+
+// Walks the live scene rather than a list of known materials: a standard material added later
+// without a declared weight has to turn up here as undeclared, instead of quietly rendering at
+// the full probe the Three.js default gives it.
+const objectPath = (object: THREE.Object3D): string => {
+  const segments = [object.name || object.type];
+  for (let node = object.parent; node && node !== scene; node = node.parent) {
+    segments.unshift(node.name || node.type);
+  }
+  return segments.join('/');
+};
+
+const readProbeMaterials = (): ProbeMaterialReading[] => {
+  const readings: ProbeMaterialReading[] = [];
+  scene.traverse((object) => {
+    const material = (object as THREE.Mesh).material;
+    if (!material) {
+      return;
+    }
+    for (const entry of Array.isArray(material) ? material : [material]) {
+      if (!isProbeMaterial(entry)) {
+        continue;
+      }
+      const role = typeof entry.userData.probeRole === 'string' ? entry.userData.probeRole : null;
+      const ownsProbe = entry.envMap !== null;
+      readings.push({
+        path: objectPath(object),
+        className: entry.type,
+        role,
+        envMapIntensity: entry.envMapIntensity,
+        ownsProbe,
+        materialId: entry.uuid,
+        // An unknown role name is as good as no role at all, so the lookup is allowed to miss.
+        explicit: role !== null && PROBE_WEIGHTS[role as ProbeRole] === entry.envMapIntensity && ownsProbe,
+      });
+    }
+  });
+  return readings;
 };
 
 const bootAssets = async () => {
@@ -1595,6 +1757,14 @@ window.__ECHOES_DEBUG__ = {
   },
   get assets() {
     return { status: assetRegistry.status, models: assetRegistry.modelIds, error: assetRegistry.error };
+  },
+  get probe() {
+    const materials = readProbeMaterials();
+    return {
+      environment: scene.environment !== null,
+      materials,
+      undeclared: materials.filter((entry) => !entry.explicit).length,
+    };
   },
   get assetBudgets() {
     return {

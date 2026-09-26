@@ -6,6 +6,7 @@ import { MODEL_BUDGET } from '../src/asset-budgets.ts';
 const scenario = createTrainingScenario();
 const padById = new Map(scenario.map.buildPads.map((pad) => [pad.id, pad]));
 const routeSegmentCount = scenario.map.routes.reduce((total, route) => total + route.points.length - 1, 0);
+const padCount = scenario.map.buildPads.length;
 const firstWavePrepTicks = scenario.waves[0].prepTicks;
 const placements = [
   { padId: 'pad-east', towerId: 'pulse-spire' },
@@ -55,6 +56,19 @@ type DebugReading = {
   matchReports: MatchReport[];
   motion: { reducedMotion: boolean; combatBursts: number; enemyBob: number };
   assets: { status: string; models: string[]; error: string | null };
+  probe: {
+    environment: boolean;
+    materials: Array<{
+      path: string;
+      className: string;
+      role: string | null;
+      envMapIntensity: number;
+      ownsProbe: boolean;
+      materialId: string;
+      explicit: boolean;
+    }>;
+    undeclared: number;
+  };
   assetBudgets: AssetBudgetsReading;
   towerModels: Array<{
     entityId: number;
@@ -132,6 +146,7 @@ const readDebug = (page: Page) =>
       matchReports: debug.matchReports,
       motion: debug.motion,
       assets: debug.assets,
+      probe: debug.probe,
       assetBudgets: debug.assetBudgets,
       towerModels: debug.towerModels,
       snapshot: debug.snapshot,
@@ -1158,6 +1173,151 @@ test('swaps a placed placeholder for the generated GLB without touching the snap
   expect(pageErrors).toEqual([]);
 
   await page.screenshot({ path: 'test-results/vertical-slice-asset-swap.png', fullPage: true });
+});
+
+test('weights the environment probe per material and keeps the generated model at full probe', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto('/');
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+
+  // Two spires of the one model that has a registry entry. The second view is the proof that the
+  // weight reaches per-view material copies instead of only the loaded source scene, and that two
+  // views of one model are still two sets of materials rather than one shared set.
+  await page.getByRole('button', { name: 'Pulse Spire' }).click();
+  await clickPad(page, 'pad-east');
+  await page.getByRole('button', { name: 'Pulse Spire' }).click();
+  await clickPad(page, 'pad-south');
+  await page.getByRole('button', { name: 'Grove Lens' }).click();
+  await clickPad(page, 'pad-north');
+  await waitForAssetsReady(page);
+
+  const armed = await readDebugOrThrow(page);
+  expect(armed.snapshot.towers).toHaveLength(3);
+  // Towers keep the order they were built in, and both spires were placed after the registry
+  // answered, so neither view went through the procedural placeholder phase.
+  expect(armed.towerModels.map((view) => [view.towerId, view.source])).toEqual([
+    ['pulse-spire', 'model'],
+    ['pulse-spire', 'model'],
+    ['grove-lens', 'procedural'],
+  ]);
+  expect(armed.probe.environment).toBe(true);
+
+  await page.getByTestId('start-wave').click();
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.enemies.length ?? 0) > 0);
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.eventCounts.towerFired ?? 0) > 0);
+
+  // One read, so the material map and the snapshot it is judged against come from the same frame.
+  const { probe, snapshot, towerModels } = await readDebugOrThrow(page);
+  expect(snapshot.status).toBe('wave');
+  expect(snapshot.enemies.length).toBeGreaterThan(0);
+
+  // The scene-wide dimmer is gone: nothing multiplies the probe for materials that were never
+  // authored to receive it, so every standard material has to carry a weight of its own. `1` is
+  // the Three.js default, which is exactly why "not declared" has to be a visible state.
+  expect(probe.materials.length).toBeGreaterThan(0);
+  expect(probe.undeclared).toBe(0);
+  expect(probe.materials.filter((entry) => !entry.explicit)).toEqual([]);
+  // Three.js reads `envMapIntensity` only when the material owns the probe. A material riding
+  // `scene.environment` has that uniform overwritten, so a declared weight nobody renders would
+  // pass every check above while the picture ignored it.
+  expect(probe.materials.filter((entry) => !entry.ownsProbe)).toEqual([]);
+
+  // The declared list is exhaustive, not "found by eye": with a wave running, enemies alive and
+  // both a loaded and a procedural tower on screen, every role has to be present in the live scene.
+  expect([...new Set(probe.materials.map((entry) => entry.role))].sort()).toEqual([
+    'coreBase',
+    'coreCrystal',
+    'enemyBody',
+    'enemyCrest',
+    'ground',
+    'model',
+    'padBase',
+    'path',
+    'towerBase',
+    'towerCrystal',
+    'towerRoof',
+    'towerStem',
+  ]);
+  expect(probe.materials.every((entry) => entry.className === 'MeshStandardMaterial')).toBe(true);
+
+  const byRole = (role: string) => probe.materials.filter((entry) => entry.role === role);
+  // The ground and the routes are the surfaces the scene-wide cap was hiding: they get a small,
+  // explicit share instead of whatever the default would have given them.
+  expect(byRole('ground')).toHaveLength(1);
+  expect(byRole('ground')[0]?.envMapIntensity).toBeLessThanOrEqual(0.2);
+  expect(byRole('path')).toHaveLength(routeSegmentCount);
+  for (const segment of byRole('path')) {
+    expect(segment.envMapIntensity).toBeLessThanOrEqual(0.2);
+  }
+  expect(byRole('padBase')).toHaveLength(padCount);
+  for (const pad of byRole('padBase')) {
+    expect(pad.envMapIntensity).toBeLessThanOrEqual(0.2);
+  }
+
+  // The generated model is the reason the probe exists, so it keeps all of it.
+  const modelMaterials = byRole('model');
+  for (const material of modelMaterials) {
+    expect(material.envMapIntensity).toBeGreaterThanOrEqual(0.9);
+  }
+  // Five part meshes on each of the two spire views, and no two of them the same material: the
+  // weight was stamped once on the loaded scene and every per-view copy inherited it.
+  expect(modelMaterials).toHaveLength(10);
+  expect(new Set(modelMaterials.map((entry) => entry.materialId)).size).toBe(10);
+  const crystalMaterials = modelMaterials.filter((entry) => entry.path.endsWith('/crystal'));
+  expect(crystalMaterials).toHaveLength(2);
+  expect(crystalMaterials[0]?.materialId).not.toBe(crystalMaterials[1]?.materialId);
+  expect(towerModels.filter((view) => view.source === 'model')).toHaveLength(2);
+
+  console.log(
+    `probe weights: ${probe.materials.length} standard materials, ${probe.undeclared} undeclared, ` +
+      `${[...new Set(probe.materials.map((entry) => `${entry.role}=${entry.envMapIntensity}`))].sort().join(', ')}`,
+  );
+
+  // The crystal flash has to stay local to the tower that fired, and that holds only while the two
+  // spire views keep separate materials. Sampled over a stretch of combat instead of on one frame:
+  // the flash lasts 0.22s and both spires may legitimately fire close together, so the claim worth
+  // checking is that a frame exists where one spire is lit and the other is not.
+  await page.evaluate(() => {
+    const samples = { spireFrames: 0, loneSpireFrames: 0 };
+    const timer = window.setInterval(() => {
+      const spires = (window.__ECHOES_DEBUG__?.towerModels ?? []).filter((view) => view.source === 'model');
+      if (spires.length < 2 || !spires.some((view) => view.crystalEmissive > 2.4)) {
+        return;
+      }
+      samples.spireFrames += 1;
+      if (spires.filter((view) => view.crystalEmissive > 2.4).length === 1) {
+        samples.loneSpireFrames += 1;
+      }
+    }, 16);
+    const host = window as unknown as {
+      __ECHOES_FLASH__?: { samples: typeof samples; stop: () => void };
+    };
+    host.__ECHOES_FLASH__ = { samples, stop: () => window.clearInterval(timer) };
+  });
+
+  await page.waitForFunction(
+    () => {
+      const host = window as unknown as { __ECHOES_FLASH__?: { samples: { loneSpireFrames: number } } };
+      return (host.__ECHOES_FLASH__?.samples.loneSpireFrames ?? 0) > 0;
+    },
+    undefined,
+    { timeout: 60_000 },
+  );
+
+  const flashSamples = await page.evaluate(() => {
+    const host = window as unknown as {
+      __ECHOES_FLASH__?: { samples: { spireFrames: number; loneSpireFrames: number }; stop: () => void };
+    };
+    const reading = host.__ECHOES_FLASH__?.samples ?? { spireFrames: 0, loneSpireFrames: 0 };
+    host.__ECHOES_FLASH__?.stop();
+    return reading;
+  });
+
+  // Both spires were caught mid-combat, and at least one frame had exactly one of them lit. A
+  // shared crystal material would light both on every shot and `loneSpireFrames` would stay at zero.
+  expect(flashSamples.spireFrames).toBeGreaterThan(0);
+  expect(flashSamples.loneSpireFrames).toBeGreaterThan(0);
+  expect(flashSamples.loneSpireFrames).toBeLessThanOrEqual(flashSamples.spireFrames);
 });
 
 test('keeps the match playable and names the failure when the model registry is unavailable', async ({ page }) => {
