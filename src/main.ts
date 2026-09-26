@@ -74,6 +74,12 @@ type RebuildReading = {
   poses: Array<{ entityId: number; towerId: string; clip: TowerClipReading | null }>;
 };
 
+// Which of the two things Continue acts on the entry screen, and what the entry is offering right
+// now. `live` is the entry MENU opened over a match the player is in the middle of; the rest are
+// states of the slot. `confirm` is not a state of the slot but of the button: the first New match
+// press arms it, and only the second one erases anything.
+type EntryMode = 'empty' | 'slot' | 'unreadable' | 'live' | 'confirm';
+
 type DebugState = {
   ready: boolean;
   renderer: string;
@@ -105,6 +111,15 @@ type DebugState = {
   // The run a rebuild arrived at, captured in the page on the tick it stopped on, and `null` until
   // a Load in this page session has finished one.
   readonly lastRebuild: RebuildReading | null;
+  // The entry screen as the page sees it. `continuing` names the one thing the Continue button will
+  // do, which is the difference between a restore and a resume and therefore the claim that the
+  // entry did not grow a second implementation of Load.
+  readonly entry: {
+    open: boolean;
+    mode: EntryMode;
+    armed: boolean;
+    continuing: 'slot' | 'match' | null;
+  };
   // The frame clock, and the seam that puts a fat frame on purpose. `null` is the product's only
   // mode: measure the real frame. An armed value goes through the same clamp a real frame does, so
   // a test cannot ask for a frame the product would never produce.
@@ -290,6 +305,14 @@ const saveFeedback = document.querySelector<HTMLElement>('[data-testid="save-fee
 const saveButton = document.querySelector<HTMLButtonElement>('[data-testid="save-match"]');
 const loadButton = document.querySelector<HTMLButtonElement>('[data-testid="load-match"]');
 const newMatchButton = document.querySelector<HTMLButtonElement>('[data-testid="new-match"]');
+const menuButton = document.querySelector<HTMLButtonElement>('[data-testid="menu-button"]');
+const gameShell = document.querySelector<HTMLElement>('.game-shell');
+const entryScreen = document.querySelector<HTMLElement>('[data-testid="entry-screen"]');
+const entrySlot = document.querySelector<HTMLElement>('[data-testid="entry-slot"]');
+const entryHint = document.querySelector<HTMLElement>('[data-testid="entry-hint"]');
+const entryFeedback = document.querySelector<HTMLElement>('[data-testid="entry-feedback"]');
+const entryContinueButton = document.querySelector<HTMLButtonElement>('[data-testid="entry-continue"]');
+const entryNewMatchButton = document.querySelector<HTMLButtonElement>('[data-testid="entry-new-match"]');
 
 if (
   !sceneMount ||
@@ -318,7 +341,15 @@ if (
   !saveFeedback ||
   !saveButton ||
   !loadButton ||
-  !newMatchButton
+  !newMatchButton ||
+  !menuButton ||
+  !gameShell ||
+  !entryScreen ||
+  !entrySlot ||
+  !entryHint ||
+  !entryFeedback ||
+  !entryContinueButton ||
+  !entryNewMatchButton
 ) {
   throw new Error('Bootstrap DOM is incomplete');
 }
@@ -1872,14 +1903,33 @@ const readSaveSlot = (): SaveSlotReading => {
 };
 
 const setSaveFeedback = (result: 'idle' | 'saved' | 'loaded' | 'refused' | 'cleared', message: string, reason?: string) => {
-  saveFeedback.textContent = message;
-  saveFeedback.dataset.result = result;
-  if (reason) {
-    saveFeedback.setAttribute('data-reason', reason);
-  } else {
-    saveFeedback.removeAttribute('data-reason');
+  // One writer, two surfaces. The dock line is where the result belongs while a match is being
+  // played, and the entry line is the same sentence where the player can read it before there is a
+  // match — a refusal that happens at the entry would otherwise be reported behind a closed
+  // overlay, which is the one place a player cannot act on it.
+  for (const line of [saveFeedback, entryFeedback]) {
+    line.textContent = message;
+    line.dataset.result = result;
+    if (reason) {
+      line.setAttribute('data-reason', reason);
+    } else {
+      line.removeAttribute('data-reason');
+    }
   }
 };
+
+// The reading the entry and the dock share. It is kept rather than re-read at each use so that the
+// two surfaces answer the same question from the same moment: `refreshSaveSlot` is the only reader
+// of the slot in the page, and whatever it last saw is what both of them are describing.
+let slotReading: SaveSlotReading = { state: 'empty' };
+
+// Save is named the same way wherever it is read, including its plural, so the entry and the dock
+// cannot drift into two formats of the same fact.
+const commandCountLabel = (commands: number): string =>
+  `${commands} ${commands === 1 ? 'command' : 'commands'}`;
+
+const slotStateLabel = (payload: MatchSavePayload): string =>
+  `Save · tick ${payload.tick} · ${commandCountLabel(payload.log.length)}`;
 
 // The slot is read on boot and after every action that touches it, so a slot that exists is visible
 // before anything is loaded from it and there is no state in which a match is restored behind the
@@ -1887,6 +1937,7 @@ const setSaveFeedback = (result: 'idle' | 'saved' | 'loaded' | 'refused' | 'clea
 // match is what clears it.
 const refreshSaveSlot = (): SaveSlotReading => {
   const reading = readSaveSlot();
+  slotReading = reading;
   if (reading.state === 'empty') {
     saveSlotLabel.textContent = 'No save slot';
     saveSlotLabel.dataset.state = 'empty';
@@ -1899,8 +1950,7 @@ const refreshSaveSlot = (): SaveSlotReading => {
     loadButton.disabled = false;
     return reading;
   }
-  const commands = reading.payload.log.length;
-  saveSlotLabel.textContent = `Save · tick ${reading.payload.tick} · ${commands} ${commands === 1 ? 'command' : 'commands'}`;
+  saveSlotLabel.textContent = slotStateLabel(reading.payload);
   saveSlotLabel.dataset.state = 'ready';
   loadButton.disabled = false;
   return reading;
@@ -1932,15 +1982,19 @@ const saveMatch = () => {
   setSaveFeedback('saved', `Saved · tick ${payload.tick}`);
 };
 
-const loadMatch = () => {
+// Load is the one restore path, and it is shared: the dock's Load and the entry's Continue are the
+// same call, so the entry cannot have grown a restore of its own. It answers whether the run was
+// handed to the rebuild, because a refused slot has to leave the player where they were — with the
+// reason on screen — instead of closing a surface that just refused to do anything.
+const loadMatch = (): boolean => {
   const reading = refreshSaveSlot();
   if (reading.state === 'refused') {
     setSaveFeedback('refused', reading.message, reading.reason);
-    return;
+    return false;
   }
   if (reading.state === 'empty') {
     setSaveFeedback('refused', 'There is no save to load', 'save-slot-missing');
-    return;
+    return false;
   }
   // The slot becomes the log of the run that is about to be rebuilt: the log is the whole input of
   // a match, so this is the one place where a load replaces what the page remembered.
@@ -1950,6 +2004,7 @@ const loadMatch = () => {
   }
   beginRecordedRun(reading.payload.tick);
   setSaveFeedback('idle', `Rebuilding to tick ${reading.payload.tick}`);
+  return true;
 };
 
 // New match is a different action from Restart and means something else: the slot goes away and the
@@ -1971,6 +2026,143 @@ const newMatch = () => {
     clearFailure === null ? undefined : 'save-clear-failed',
   );
 };
+
+// --- Entry screen ---------------------------------------------------------------------------
+// One overlay in the same document, opened on boot and by MENU, and it has exactly three jobs: say
+// what there is to continue, offer the two actions that exist, and get out of the way. It is not a
+// router and not a second bootstrap — the same `Simulation` and the same slot reading the dock uses
+// are behind it, and the shell is `inert` while it is open, so nothing can happen off-screen.
+//
+// The match clock is stopped while the entry is open, and that is not a pause the player asked for:
+// it is the entry being a place where the game is not running. It is also what makes "MENU changes
+// nothing" true — the match that comes back is the match that went away, on the same tick — and it
+// is why the entry can be read at all while a saved match is being rebuilt behind it.
+let entryOpen = true;
+let entryFromMenu = false;
+let entryArmed = false;
+
+const entryHasSave = (): boolean => slotReading.state !== 'empty';
+
+const entryModeFor = (reading: SaveSlotReading): EntryMode => {
+  // The armed state outranks the slot state, because it describes the button and not the slot: the
+  // slot is still exactly where it was while the first press is waiting for a second one.
+  if (entryArmed) {
+    return 'confirm';
+  }
+  if (entryFromMenu) {
+    return 'live';
+  }
+  if (reading.state === 'empty') {
+    return 'empty';
+  }
+  return reading.state === 'ready' ? 'slot' : 'unreadable';
+};
+
+const entrySlotText = (mode: EntryMode, reading: SaveSlotReading): string => {
+  if (mode === 'live') {
+    return `In progress · tick ${snapshot.tick} · ${commandCountLabel(commandLog.length)}`;
+  }
+  // The armed state describes the button and not the slot, so the line keeps saying what the slot
+  // holds: "unreadable" here would be the one case where the copy is worse than the truth.
+  if (reading.state === 'ready') {
+    return slotStateLabel(reading.payload);
+  }
+  if (reading.state === 'refused') {
+    return 'Save slot unreadable';
+  }
+  return 'No saved match in this browser';
+};
+
+const entryHintText = (mode: EntryMode): string => {
+  switch (mode) {
+    case 'live':
+      return 'Menu kept the match and the save where they were. Continue goes back into the match.';
+    case 'slot':
+      return 'Continue rebuilds the saved match by replaying its commands up to the saved tick.';
+    case 'unreadable':
+      return 'Continue says why the save cannot be read. New match erases it and starts over.';
+    case 'confirm':
+      return 'New match erases the save in this browser. Press again to confirm.';
+    default:
+      return 'New match starts a fresh preparation. Nothing is recorded yet.';
+  }
+};
+
+const syncEntry = () => {
+  // A closed entry reads nothing: the slot is looked at on boot and by the actions that can change
+  // it, and an overlay that is not on screen has no reason to hold a second opinion.
+  const reading = entryOpen ? refreshSaveSlot() : slotReading;
+  const mode = entryOpen ? entryModeFor(reading) : 'empty';
+  entryScreen.hidden = !entryOpen;
+  gameShell.inert = entryOpen;
+  entryScreen.dataset.entry = mode;
+  entrySlot.dataset.slotState =
+    mode === 'live' ? 'live' : reading.state === 'refused' ? 'unreadable' : reading.state === 'ready' ? 'slot' : 'empty';
+  entrySlot.textContent = entryOpen ? entrySlotText(mode, reading) : '';
+  entryHint.textContent = entryOpen ? entryHintText(mode) : '';
+  // Continue is offered whenever there is something to continue: a save to rebuild, or a match of the
+  // player's own to go back into. It stays available in the armed state, which is the way out of it
+  // that does not destroy anything.
+  entryContinueButton.hidden = !entryOpen || mode === 'empty';
+  entryNewMatchButton.dataset.confirm = entryArmed ? 'armed' : 'idle';
+  entryNewMatchButton.textContent = entryArmed ? 'Erase the save' : 'New match';
+};
+
+const openEntry = (fromMenu: boolean) => {
+  entryFromMenu = fromMenu;
+  entryArmed = false;
+  entryOpen = true;
+  syncEntry();
+  // Focus goes to the action that is there, so a keyboard player lands on Continue when there is
+  // something to continue and on New match when there is not.
+  (entryContinueButton.hidden ? entryNewMatchButton : entryContinueButton).focus();
+};
+
+const closeEntry = () => {
+  entryOpen = false;
+  entryArmed = false;
+  syncEntry();
+  // Focus goes back where it came from: MENU returns the player to the button that opened the entry,
+  // and the boot entry hands over to the control the next action starts from.
+  (entryFromMenu ? menuButton : startWaveButton).focus();
+};
+
+// Continue is the same call as the dock's Load, and nothing else. On the boot entry there is no match
+// of the player's own yet, so continuing means rebuilding the saved one. From MENU the match is
+// still there, so continuing means letting it run again: rebuilding it from the slot would replace a
+// match nobody asked to replace, with a copy of one that may be several ticks behind it.
+const continueFromEntry = () => {
+  if (entryFromMenu) {
+    closeEntry();
+    return;
+  }
+  if (!loadMatch()) {
+    return;
+  }
+  closeEntry();
+};
+
+// New match is the only irreversible action in the game, so on the entry it asks a second time —
+// and only when there is a save to destroy, because that is what the confirmation is for. With
+// nothing there to lose the first press is the whole action. The armed press changes the button and
+// the copy; it does not touch the slot, the log or the match.
+const newMatchFromEntry = () => {
+  if (entryHasSave() && !entryArmed) {
+    entryArmed = true;
+    syncEntry();
+    return;
+  }
+  newMatch();
+  closeEntry();
+};
+
+entryContinueButton.addEventListener('click', continueFromEntry);
+entryNewMatchButton.addEventListener('click', newMatchFromEntry);
+// MENU is the way back and it erases nothing: no slot, no log, no core. The match is simply frozen
+// behind the overlay and released again by Continue.
+menuButton.addEventListener('click', () => {
+  openEntry(true);
+});
 
 // The tick of the slot has been reached, so the rebuilt run is the saved match and the clock may run
 // on. The reading is left to the end of the frame, where the presentation of this tick is in place.
@@ -2240,7 +2432,9 @@ pauseToggle.addEventListener('click', () => {
 });
 restartButton.addEventListener('click', restartMatch);
 saveButton.addEventListener('click', saveMatch);
-loadButton.addEventListener('click', loadMatch);
+loadButton.addEventListener('click', () => {
+  loadMatch();
+});
 newMatchButton.addEventListener('click', newMatch);
 reducedMotionQuery.addEventListener('change', (event) => {
   reducedMotion = event.matches;
@@ -2262,10 +2456,11 @@ reducedMotionQuery.addEventListener('change', (event) => {
 syncSelection();
 setFeedback('idle', 'Left click a build pad to place');
 applySnapshot(snapshot);
-// The slot is looked at, not loaded: a match is only ever restored because the player asked for it,
-// and the indicator says whether there is anything to ask about.
-refreshSaveSlot();
+// The page opens on the entry screen rather than in a preparation: the slot is looked at, never
+// loaded, and the match behind the overlay is a fresh preparation of tick 0 that the player has not
+// asked for yet. Nothing runs until an action on the entry says so.
 setSaveFeedback('idle', 'Local slot · this browser');
+openEntry(false);
 void bootAssets();
 
 let accumulator = 0;
@@ -2438,6 +2633,16 @@ window.__ECHOES_DEBUG__ = {
   get lastRebuild() {
     return lastRebuild;
   },
+  get entry() {
+    return {
+      open: entryOpen,
+      mode: entryOpen ? entryModeFor(slotReading) : 'empty',
+      armed: entryArmed,
+      // What the Continue button will do, named rather than inferred: restoring the slot or going
+      // back into the match the player left running. `null` when there is no Continue to press.
+      continuing: entryOpen && !entryContinueButton.hidden ? (entryFromMenu ? ('match' as const) : ('slot' as const)) : null,
+    };
+  },
   get motion() {
     const clips = Array.from(towerViews.values(), (view) => view.clip);
     return {
@@ -2501,7 +2706,11 @@ const pendingCommandTick = (): number | null =>
 
 const renderFrame = (timestamp: number) => {
   const frameDelta = readFrameDelta(timestamp);
-  if (!paused) {
+  // The entry screen stops the match clock the same way a pause does, and for the same reason the
+  // pause is a clock control and not a state of the match: what the player comes back to has to be
+  // the match they left. `paused` is the player's own switch and stays exactly as they left it, so
+  // Continue from MENU returns a frozen match still frozen if it was frozen.
+  if (!paused && !entryOpen) {
     accumulator += frameDelta;
     // A frame may spend whole ticks only up to the tick of the next recorded command. Without this
     // ceiling a frame that steps five ticks walks straight over that tick, and `applyReplayPlan`

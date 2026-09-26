@@ -718,6 +718,13 @@ h1 {
   gap: 6px;
 }
 
+/* Menu takes a row of its own for the same reason New match does in the save panel: a third control
+   in a two-column grid either squeezes Pause and Restart or grows the column, and both of them are
+   controls the player presses mid-match. */
+.wave-controls > :last-child {
+  grid-column: 1 / -1;
+}
+
 .wave-clock {
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.06em;
@@ -843,6 +850,146 @@ h1 {
   white-space: nowrap;
 }
 
+/* The entry screen is chrome of the same language as the rest: same kicker, same panel border, same
+   button shape. It dims the shell it covers and takes the whole window, because the only thing a
+   player may do before choosing is nothing at all. No blur and no animation: a menu that costs
+   frames to be readable is a menu that fails under load. */
+.entry-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(4, 12, 17, 0.78);
+}
+
+.entry-screen[hidden] {
+  display: none;
+}
+
+.entry-panel {
+  display: grid;
+  gap: 10px;
+  width: min(430px, 100%);
+  padding: 22px 24px;
+  border: 1px solid rgba(110, 226, 207, 0.42);
+  border-radius: 16px;
+  background: rgba(9, 24, 31, 0.97);
+  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.45);
+}
+
+.entry-kicker {
+  margin: 0;
+  color: #6ee2cf;
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.entry-title {
+  margin: 0;
+  color: #f1faf7;
+  font-size: clamp(1.1rem, 2.4vw, 1.5rem);
+  font-weight: 650;
+  letter-spacing: -0.03em;
+}
+
+/* The state of the thing Continue acts on, and the reason the entry exists: a tick and a command
+   count the player cannot read are worse than one more line of chrome, so this line wraps and is
+   never shortened. */
+.entry-slot {
+  margin: 0;
+  color: #e7f4ef;
+  font-size: 0.74rem;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.entry-slot[data-slot-state="slot"] {
+  color: #6ee2cf;
+}
+
+.entry-slot[data-slot-state="unreadable"] {
+  color: #ff9a8c;
+}
+
+.entry-slot[data-slot-state="live"] {
+  color: #ffc56b;
+}
+
+.entry-hint {
+  margin: 0;
+  color: #789495;
+  font-size: 0.62rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.entry-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.entry-button {
+  flex: 1 1 120px;
+  padding: 10px 14px;
+  border: 1px solid rgba(143, 184, 184, 0.24);
+  border-radius: 9px;
+  background: rgba(9, 24, 31, 0.62);
+  color: #bcd6d2;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.entry-button:hover,
+.entry-button:focus-visible {
+  border-color: #6ee2cf;
+  outline: none;
+  transform: translateY(-1px);
+}
+
+/* A save is the one thing in the game that cannot be brought back, so the button that arms its
+   destruction wears the same warning colour the result banner uses for a lost core. The state lives
+   on the button instead of in a class, so the label and the colour cannot come apart. */
+.entry-button--primary,
+.entry-button[data-confirm="armed"] {
+  border-color: rgba(110, 226, 207, 0.55);
+  background: linear-gradient(135deg, rgba(42, 199, 181, 0.28), rgba(29, 81, 79, 0.5));
+  color: #eafff8;
+}
+
+.entry-button[data-confirm="armed"] {
+  border-color: rgba(228, 108, 98, 0.65);
+  background: linear-gradient(135deg, rgba(228, 108, 98, 0.26), rgba(96, 44, 42, 0.55));
+  color: #ffd9d3;
+}
+
+/* The same sentence the dock's save line carries, on the surface the player is looking at. */
+.entry-feedback {
+  margin: 0;
+  color: #789495;
+  font-size: 0.62rem;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.entry-feedback[data-result="saved"],
+.entry-feedback[data-result="loaded"] {
+  color: #74e0b4;
+}
+
+.entry-feedback[data-result="refused"] {
+  color: #ff9a8c;
+}
+
 /* Five panels stop fitting on one row a little above 900 px, and the row cannot be squeezed to fit:
    the palette holds the width its names need, so below that it takes a row of its own instead of
    letting the row run past the edge of the window. The stacked layout for narrow windows is the
@@ -959,7 +1106,8 @@ h1 {
 
   .viewport-shell,
   .build-card,
-  .wave-button {
+  .wave-button,
+  .entry-button {
     transition: none;
   }
 }

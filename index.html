@@ -125,6 +125,12 @@
                   title="Restart from the same seed and replay the recorded commands"
                   disabled
                 >Restart</button>
+                <button
+                  class="wave-button wave-button--ghost"
+                  type="button"
+                  data-testid="menu-button"
+                  title="Back to the entry screen; the match and the save stay where they are"
+                >Menu</button>
               </div>
             </div>
           </section>
@@ -158,6 +164,39 @@
           </section>
         </footer>
       </main>
+
+      <!-- The entry screen is a layer over the same document, not a second page: one HTML file, one
+           client, one `Simulation`, no router. While it is open the shell underneath is `inert`, so
+           the entry is the only surface a click can reach — that is what makes "nothing happened
+           behind it" a property of the document instead of a convention. `main.ts` writes
+           `data-entry` (`empty` / `slot` / `unreadable` / `live` / `confirm`) from the same slot
+           reading the dock uses, so the two surfaces cannot disagree about whether a save exists. -->
+      <div
+        class="entry-screen"
+        data-testid="entry-screen"
+        data-entry="empty"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="entry-title"
+      >
+        <div class="entry-panel">
+          <p class="entry-kicker">Echoes of Burbenog</p>
+          <h2 class="entry-title" id="entry-title" data-testid="entry-title">First Contact</h2>
+          <p class="entry-slot" data-testid="entry-slot" data-slot-state="empty">No saved match in this browser</p>
+          <p class="entry-hint" data-testid="entry-hint">New match starts a fresh preparation</p>
+          <div class="entry-actions">
+            <button class="entry-button" type="button" data-testid="entry-continue" hidden>Continue</button>
+            <button
+              class="entry-button entry-button--primary"
+              type="button"
+              data-testid="entry-new-match"
+              data-confirm="idle"
+              title="Clear the save slot and start a fresh preparation without the recorded run"
+            >New match</button>
+          </div>
+          <p class="entry-feedback" data-testid="entry-feedback" data-result="idle">Local slot · this browser</p>
+        </div>
+      </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

@@ -1,6 +1,6 @@
 # 0016 — Экран входа и полный E2E от меню до терминала
 
-> Статус: выдана кодовой сессии
+> Статус: сдана кодовой сессией, на проверке штаба
 > Приоритет: P0
 > Фаза: 5 — Offline singleplayer
 > Следующая приёмка: `0017`; фаза 5 на этом закрывается
@@ -90,18 +90,123 @@ npx playwright test --repeat-each=2
 
 ## Отчёт сессии
 
-После работы указать:
+### 1. `EOB-021` закрыт первым шагом, до входа
 
-- изменённые файлы и почему каждый менялся;
-- состояния оверлея и переходы между ними, включая подтверждение;
-- путь Continue: показать, что это тот же код восстановления, что Load в `0015`, а не вторая реализация;
-- измерения полного пути: тик, золото, число команд и поза на входе и после Continue;
-- доказательство закрытия `EOB-021` и число прогонов под нагрузкой;
-- доказательство красного прогона;
-- подтверждение, что `?dev`, терминальный экран, core и content не сломаны;
-- команды и результат, список screenshots;
-- остаток проблем и что уходит из фазы 5;
-- статус задачи: `на проверке` или `принята`.
+В сценарии `restores the same match from a real page reload` фаза после Load читалась из живого DOM:
+
+```ts
+// было
+await expect(page.getByTestId('match-phase')).toHaveAttribute('data-phase', 'wave');
+// стало
+expect(rebuild.snapshot.status).toBe('wave');
+```
+
+`rebuild` — это `lastRebuild`, page-side отметка прибытия пересборки: она снимается в конце кадра, на котором rebuild достиг тика слота, и несёт `requestedTick`, `tick`, `snapshot`, `eventCounts`, `commandCount`, `replayIndex`, `matchReports` и позы. Диагноз штаба подтверждён: матч после Load снова живой, кадр ускорен до пяти тиков, до victory остаётся ~54 кадра, и round-trip успевал увидеть `victory`.
+
+Что осталось читать из живого DOM и почему это не тот класс: `data-replay="idle"` (после пересборки replay не может вернуться сам), `state-badge` скрыт, `save-match` доступен — это свойства, которые без клика не меняются. Всё движущееся — фаза, тик, золото, поза — теперь приходит из отметки.
+
+**Число прогонов под нагрузкой:** `--repeat-each=10 --workers=6` по этому сценарию — 10/10 за 29.7 s, `requestedTick === tick` во всех десяти (сохранённые тики 54, 56, 56, 63, 68, 69, 72, 86 — тик зависит от того, когда легли клики, а прибытие пересборки равно запрошенному всегда).
+
+### 2. Изменённые файлы и почему каждый
+
+| Файл | Что в нём |
+|------|----------|
+| `index.html` | оверлей входа (`entry-screen`, `entry-title`, `entry-slot`, `entry-hint`, `entry-continue`, `entry-new-match`, `entry-feedback`) и единственный новый контрол `MENU` в доке |
+| `src/styles.css` | оверлей в существующем языке, затемняющая подложка, `MENU` во всю ширину ряда, armed-состояние кнопки в цвете проигранного core, `.entry-button` в список отключаемых transition'ов |
+| `src/main.ts` | состояние входа, чтение слота для показа, `openEntry`/`closeEntry`/`syncEntry`, `continueFromEntry`, `newMatchFromEntry`, слушатель `MENU`, остановка часов на входе, `loadMatch` с результатом, общий писатель строки слота, seam `entry` |
+| `tests/smoke.spec.ts` | правка `EOB-021`, вход в 25 существующих сценариев, переезд трёх сценариев слота на `Continue`, семь новых сценариев, общая примитива измерения подписей |
+
+`src/game-core/*`, `content`, `scripts/*`, `src/asset-budgets.ts`, `src/asset-registry.ts`, `package.json` в diff не входят, новых зависимостей нет.
+
+### 3. Состояния оверлея и переходы
+
+`data-entry` на `entry-screen`: `empty` → `slot` / `unreadable` → `confirm`, и `live` → `confirm` из `MENU`.
+
+| Состояние | Строка слота | Кнопки |
+|-----------|--------------|--------|
+| `empty` | `No saved match in this browser` | `New match` (одно нажатие — стирать нечего) |
+| `slot` | `Save · tick N · M commands` | `Continue`, `New match` |
+| `unreadable` | `Save slot unreadable` | `Continue` (объяснит отказ), `New match` |
+| `live` | `In progress · tick N · M commands` | `Continue` (возврат в матч), `New match` |
+| `confirm` | как до вооружения — слот не изменился | `Continue` (выход), `Erase the save` |
+
+Переходы: `New match` при слоте → `confirm` (кнопка вооружается: `data-confirm="armed"`, текст `Erase the save`, подсказка «Press again to confirm»); второе нажатие → слот стёрт, матч с тика 0, оверлей закрыт. При пустом слоте `New match` сразу. `Continue` на boot-входе → пересборка; `Continue` в `live` → оверлей закрыт, матч идёт дальше. `MENU` → оверлей, ничего не стирая.
+
+Пока оверлей открыт, `.game-shell` получает `inert`: клик не достаёт до pad'а и до кнопок дока, и это проверяется `elementFromPoint` по трём точкам, а не скриншотом.
+
+### 4. Путь Continue: это тот же код, что Load в `0015`
+
+`continueFromEntry` на boot-входе вызывает `loadMatch` — ту же функцию, что и слушатель кнопки `Load` в доке. Второй реализации восстановления нет: `beginRecordedRun(stopTick)` остался единственной точкой пересборки, а `loadMatch` теперь возвращает `boolean`, чтобы отказ по слоту оставил оверлей открытым с причиной на нём.
+
+Из `MENU` Continue возвращает идущий матч и ничего не пересобирает — это видно по тому, что `lastRebuild` остаётся `null` и тик продолжается со своего места, а не с нуля. Обе ветки названы в seam (`entry.continuing` = `slot` | `match` | `null`), поэтому утверждение проверяется, а не заявлено.
+
+### 5. Измерения полного пути
+
+| Что | Значения |
+|-----|----------|
+| Вход на пустом слоте | `data-entry=empty`, `continuing=null`, `inert=true`, фокус на `entry-new-match`, тик 0; через 700 ms тик 0 |
+| Вход со слотом | `Save · tick 14 · 3 commands`, `Continue`; rebuild прибыл на 15 при запрошенном 15, `snapshot`, `eventCounts`, `commandCount` (3) и поза совпали полностью; plan `placeTower@5->5 10->10 14->14` |
+| Путь до победы | `placeTower@15->15 24->24 28->28 startWave@31->31`, terminal tick 324, gold 229, 16 врагов, 0 протечек |
+| Поражение | `leaks 10`, `coreDamaged 10`, report `defeat`, тик по сценарию |
+| `MENU` | parked на тике 35 с `In progress · tick 35 · 4 commands`; снапшот, `eventCounts`, пауза и слот байт в байт те же; resume с тика 35, `lastRebuild` = `null`; второй `MENU` — слот на месте |
+| Подтверждение | armed на тике 24 со строкой `Save · tick 21 · 3 commands`, слот байт в байт, через 500 ms снапшот тот же; второе нажатие — preparation тика 0, слот `null` |
+
+Подготовка тика 0 в последней строке детерминирована, а не «повезло»: перед вторым нажатием кадр ставится на решётку `0.001` s через существующий seam `forceFrameDelta`, поэтому тик не может прийти за round-trip. Это тот же приём, что `0014` и `0015`, только в другую сторону.
+
+Подписи входа меряются глифами через `Range.getClientRects()` против padding box — той же примитивой, что после fix'а `0015` (она теперь обслуживает и док, и вход), в трёх состояниях на 1280×720 и на 560 px.
+
+### 6. Красные прогоны
+
+**Возвращена автозагрузка слота** (`queueMicrotask` на boot, если слот читается — без входа):
+
+- `offers Continue on a saved slot and rebuilds the same match from the entry` — `expected open true, received false`;
+- `restores the same match from a real page reload` — `expected commandCount 0, received 4` (log слота взят без участия игрока);
+- `opens the entry screen on an empty slot` остался зелёным, что и правильно: при пустом слоте автозагружать нечего, поэтому ловят его именно сценарные со слотом.
+
+**Снято подтверждение у New match** (одно нажатие стирает слот):
+
+- `clears the slot only after a confirmed New match on the entry screen` — `expected data-entry confirm, received empty`;
+- `keeps the entry labels readable in every state and the dev diagnostics behind it` — то же;
+- `refuses a save that does not match the contract and leaves the slot untouched` — то же.
+
+Первая версия красной правки ловила не то: автозагрузка была поставлена в бут до `let accumulator`, и страница падала в TDZ (`Cannot access 'accumulator' before initialization`) — красным было падение загрузки, а не утверждение. Правка перенесена в `queueMicrotask`, после вычисления модуля, и красным стал именно вход.
+
+### 7. Что осталось целым
+
+- `?dev`: блок диагностики создаётся как раньше, оверлей лежит поверх него (`pointInside('scene-diagnostics', 'entry-screen')` = `true`) и убирается вместе с собой (то же = `false`); после закрытия блок виден и совпадает с seam по `drawCalls` и `shaderPrograms`.
+- Терминальный экран: `match-result`, `Restart`, `New match` и правдивый terminal copy не тронуты; набор `Retry / Next / Menu` не вводился.
+- Core, content, генератор, общий модуль бюджетов, реестр моделей, `package.json` — побайтово прежние; артефакт 20 044 байта / 580 треугольников / `sha256:32befa7a…`.
+
+### 8. Команды и результат
+
+```text
+npm run typecheck    ok
+npm run build        ok (691.26 kB │ gzip: 179.43 kB)
+npm run test:core    status victory, tick 323, gold 229 — те же значения
+npm run test:assets  11 красных проверок, assets: ok (--test)
+npm test             ×3 подряд: 32 passed (1.3–1.4 min) каждая
+npx playwright test --repeat-each=2   64 passed (2.6 min)
+```
+
+Дополнительно: `--repeat-each=10 --workers=6` по сценарию Load — 10/10 (29.7 s); то же по семи сценариям входа — 50/50 (2.4 min). `git status` после `npm test` чистый.
+
+Наблюдение без блокеров: на `--workers=10` (выше шести, которые берёт конфигурация) два сценария не успевают открыть страницу за 30 s — `Test timeout of 30000ms exceeded while setting up "page"`, то есть потолок запуска браузера на этой машине, а не продукт. Первый нагрузоный прогон сессии один раз дал `worker process exited unexpectedly (code=3221226505)` при живом с 07:02 dev-сервере; после остановки сервера два прогона подряд чистые.
+
+### 9. Screenshots
+
+Новые: `entry-screen-slot.png` (вход со слотом, оба действия), `entry-screen-empty.png` (пустой слот, одно действие), `entry-screen-menu.png` (`MENU` поверх идущего матча), `entry-screen-confirm.png` (armed-состояние), `entry-screen-narrow.png` (560 px), `entry-to-victory.png` (путь от входа до победы). Диагностические кадры под `?dev` — `entry-labels-*.png`, в `docs/screenshots/` не публикуются. Пересняты `wave-combat-midwave`, `wave-combat-victory`, `vertical-slice-replay-reset`, `vertical-slice-match-load` — док вырос на ряд `MENU`.
+
+### 10. Решение сессии, которое штаб может переиграть
+
+**Подтверждение требуется только когда есть что стирать.** Обоснование штаба — уничтожение слота как единственное необратимое действие, поэтому ритуал подтверждения при пустом слоте был бы формой без содержания: там первое нажатие и есть всё действие. Цена переигрывания — одно нажатие в сценарии `opens the entry screen on an empty slot` и `data-entry` без состояния `armed` на пустом слоте.
+
+### 11. Остаток и что уходит из фазы 5
+
+Уходит из фазы 5: экран входа, полный путь от входа до терминала, `EOB-021`. Остаётся открытым: `EOB-020` (у тика слота нет верхней границы — вход показывает тик до того, как игрок что-то с ним сделает, и стирание подтверждается, но сама граница не введена), `EOB-017` (остальные измерения часов в suite ещё не переведены на page-side отметки), `EOB-010` (session-level replay), `EOB-005` (art direction — вход первая поверхность, где оно станет заметным), `EOB-014` (разнести `main.ts`), `EOB-016`, `EOB-002`, `EOB-003`, `EOB-004`, `EOB-007`, `EOB-008`, `EOB-009`, `EOB-012`.
+
+### 12. Статус
+
+`на проверке`. В `docs/PLAN.md` задача остаётся без `[x]`.
 
 До приёмки задача остаётся без `[x]` в `docs/PLAN.md`.
 

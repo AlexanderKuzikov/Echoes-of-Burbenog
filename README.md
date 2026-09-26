@@ -23,16 +23,18 @@
 
 ## Скриншоты
 
-| Середина волны | Победа | Replay с тем же seed | Восстановление после перезагрузки |
-|:-:|:-:|:-:|:-:|
-| ![Середина волны](docs/screenshots/wave-combat-midwave.png) | ![Победа](docs/screenshots/wave-combat-victory.png) | ![Replay](docs/screenshots/vertical-slice-replay-reset.png) | ![Загруженный матч](docs/screenshots/vertical-slice-match-load.png) |
-| Route, build pads, combat log и HUD — проекция `MatchSnapshot` | Terminal state, `Sector secured`, `restart repeats this run exactly` | Тот же матч перезапускается по command log: `REPLAY · 0 / 4 COMMANDS`, палитра и Start Wave заблокированы | Тот же матч после настоящей перезагрузки страницы: слот хранит seed, content, тик и log, а `Load` пересимулирует его до сохранённого тика |
+| Вход | Середина волны | Победа | Replay с тем же seed | Восстановление после перезагрузки |
+|:-:|:-:|:-:|:-:|:-:|
+| ![Вход](docs/screenshots/entry-screen-slot.png) | ![Середина волны](docs/screenshots/wave-combat-midwave.png) | ![Победа](docs/screenshots/wave-combat-victory.png) | ![Replay](docs/screenshots/vertical-slice-replay-reset.png) | ![Загруженный матч](docs/screenshots/vertical-slice-match-load.png) |
+| Страница открывается на входе, а не в preparation: слот назван тиком и числом команд, решение остаётся за игроком, матч за оверлеем не идёт | Route, build pads, combat log и HUD — проекция `MatchSnapshot` | Terminal state, `Sector secured`, `restart repeats this run exactly` | Тот же матч перезапускается по command log: `REPLAY · 0 / 4 COMMANDS`, палитра и Start Wave заблокированы | Тот же матч после настоящей перезагрузки страницы: слот хранит seed, content, тик и log, а `Continue` пересимулирует его до сохранённого тика |
+
+Остальные состояния входа — `entry-screen-empty.png` (пустой слот, единственное действие), `entry-screen-menu.png` (`MENU` поверх идущего матча), `entry-screen-confirm.png` (подтверждение стирания слота вторым нажатием), `entry-screen-narrow.png` (560 px) и `entry-to-victory.png` (полный путь от входа до победы).
 
 Снимки — копии `test-results/`, которые снимает E2E-сьютка. Обновляются на приёмке задачи, меняющей картинку.
 
 ## Быстрый старт
 
-Репозиторий содержит первый вертикальный срез: 3D-ready сцена, schematic build pads, запуск волны, combat, pause/resume, replay по seed, локальное сохранение матча по command log и HUD — всё поверх детерминированного pure core.
+Репозиторий содержит первый вертикальный срез: 3D-ready сцена, schematic build pads, запуск волны, combat, pause/resume, replay по seed, экран входа с локальным сохранением матча по command log и HUD — всё поверх детерминированного pure core.
 
 ```bash
 git clone https://github.com/AlexanderKuzikov/Echoes-of-Burbenog.git
@@ -70,7 +72,7 @@ npm test
 
 ## Статус
 
-**v0.1.0-alpha** — browser bootstrap, pure deterministic core, snapshot projection, placement, combat presentation, pause/resume, seed replay, локальное сохранение матча (слот хранит вход симуляции, Load — пересимуляция до сохранённого тика) и asset pipeline с генератором GLB и budgets реализованы и покрыты E2E. Срез проходит полный игровой цикл в браузере и переживает перезагрузку страницы. Далее — фаза 5: полный E2E от меню до победы.
+**v0.1.0-alpha** — browser bootstrap, pure deterministic core, snapshot projection, placement, combat presentation, pause/resume, seed replay, экран входа (Continue из слота или подтверждаемый New match, `MENU` без потери матча), локальное сохранение матча (слот хранит вход симуляции, Load — пересимуляция до сохранённого тика) и asset pipeline с генератором GLB и budgets реализованы и покрыты E2E. Срез проходит полный игровой цикл в браузере от экрана входа и переживает перезагрузку страницы. Фаза 5 закрыта; следующая — `0017`, локальный кооператив.
 
 ## Лицензия
 

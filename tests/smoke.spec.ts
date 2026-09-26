@@ -144,6 +144,7 @@ type DebugReading = {
   commandCount: number;
   matchReports: MatchReport[];
   lastRebuild: RebuildReading | null;
+  entry: { open: boolean; mode: string; armed: boolean; continuing: 'slot' | 'match' | null };
   motion: { reducedMotion: boolean; combatBursts: number; enemyBob: number; clips: number; clipsPlaying: number };
   assets: { status: string; models: string[]; error: string | null };
   probe: {
@@ -244,6 +245,7 @@ const readDebug = (page: Page) =>
       commandCount: debug.commandCount,
       matchReports: debug.matchReports,
       lastRebuild: debug.lastRebuild,
+      entry: debug.entry,
       motion: debug.motion,
       assets: debug.assets,
       probe: debug.probe,
@@ -398,6 +400,49 @@ const armDefendedWave = async (page: Page) => {
 // against a scene that is still swapping placeholders for loaded models.
 const waitForAssetsReady = (page: Page) =>
   expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'ready');
+
+// The page opens on the entry screen, so a scenario starts the way a player does: the entry offers
+// Continue only when there is something to continue, and New match asks a second time before it
+// erases a save. This helper is the whole of that, and it presses the same two buttons a player
+// presses — the scenarios that check the entry itself do not use it.
+const enterAsNewMatch = async (page: Page) => {
+  const screen = page.getByTestId('entry-screen');
+  await expect(screen).toBeVisible();
+  await page.getByTestId('entry-new-match').click();
+  // A save is the one irreversible thing in the game, so it is confirmed by a second press. With
+  // nothing to destroy the first press is the whole action.
+  if ((await screen.getAttribute('data-entry')) === 'confirm') {
+    await page.getByTestId('entry-new-match').click();
+  }
+  await expect(screen).toBeHidden();
+};
+
+// The entry as the page sees it, next to the shell's own state: `inert` is the attribute that makes
+// "nothing happened behind the overlay" a property of the document instead of a claim about it.
+const readEntry = (page: Page) =>
+  page.evaluate(() => {
+    const debug = window.__ECHOES_DEBUG__;
+    const shell = document.querySelector('.game-shell');
+    const inertHost = shell as HTMLElement | null;
+    const text = (testId: string) => document.querySelector(`[data-testid="${testId}"]`)?.textContent ?? null;
+    const screen = document.querySelector<HTMLElement>('[data-testid="entry-screen"]');
+    return {
+      ...(debug?.entry ?? { open: false, mode: 'empty', armed: false, continuing: null }),
+      inert: inertHost?.inert ?? null,
+      hidden: screen?.hidden ?? null,
+      dialog: screen?.getAttribute('role') ?? null,
+      modal: screen?.getAttribute('aria-modal') ?? null,
+      slotState: document.querySelector('[data-testid="entry-slot"]')?.getAttribute('data-slot-state') ?? null,
+      feedbackResult: document.querySelector('[data-testid="entry-feedback"]')?.getAttribute('data-result') ?? null,
+      focused: document.activeElement?.getAttribute('data-testid') ?? null,
+      slot: text('entry-slot'),
+      hint: text('entry-hint'),
+      feedback: text('entry-feedback'),
+      continueVisible: document.querySelector<HTMLElement>('[data-testid="entry-continue"]')?.hidden === false,
+      newMatchLabel: text('entry-new-match'),
+      confirm: document.querySelector('[data-testid="entry-new-match"]')?.getAttribute('data-confirm') ?? null,
+    };
+  });
 
 type ClipReading = {
   clipName: string;
@@ -563,47 +608,55 @@ const expectRefusalFullyReadable = async (page: Page) => {
   return measured;
 };
 
-// The dock has to show the whole label, not a shortened one: a tower name and the slot state are the
-// two pieces of text in it that carry information the player cannot guess. Both are measured by
-// glyph rects against the padding box of the box that shows them, because an ellipsis, a shortened
-// string and a clipped overflow all leave the box exactly the size it was.
-const expectDockLabelsVisible = async (page: Page) => {
-  const measured = await page.evaluate(() => {
-    const readLabel = (label: Element, container: Element) => {
-      const containerStyle = getComputedStyle(container);
-      const labelStyle = getComputedStyle(label);
-      const containerBox = container.getBoundingClientRect();
-      const range = document.createRange();
-      range.selectNodeContents(label);
-      return {
-        text: label.textContent ?? '',
-        textOverflow: labelStyle.textOverflow,
-        clipped: label.scrollWidth > label.clientWidth + 1,
-        box: { left: containerBox.left, right: containerBox.right, top: containerBox.top, bottom: containerBox.bottom },
-        padding: {
-          top: parseFloat(containerStyle.paddingTop),
-          right: parseFloat(containerStyle.paddingRight),
-          bottom: parseFloat(containerStyle.paddingBottom),
-          left: parseFloat(containerStyle.paddingLeft),
-        },
-        glyphs: [...range.getClientRects()].map((rect) => ({
-          x: rect.x,
-          y: rect.y,
-          width: rect.width,
-          height: rect.height,
-        })),
-      };
-    };
-    return {
-      names: [...document.querySelectorAll('.build-card')].map((card) =>
-        readLabel(card.querySelector('strong') as Element, card),
-      ),
-      slot: readLabel(document.querySelector('[data-testid="save-slot"]') as Element, document.querySelector('.save-heading') as Element),
-    };
-  });
+// The measure behind every "this text is readable" claim in the suite: the glyph rects of a label
+// against the padding box of the box that shows it. An ellipsis, a shortened string and a clipped
+// overflow all leave the box exactly the size it was, so the box alone proves nothing — the glyphs
+// are what carry the evidence. Selectors come from the caller because the surfaces differ (the
+// dock's cards, the entry's lines) while the claim stays the same.
+const measureLabels = (page: Page, labelSelector: string, containerSelector: string) =>
+  page.evaluate(
+    ({ labelSelector, containerSelector }) =>
+      Array.from(document.querySelectorAll(labelSelector)).map((label) => {
+        const container = label.closest<HTMLElement>(containerSelector);
+        if (!container) {
+          throw new Error(`${labelSelector} has no ${containerSelector} around it`);
+        }
+        const containerStyle = getComputedStyle(container);
+        const labelStyle = getComputedStyle(label);
+        const containerBox = container.getBoundingClientRect();
+        const range = document.createRange();
+        range.selectNodeContents(label);
+        return {
+          text: label.textContent ?? '',
+          textOverflow: labelStyle.textOverflow,
+          clipped: label.scrollWidth > label.clientWidth + 1,
+          box: {
+            left: containerBox.left,
+            right: containerBox.right,
+            top: containerBox.top,
+            bottom: containerBox.bottom,
+          },
+          padding: {
+            top: parseFloat(containerStyle.paddingTop),
+            right: parseFloat(containerStyle.paddingRight),
+            bottom: parseFloat(containerStyle.paddingBottom),
+            left: parseFloat(containerStyle.paddingLeft),
+          },
+          glyphs: [...range.getClientRects()].map((rect) => ({
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+          })),
+        };
+      }),
+    { labelSelector, containerSelector },
+  );
 
-  expect(measured.names.length).toBeGreaterThan(0);
-  for (const label of [...measured.names, measured.slot]) {
+const expectLabelsVisible = async (page: Page, labelSelector: string, containerSelector: string) => {
+  const measured = await measureLabels(page, labelSelector, containerSelector);
+  expect(measured.length, `${labelSelector} matched nothing`).toBeGreaterThan(0);
+  for (const label of measured) {
     expect(label.glyphs.length, `${label.text} produced no measurable glyphs`).toBeGreaterThan(0);
     expect(label.textOverflow, `${label.text} is shortened with an ellipsis`).not.toBe('ellipsis');
     expect(label.clipped, `${label.text} does not fit the box that shows it`).toBe(false);
@@ -617,6 +670,33 @@ const expectDockLabelsVisible = async (page: Page) => {
     expect(inside, `${label.text} has a glyph outside the box that shows it`).toBe(true);
   }
   return measured;
+};
+
+// The dock has to show the whole label, not a shortened one: a tower name and the slot state are the
+// two pieces of text in it that carry information the player cannot guess. Both are measured by
+// glyph rects against the padding box of the box that shows them, because an ellipsis, a shortened
+// string and a clipped overflow all leave the box exactly the size it was.
+const expectDockLabelsVisible = async (page: Page) => {
+  const names = await expectLabelsVisible(page, '.build-card strong', '.build-card');
+  const slot = await expectLabelsVisible(page, '[data-testid="save-slot"]', '.save-heading');
+  if (!slot[0]) {
+    throw new Error('the save slot line is missing');
+  }
+  return { names, slot: slot[0] };
+};
+
+// The entry screen is held to the same rules: its lines and its buttons carry a tick, a command count
+// and the price of erasing a save, and none of that may be cut. Hidden buttons are left out of the
+// measurement — Continue is legitimately absent when there is no save — and their absence is asserted
+// as a state, not as a label that produced no glyphs.
+const expectEntryLabelsVisible = async (page: Page) => {
+  const lines = await expectLabelsVisible(
+    page,
+    '.entry-kicker, .entry-title, .entry-slot, .entry-hint, .entry-feedback',
+    '.entry-panel',
+  );
+  const buttons = await expectLabelsVisible(page, '.entry-button:not([hidden])', '.entry-button');
+  return { lines, buttons };
 };
 
 const emptyEventCounts = (): Record<SimulationEvent['type'], number> => ({
@@ -650,6 +730,7 @@ const expectProjectionMatchesSnapshot = (debug: DebugReading) => {
 
 test('renders the first 3D-ready scene and accepts build selection', async ({ page }) => {
   await page.goto('/');
+  await enterAsNewMatch(page);
   await waitForAssetsReady(page);
 
   await expect(page.getByTestId('game-title')).toHaveText('First Contact');
@@ -697,6 +778,8 @@ test('renders the first 3D-ready scene and accepts build selection', async ({ pa
 test('drives presentation from MatchSnapshot without duplicated state', async ({ page }) => {
   test.setTimeout(90_000);
   await page.goto('/');
+  await enterAsNewMatch(page);
+  await waitForAssetsReady(page);
   await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.tick ?? 0) > 0);
 
   const initial = await readDebug(page);
@@ -805,6 +888,7 @@ test('places the selected tower on a clicked build pad through the command contr
   test.setTimeout(60_000);
   await page.goto('/');
   await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await enterAsNewMatch(page);
 
   const initial = await readDebugOrThrow(page);
   expect(initial.selectedTowerId).toBe('pulse-spire');
@@ -896,6 +980,7 @@ test('plays a defended wave from real clicks and reports victory from the snapsh
   test.setTimeout(120_000);
   await page.goto('/');
   await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await enterAsNewMatch(page);
 
   await page.getByRole('button', { name: 'Pulse Spire' }).click();
   await clickPad(page, 'pad-east');
@@ -1047,6 +1132,7 @@ test('reports defeat when an undefended wave reaches the core', async ({ page })
   test.setTimeout(120_000);
   await page.goto('/');
   await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await enterAsNewMatch(page);
 
   const initial = await readDebugOrThrow(page);
   expect(initial.snapshot.towers).toEqual([]);
@@ -1105,6 +1191,7 @@ test('freezes and resumes the fixed-step clock without drift', async ({ page }) 
   test.setTimeout(120_000);
   await page.goto('/');
   await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await enterAsNewMatch(page);
 
   await armDefendedWave(page);
   await page.getByTestId('start-wave').click();
@@ -1201,6 +1288,7 @@ test('restarts from the same seed and replays the recorded command log', async (
   test.setTimeout(150_000);
   await page.goto('/');
   await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await enterAsNewMatch(page);
 
   await expect(page.getByTestId('restart-match')).toBeDisabled();
   await armDefendedWave(page);
@@ -1303,6 +1391,7 @@ test('rejects commands injected during replay and keeps the recorded run identic
   test.setTimeout(180_000);
   await page.goto('/');
   await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await enterAsNewMatch(page);
 
   const recordedCommands = placements.length + 1;
   await armDefendedWave(page);
@@ -1398,6 +1487,7 @@ test('drops transient canvas effects under prefers-reduced-motion', async ({ pag
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.goto('/');
   await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await enterAsNewMatch(page);
 
   const initial = await readDebugOrThrow(page);
   expect(initial.reducedMotion).toBe(true);
@@ -1473,6 +1563,7 @@ test('swaps a placed placeholder for the generated GLB without touching the snap
 
   await page.goto('/');
   await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await enterAsNewMatch(page);
   await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'loading');
 
   // Only pulse-spire has a model in this task, so the scene holds one model and two procedural
@@ -1589,6 +1680,7 @@ test('weights the environment probe per material and keeps the generated model a
   test.setTimeout(120_000);
   await page.goto('/');
   await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await enterAsNewMatch(page);
 
   // Two spires of the one model that has a registry entry. The second view is the proof that the
   // weight reaches per-view material copies instead of only the loaded source scene, and that two
@@ -1734,6 +1826,7 @@ test('plays the tower clip on presentation time and freezes it while paused', as
   test.setTimeout(120_000);
   await page.goto('/');
   await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await enterAsNewMatch(page);
   // The model is in place before the tower is built, so the view is a model view from the start and
   // the clip belongs to that tower rather than to a swap that happened at an unknown moment.
   await waitForAssetsReady(page);
@@ -1785,6 +1878,7 @@ test('reproduces the same clip pose on the same tick after a restart', async ({ 
   test.setTimeout(180_000);
   await page.goto('/');
   await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await enterAsNewMatch(page);
   await waitForAssetsReady(page);
   await armDefendedWave(page);
   await page.getByTestId('start-wave').click();
@@ -1837,6 +1931,7 @@ test('applies a recorded command on its own tick when a frame steps several tick
   test.setTimeout(180_000);
   await page.goto('/');
   await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await enterAsNewMatch(page);
   await waitForAssetsReady(page);
 
   // The claim under test: replay reproduces the match whatever number of ticks a frame steps. The
@@ -1942,6 +2037,7 @@ test('refuses a model whose skeleton carries more bones than the budget allows',
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
   await page.goto('/');
+  await enterAsNewMatch(page);
   await expectAssetRefused(page);
 
   // A skeleton is allowed now, so the refusal has to name the number that broke the budget rather
@@ -1998,6 +2094,7 @@ test('keeps the match playable and names the failure when the model registry is 
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
   await page.goto('/');
+  await enterAsNewMatch(page);
   await expectAssetRefused(page);
 
   // Fail-fast is visible, not silent: the reason is in the viewport, not in a console warning.
@@ -2031,6 +2128,7 @@ test('keeps the match playable and names the failure when the model registry is 
 test('keeps the current scene inside the model, registry and scene budgets', async ({ page }) => {
   test.setTimeout(120_000);
   await page.goto('/');
+  await enterAsNewMatch(page);
   await armDefendedWave(page);
   await waitForAssetsReady(page);
   await page.getByTestId('start-wave').click();
@@ -2139,6 +2237,7 @@ test('refuses a model whose content hash the manifest does not match', async ({ 
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
   await page.goto('/');
+  await enterAsNewMatch(page);
   await expectAssetRefused(page);
 
   // The refusal is loud and it names the model and the reason: a tampered distribution is
@@ -2210,6 +2309,7 @@ test('refuses a model whose manifest claims more triangles than the model budget
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
   await page.goto('/');
+  await enterAsNewMatch(page);
   await expectAssetRefused(page);
 
   // The refusal names the model, the measured value and the limit it broke, because "the registry
@@ -2273,6 +2373,7 @@ test('keeps the gameplay status free of dev-machine numbers and the DOM free of 
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
   await page.goto('/');
+  await enterAsNewMatch(page);
   await waitForAssetsReady(page);
 
   // Without the flag there is no diagnostics element to hide: it is not in the document, it is not
@@ -2341,6 +2442,7 @@ test('gives the refusal a block of its own and puts the budgets behind the dev f
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
   await page.goto('/?dev=1');
+  await enterAsNewMatch(page);
   await expectAssetRefused(page);
   await expect(page.getByTestId('viewport')).toHaveAttribute('data-diagnostics', 'on');
 
@@ -2450,6 +2552,7 @@ test('restores the same match from a real page reload', async ({ page }) => {
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto('/');
   await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await enterAsNewMatch(page);
   await waitForAssetsReady(page);
   await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'empty');
   await expect(page.getByTestId('load-match')).toBeDisabled();
@@ -2522,6 +2625,21 @@ test('restores the same match from a real page reload', async ({ page }) => {
   expect(reloaded.snapshot.towers).toEqual([]);
   expect(reloaded.snapshot.tick).toBeLessThan(savedTick);
   expect(reloaded.lastRebuild).toBeNull();
+  // The entry is where the page opens, and it says what it has without touching it. This is the
+  // "no autoload" half of the claim: a slot that is on screen and a match that is still tick 0 of
+  // its own preparation, with the clock behind the overlay not running.
+  const offered = await readEntry(page);
+  expect(offered.open).toBe(true);
+  expect(offered.mode).toBe('slot');
+  expect(offered.continuing).toBe('slot');
+  expect(offered.inert).toBe(true);
+  expect(offered.slot).toBe(`Save · tick ${savedTick} · ${SAVE_COMMANDS} commands`);
+  expect(offered.continueVisible).toBe(true);
+  expect(offered.newMatchLabel).toBe('New match');
+  expect(offered.confirm).toBe('idle');
+  await page.waitForTimeout(500);
+  const stillOffered = await readDebugOrThrow(page);
+  expect(stillOffered.snapshot.tick, 'the match ran behind the entry').toBe(reloaded.snapshot.tick);
   // The slot is visible before anything is loaded from it, and nothing was loaded by itself.
   await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'ready');
   await expect(page.getByTestId('save-slot')).toHaveText(`Save · tick ${savedTick} · ${SAVE_COMMANDS} commands`);
@@ -2533,7 +2651,8 @@ test('restores the same match from a real page reload', async ({ page }) => {
   // frame goes through: five ticks per frame is the product's own maximum.
   await setFrameDelta(page, 0.25);
   await waitForAssetsReady(page);
-  await page.getByTestId('load-match').click();
+  await page.getByTestId('entry-continue').click();
+  await expect(page.getByTestId('entry-screen')).toBeHidden();
   await expect(page.getByTestId('save-feedback')).toHaveAttribute('data-result', 'loaded', { timeout: 60_000 });
   await expect(page.getByTestId('save-feedback')).toHaveText(`Loaded · tick ${savedTick}`);
 
@@ -2581,10 +2700,16 @@ test('restores the same match from a real page reload', async ({ page }) => {
   });
   expect(await readSlot(page)).toBe(raw);
 
+  // The phase of the rebuilt match is read from the arrival mark above, never from the live DOM
+  // (`EOB-021`). This match is running again the moment the rebuild lands, and the frame clock is
+  // armed at five ticks a frame, so a match saved early in the wave reaches victory within a few
+  // dozen frames — a round-trip read of `match-phase` was reaching `victory` under load while the
+  // product was right. What the live page may still be asked for is a property that does not move:
+  // the replay guard is down and the terminal banner has nothing to say.
   await expect(page.getByTestId('viewport')).toHaveAttribute('data-replay', 'idle');
-  await expect(page.getByTestId('match-phase')).toHaveAttribute('data-phase', 'wave');
   await expect(page.getByTestId('save-match')).toBeEnabled();
   await expect(page.getByTestId('state-badge')).toBeHidden();
+  expect(rebuild.snapshot.status).toBe('wave');
   await page.screenshot({ path: 'test-results/vertical-slice-match-load.png', fullPage: true });
 
   // The guard the load ran behind is the guard a restart arms, and a load did not weaken it. The
@@ -2619,6 +2744,7 @@ test('keeps a won match won after a load and clears the slot on a new match', as
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto('/');
   await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await enterAsNewMatch(page);
   await waitForAssetsReady(page);
 
   await armDefendedWave(page);
@@ -2646,10 +2772,14 @@ test('keeps a won match won after a load and clears the slot on a new match', as
   expect(reloaded.matchReports).toEqual([]);
   expect(reloaded.lastRebuild).toBeNull();
   await expect(page.getByTestId('match-result')).toBeHidden();
+  // A won match is a save like any other: the entry offers it and does not take it.
+  await expect(page.getByTestId('entry-slot')).toHaveText(`Save · tick ${terminalTick} · ${SAVE_COMMANDS} commands`);
+  await expect(page.getByTestId('entry-screen')).toHaveAttribute('data-entry', 'slot');
 
   await setFrameDelta(page, 0.25);
   await waitForAssetsReady(page);
-  await page.getByTestId('load-match').click();
+  await page.getByTestId('entry-continue').click();
+  await expect(page.getByTestId('entry-screen')).toBeHidden();
   await expect(page.getByTestId('save-feedback')).toHaveAttribute('data-result', 'loaded', { timeout: 60_000 });
 
   const loaded = await readDebugOrThrow(page);
@@ -2745,6 +2875,7 @@ test('refuses a save that does not match the contract and leaves the slot untouc
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto('/');
   await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await enterAsNewMatch(page);
   await waitForAssetsReady(page);
 
   const log = [
@@ -2822,18 +2953,13 @@ test('refuses a save that does not match the contract and leaves the slot untouc
   ];
 
   // The first refusal happens on a page that is playing: the artifact is left alone and the match in
-  // front of the player does not move, which is the property the version check exists for.
+  // front of the player does not move, which is the property the version check exists for. The save
+  // is the player's own, and something else then leaves an artifact this build cannot read where it
+  // is — another tab, another build — and the dock's Load is how the player finds out.
   const incompatible = cases[1];
   if (!incompatible) {
     throw new Error('the content version case is missing');
   }
-  await writeSlot(page, incompatible.raw);
-  await page.reload();
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
-  await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'unreadable');
-  await expect(page.getByTestId('load-match')).toBeEnabled();
-  await waitForAssetsReady(page);
-
   await armDefendedWave(page);
   await page.getByTestId('start-wave').click();
   await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.enemies.length ?? 0) > 0, undefined, {
@@ -2844,7 +2970,10 @@ test('refuses a save that does not match the contract and leaves the slot untouc
   const frozen = await readDebugOrThrow(page);
   expect(frozen.paused).toBe(true);
   expect(frozen.snapshot.status).toBe('wave');
+  await page.getByTestId('save-match').click();
+  await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'ready');
 
+  await writeSlot(page, incompatible.raw);
   await page.getByTestId('load-match').click();
   await expect(page.getByTestId('save-feedback')).toHaveAttribute('data-result', 'refused');
   await expect(page.getByTestId('save-feedback')).toHaveAttribute('data-reason', incompatible.reason);
@@ -2860,20 +2989,31 @@ test('refuses a save that does not match the contract and leaves the slot untouc
   await expect(page.getByTestId('match-phase')).toHaveAttribute('data-phase', 'wave');
   await expect(page.getByTestId('save-match')).toBeEnabled();
 
+  // The rest are refused where the player meets the slot: on the entry screen. Continue is the same
+  // Load, and a refusal there has to be said on the surface that is open — a reason on a line behind
+  // a closed overlay is a reason nobody can act on. So the entry stays open, and the run behind it is
+  // still the fresh preparation nobody asked to replace.
   for (const refusal of cases) {
-    if (refusal.name === incompatible.name) {
-      continue;
-    }
     await writeSlot(page, refusal.raw);
     await page.reload();
     await expect(page.getByTestId('scene-canvas')).toBeVisible();
+    await waitForAssetsReady(page);
     await expect(page.getByTestId('save-slot'), refusal.name).toHaveAttribute('data-state', 'unreadable');
     await expect(page.getByTestId('load-match'), refusal.name).toBeEnabled();
-    await page.getByTestId('load-match').click();
-    await expect(page.getByTestId('save-feedback'), refusal.name).toHaveAttribute('data-result', 'refused');
-    await expect(page.getByTestId('save-feedback'), refusal.name).toHaveAttribute('data-reason', refusal.reason);
-    await expect(page.getByTestId('save-feedback'), refusal.name).toContainText(refusal.text);
-    await expect(page.getByTestId('save-feedback'), refusal.name).toContainText('slot left untouched');
+    await expect(page.getByTestId('entry-screen'), refusal.name).toHaveAttribute('data-entry', 'unreadable');
+    await expect(page.getByTestId('entry-continue'), refusal.name).toBeVisible();
+    await page.getByTestId('entry-continue').click();
+    // One writer, two surfaces: the same sentence reaches the entry and the dock line.
+    for (const line of ['entry-feedback', 'save-feedback']) {
+      await expect(page.getByTestId(line), `${refusal.name}: ${line}`).toHaveAttribute('data-result', 'refused');
+      await expect(page.getByTestId(line), `${refusal.name}: ${line}`).toHaveAttribute(
+        'data-reason',
+        refusal.reason,
+      );
+      await expect(page.getByTestId(line), `${refusal.name}: ${line}`).toContainText(refusal.text);
+      await expect(page.getByTestId(line), `${refusal.name}: ${line}`).toContainText('slot left untouched');
+    }
+    await expect(page.getByTestId('entry-screen'), `${refusal.name}: the entry closed on a refusal`).toBeVisible();
     // The refusal is the whole outcome: the artifact stays byte for byte as it was, and a page that
     // refused it has no run of its own that the slot touched.
     expect(await readSlot(page), `${refusal.name}: the slot was rewritten`).toBe(refusal.raw);
@@ -2883,17 +3023,26 @@ test('refuses a save that does not match the contract and leaves the slot untouc
     expect(after.snapshot.status, `${refusal.name}: the match was replaced`).toBe('preparation');
     expect(after.snapshot.towers).toEqual([]);
     expect(after.snapshot.gold).toBe(startingGold);
+    // The clock behind the overlay never ran either, so nothing happened off-screen.
+    expect(after.snapshot.tick, `${refusal.name}: the match ran behind the entry`).toBe(0);
   }
 
-  // A slot nothing can read is still cleared by an explicit action, and only by that one. The clock
-  // is frozen first so the new preparation can be read without the round-trip in it.
-  await page.getByTestId('pause-toggle').click();
-  await page.getByTestId('new-match').click();
+  // A slot nothing can read is still cleared by an explicit action, and only by that one — and from
+  // the entry that means a second press, because the slot is the one thing the game cannot bring back.
+  // The frame clock is put on a lattice where a tick cannot arrive inside a round-trip, so the fresh
+  // preparation is read on the tick it started on.
+  await setFrameDelta(page, QA_FROZEN_FRAME_SECONDS);
+  await page.getByTestId('entry-new-match').click();
+  await expect(page.getByTestId('entry-screen')).toHaveAttribute('data-entry', 'confirm');
+  expect(await readSlot(page), 'the first press erased the slot').toBe(cases[cases.length - 1]?.raw);
+  await page.getByTestId('entry-new-match').click();
+  await expect(page.getByTestId('entry-screen')).toBeHidden();
   expect(await readSlot(page)).toBeNull();
   await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'empty');
   await expect(page.getByTestId('load-match')).toBeDisabled();
   const cleared = await readDebugOrThrow(page);
   expect(cleared.snapshot.tick).toBe(0);
+  expect(cleared.snapshot.preparationTicksLeft).toBe(firstWavePrepTicks);
   expect(cleared.commandCount).toBe(0);
   expect(pageErrors).toEqual([]);
 });
@@ -2904,6 +3053,7 @@ test('rebuilds a preparation-only save to its tick with nothing to replay', asyn
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto('/');
   await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await enterAsNewMatch(page);
   await waitForAssetsReady(page);
   await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'empty');
 
@@ -2927,7 +3077,11 @@ test('rebuilds a preparation-only save to its tick with nothing to replay', asyn
   await expect(page.getByTestId('scene-canvas')).toBeVisible();
   await setFrameDelta(page, 0.25);
   await waitForAssetsReady(page);
-  await page.getByTestId('load-match').click();
+  // A save with an empty log is still a save, and the entry still offers it: zero commands is a
+  // number the player can read, not an absent save.
+  await expect(page.getByTestId('entry-slot')).toHaveText(`Save · tick ${preparedTick} · 0 commands`);
+  await page.getByTestId('entry-continue').click();
+  await expect(page.getByTestId('entry-screen')).toBeHidden();
   await expect(page.getByTestId('save-feedback')).toHaveAttribute('data-result', 'loaded', { timeout: 30_000 });
 
   const loaded = await readDebugOrThrow(page);
@@ -2951,4 +3105,603 @@ test('rebuilds a preparation-only save to its tick with nothing to replay', asyn
   await expect(page.getByTestId('restart-match')).toBeDisabled();
   await expect(page.getByTestId('state-badge')).toBeHidden();
   expect(pageErrors).toEqual([]);
+});
+
+// --- Entry screen ---------------------------------------------------------------------------
+
+// The QA frame clock at its quietest: one tick needs a second of frames, so no round-trip can land
+// inside a tick. It is how a fresh preparation is read on the tick it started on instead of on
+// whatever tick the tool came back on — the same reason `0014` and `0015` measure inside the page.
+const QA_FROZEN_FRAME_SECONDS = 0.001;
+
+// Whether the middle of an element's own box belongs to a given surface. Three claims in this section
+// are about stacking — the entry over the shell, and the entry over the dev diagnostics — and stacking
+// is not something a screenshot has to be believed about. `elementFromPoint` skips a `pointer-events:
+// none` surface, so this answers about whatever is on top of the point, not about the element itself.
+const pointInside = (page: Page, testId: string, containerTestId: string) =>
+  page.evaluate(
+    ({ testId, containerTestId }) => {
+      const node = document.querySelector(`[data-testid="${testId}"]`);
+      const box = node?.getBoundingClientRect();
+      if (!node || !box) {
+        throw new Error(`${testId} has no box to point at`);
+      }
+      const at = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return at?.closest(`[data-testid="${containerTestId}"]`) !== null && at?.closest(`[data-testid="${containerTestId}"]`) !== undefined;
+    },
+    { testId, containerTestId },
+  );
+
+test('opens the entry screen on an empty slot and starts a match from it', async ({ page }) => {
+  test.setTimeout(90_000);
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await page.goto('/');
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await waitForAssetsReady(page);
+
+  // The page opens on the entry and not in a preparation. With no save there is nothing to continue,
+  // so Continue is not on the screen at all rather than there and disabled: the two actions that
+  // exist are the two buttons, and one of them is the only way in.
+  await expect(page.getByTestId('entry-screen')).toBeVisible();
+  const boot = await readEntry(page);
+  expect(boot.open).toBe(true);
+  expect(boot.mode).toBe('empty');
+  expect(boot.continuing).toBeNull();
+  expect(boot.inert).toBe(true);
+  expect(boot.dialog).toBe('dialog');
+  expect(boot.modal).toBe('true');
+  expect(boot.slotState).toBe('empty');
+  expect(boot.slot).toBe('No saved match in this browser');
+  expect(boot.continueVisible).toBe(false);
+  expect(boot.newMatchLabel).toBe('New match');
+  expect(boot.confirm).toBe('idle');
+  // Focus lands on the action that exists, so a keyboard player is not left on the document root.
+  expect(boot.focused).toBe('entry-new-match');
+  await expect(page.getByTestId('entry-continue')).toBeHidden();
+  await expect(page.getByTestId('entry-new-match')).toBeVisible();
+  // The scrim is above the shell, so a click cannot reach a pad or a dock control behind it.
+  expect(await pointInside(page, 'scene-canvas', 'entry-screen')).toBe(true);
+  expect(await pointInside(page, 'start-wave', 'entry-screen')).toBe(true);
+
+  // Nothing was loaded and nothing is running: an empty slot stays empty, no rebuild happened, and
+  // the preparation behind the overlay is the tick 0 it was created at.
+  const parked = await readDebugOrThrow(page);
+  expect(parked.lastRebuild).toBeNull();
+  expect(parked.commandCount).toBe(0);
+  expect(parked.snapshot.status).toBe('preparation');
+  expect(parked.snapshot.tick).toBe(0);
+  expect(parked.snapshot.preparationTicksLeft).toBe(firstWavePrepTicks);
+  expect(parked.snapshot.towers).toEqual([]);
+  expect(await readSlot(page)).toBeNull();
+  await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'empty');
+  await expect(page.getByTestId('load-match')).toBeDisabled();
+  await page.waitForTimeout(700);
+  const stillParked = await readDebugOrThrow(page);
+  expect(stillParked.snapshot, 'the match ran behind the entry').toEqual(parked.snapshot);
+
+  const wide = await expectEntryLabelsVisible(page);
+  await page.screenshot({ path: 'test-results/entry-screen-empty.png', fullPage: true });
+
+  // The same measurement on the narrow layout, where the panel is the only thing on the screen and
+  // the actions have to share it.
+  await page.setViewportSize({ width: 560, height: 900 });
+  const narrow = await expectEntryLabelsVisible(page);
+  await page.screenshot({ path: 'test-results/entry-screen-narrow.png', fullPage: true });
+  await page.setViewportSize({ width: 1280, height: 720 });
+
+  // New match with nothing to destroy is one press: there is no irreversible action to confirm.
+  await page.getByTestId('entry-new-match').click();
+  await expect(page.getByTestId('entry-screen')).toBeHidden();
+  const started = await readDebugOrThrow(page);
+  expect(started.entry).toEqual({ open: false, mode: 'empty', armed: false, continuing: null });
+  expect(started.snapshot.status).toBe('preparation');
+  expect(started.snapshot.gold).toBe(startingGold);
+  expect(started.snapshot.towers).toEqual([]);
+  expect(started.snapshot.pads['pad-east']).toBeNull();
+  expect(started.snapshot.rngState).toBe(scenario.seed);
+  expect(started.commandCount).toBe(0);
+  expect(started.replaying).toBe(false);
+  expect(started.eventCounts).toEqual(emptyEventCounts());
+  expect(started.lastRebuild).toBeNull();
+  expect(started.rendered.towers).toBe(0);
+  expectProjectionMatchesSnapshot(started);
+  // The shell is live again and the dock's own line agrees with what the entry said.
+  const closed = await readEntry(page);
+  expect(closed.inert).toBe(false);
+  expect(closed.hidden).toBe(true);
+  await expect(page.getByTestId('gold-value')).toHaveText(String(startingGold));
+  await expect(page.getByTestId('match-phase')).toHaveAttribute('data-phase', 'preparation');
+  await expect(page.getByTestId('menu-button')).toBeVisible();
+  expect(pageErrors).toEqual([]);
+
+  const labelWidths = (measured: Awaited<ReturnType<typeof expectEntryLabelsVisible>>) =>
+    measured.lines.map((line) => line.glyphs.map((glyph) => glyph.width.toFixed(1)).join('+')).join(' / ');
+  console.log(
+    `entry (empty): ${boot.slot} · wide "${labelWidths(wide)}" · narrow "${labelWidths(narrow)}"`,
+  );
+});
+
+test('plays a defended wave from the entry screen to victory with real clicks', async ({ page }) => {
+  test.setTimeout(180_000);
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await page.goto('/');
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await enterAsNewMatch(page);
+  await waitForAssetsReady(page);
+
+  // The whole path a player walks and nothing else: the entry's New match, three build pads chosen in
+  // the palette and clicked on the canvas, and Start Wave. Every `evaluate` in this scenario reads
+  // state or a pad's screen position — no command is ever injected, and the recorded log with the
+  // ticks its commands landed on then shows that on their own.
+  const atEntry = await readDebugOrThrow(page);
+  expect(atEntry.snapshot.towers).toEqual([]);
+  expect(atEntry.commandCount).toBe(0);
+
+  await armDefendedWave(page);
+  const armed = await readDebugOrThrow(page);
+  expect(armed.snapshot.status).toBe('preparation');
+  expect(armed.snapshot.towers).toHaveLength(placements.length);
+  expect(armed.snapshot.gold).toBe(placedGold);
+  expect(armed.eventCounts.towerPlaced).toBe(placements.length);
+  expect(armed.commandCount).toBe(3);
+  expect(armed.entry.open).toBe(false);
+
+  await page.getByTestId('start-wave').click();
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.enemies.length ?? 0) > 0, undefined, {
+    timeout: 60_000,
+  });
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.eventCounts.towerFired ?? 0) > 0, undefined, {
+    timeout: 60_000,
+  });
+  const fighting = await readDebugOrThrow(page);
+  expect(fighting.snapshot.status).toBe('wave');
+  expect(fighting.eventCounts.waveStarted).toBe(1);
+  expect(fighting.eventCounts.towerFired).toBeGreaterThan(0);
+  expectProjectionMatchesSnapshot(fighting);
+
+  await page.waitForFunction(() => window.__ECHOES_DEBUG__?.snapshot.status === 'victory', undefined, {
+    timeout: 90_000,
+  });
+
+  const finished = await readDebugOrThrow(page);
+  expect(finished.matchReports).toHaveLength(1);
+  const report = finished.matchReports[0];
+  expect(report?.status).toBe('victory');
+  expect(report?.gold).toBe(victoryGold);
+  expect(report?.leaksThisWave).toBe(0);
+  expect(report?.eventCounts.enemySpawned).toBe(waveEnemyCount);
+  expect(report?.eventCounts.enemyKilled).toBe(waveEnemyCount);
+  expect(report?.eventCounts.defeat).toBe(0);
+  expect(finished.snapshot.gold).toBe(victoryGold);
+  expect(finished.snapshot.enemies).toEqual([]);
+  expect(finished.snapshot.towers).toHaveLength(placements.length);
+  expect(finished.rendered.towers).toBe(placements.length);
+  expectProjectionMatchesSnapshot(finished);
+  // Four player commands, and each one reached the core on the tick it was issued on.
+  const plan = await readCommandPlan(page);
+  expect(plan).toHaveLength(SAVE_COMMANDS);
+  plan?.forEach((entry, index) => {
+    expect(entry.appliedTick, `command ${index} landed on tick ${entry.appliedTick}`).toBe(entry.tick);
+  });
+  expect(plan?.map((entry) => entry.type)).toEqual([
+    'placeTower',
+    'placeTower',
+    'placeTower',
+    'startWave',
+  ]);
+  // The terminal screen is the one `0015` left behind: the banner and the actions it already had.
+  await expect(page.getByTestId('match-result')).toHaveText('Sector secured');
+  await expect(page.getByTestId('match-result')).toBeVisible();
+  await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'terminal');
+  await expect(page.getByTestId('restart-match')).toBeEnabled();
+  await expect(page.getByTestId('new-match')).toBeEnabled();
+  await expect(page.getByTestId('entry-screen')).toBeHidden();
+  await page.screenshot({ path: 'test-results/entry-to-victory.png', fullPage: true });
+  expect(pageErrors).toEqual([]);
+  console.log(
+    `entry to victory: ${describePlan(plan ?? [])} · terminal tick ${report?.tick}, gold ${report?.gold}`,
+  );
+});
+
+test('reaches defeat through the entry screen with a terminal report of its own', async ({ page }) => {
+  test.setTimeout(150_000);
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await page.goto('/');
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await enterAsNewMatch(page);
+  await waitForAssetsReady(page);
+
+  // The other way out of a match, through the same entry: no towers, so the wave reaches the core.
+  await page.getByTestId('start-wave').click();
+  await page.waitForFunction(() => window.__ECHOES_DEBUG__?.snapshot.status === 'defeat', undefined, {
+    timeout: 90_000,
+  });
+
+  const finished = await readDebugOrThrow(page);
+  expect(finished.matchReports).toHaveLength(1);
+  const report = finished.matchReports[0];
+  expect(report?.status).toBe('defeat');
+  expect(report?.coreHealth).toBe(0);
+  expect(report?.leaksThisWave).toBe(scenario.map.coreHealth);
+  expect(report?.eventCounts.coreDamaged).toBe(scenario.map.coreHealth);
+  expect(report?.eventCounts.victory).toBe(0);
+  expect(report?.eventCounts.waveCleared).toBe(0);
+  expect(finished.snapshot.status).toBe('defeat');
+  expect(finished.snapshot.enemies).toEqual([]);
+  expect(finished.commandCount).toBe(1);
+  expect(finished.entry.open).toBe(false);
+  // The terminal screen keeps exactly the controls it had: the banner, Restart and New match, with
+  // the entry only behind MENU.
+  await expect(page.getByTestId('match-result')).toHaveText('Core breached');
+  await expect(page.getByTestId('restart-match')).toBeEnabled();
+  await expect(page.getByTestId('menu-button')).toBeEnabled();
+  await expect(page.getByTestId('entry-screen')).toBeHidden();
+  const hud = await readHud(page);
+  if (!hud) {
+    throw new Error('hud contract missing');
+  }
+  expect(hud.phase).toBe('defeat');
+  expect(hud.objectiveDetail).toBe('Core lost on wave 1');
+  expect(pageErrors).toEqual([]);
+});
+
+test('offers Continue on a saved slot and rebuilds the same match from the entry', async ({ page }) => {
+  test.setTimeout(150_000);
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await page.goto('/');
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await enterAsNewMatch(page);
+  await waitForAssetsReady(page);
+
+  // A preparation with three towers is the cheapest honest save: the towers, the money and the pose of
+  // the model are all functions of the log, and the clock can be frozen so the saved tick is a number
+  // rather than a moment.
+  await armDefendedWave(page);
+  await page.getByTestId('pause-toggle').click();
+  const armed = await readDebugOrThrow(page);
+  expect(armed.paused).toBe(true);
+  expect(armed.snapshot.status).toBe('preparation');
+  expect(armed.commandCount).toBe(3);
+  const armedTick = armed.snapshot.tick;
+  const armedSpire = armed.towerModels.find((view) => view.modelId === 'pulse-spire');
+  expect(armedSpire?.clip).not.toBeNull();
+
+  await page.getByTestId('save-match').click();
+  await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'ready');
+  const raw = await readSlot(page);
+  expect(raw).not.toBeNull();
+
+  await page.reload();
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await waitForAssetsReady(page);
+
+  // The entry says what it has and touches nothing: the tick and the command count of the save, both
+  // actions, and a match that is still the empty preparation of a page that just booted.
+  const offered = await readEntry(page);
+  expect(offered.open).toBe(true);
+  expect(offered.mode).toBe('slot');
+  expect(offered.continuing).toBe('slot');
+  expect(offered.slotState).toBe('slot');
+  expect(offered.slot).toBe(`Save · tick ${armedTick} · 3 commands`);
+  expect(offered.continueVisible).toBe(true);
+  expect(offered.focused).toBe('entry-continue');
+  const reloaded = await readDebugOrThrow(page);
+  expect(reloaded.lastRebuild, 'the entry loaded the slot by itself').toBeNull();
+  expect(reloaded.commandCount).toBe(0);
+  expect(reloaded.snapshot.towers).toEqual([]);
+  expect(reloaded.snapshot.tick).toBeLessThan(armedTick);
+  expect(await readSlot(page)).toBe(raw);
+  await page.screenshot({ path: 'test-results/entry-screen-slot.png', fullPage: true });
+
+  // Continue is the restore path, so the rebuild runs on the frame loop and is sped up with the same
+  // clamp a real frame goes through.
+  await setFrameDelta(page, 0.25);
+  await page.getByTestId('entry-continue').click();
+  await expect(page.getByTestId('entry-screen')).toBeHidden();
+  await expect(page.getByTestId('save-feedback')).toHaveAttribute('data-result', 'loaded', { timeout: 60_000 });
+  await expect(page.getByTestId('save-feedback')).toHaveText(`Loaded · tick ${armedTick}`);
+
+  const loaded = await readDebugOrThrow(page);
+  const rebuild = loaded.lastRebuild;
+  if (!rebuild) {
+    throw new Error('the rebuild did not record the tick it arrived on');
+  }
+  // The claim, compared and not observed: the same tick, the same state, the same command count, the
+  // same pose. Every one of them comes from the arrival mark, because the match is running again by
+  // the time anything outside the page could ask (`EOB-021`).
+  expect(rebuild.requestedTick).toBe(armedTick);
+  expect(rebuild.tick).toBe(armedTick);
+  expect(rebuild.snapshot).toEqual(armed.snapshot);
+  expect(rebuild.eventCounts).toEqual(armed.eventCounts);
+  expect(rebuild.commandCount).toBe(3);
+  expect(rebuild.replayIndex).toBe(3);
+  expect(rebuild.replaying).toBe(false);
+  expect(rebuild.snapshot.status).toBe('preparation');
+  expectSamePose(
+    rebuild.poses.find((entry) => entry.towerId === 'pulse-spire')?.clip ?? null,
+    armedSpire?.clip ?? null,
+  );
+  const plan = await readCommandPlan(page);
+  expect(plan).toHaveLength(3);
+  plan?.forEach((entry, index) => {
+    expect(entry.appliedTick, `command ${index} of the rebuild landed on tick ${entry.appliedTick}`).toBe(
+      entry.tick,
+    );
+  });
+  expectProjectionMatchesSnapshot(loaded);
+  expect(loaded.rendered.towers).toBe(placements.length);
+  expect(await readSlot(page)).toBe(raw);
+
+  // A rebuilt match is a live match again, and it is live from where it was saved, not from zero.
+  await page.waitForFunction((tick) => (window.__ECHOES_DEBUG__?.snapshot.tick ?? 0) > tick, rebuild.tick, {
+    timeout: 30_000,
+  });
+  const resumed = await readDebugOrThrow(page);
+  expect(resumed.snapshot.tick).toBeGreaterThan(rebuild.tick);
+  expect(resumed.snapshot.towers).toHaveLength(placements.length);
+  expect(resumed.entry.open).toBe(false);
+  expect(pageErrors).toEqual([]);
+  console.log(
+    `entry continue: offered "${offered.slot}", rebuild arrived on ${rebuild.tick} (requested ` +
+      `${rebuild.requestedTick}), status ${rebuild.snapshot.status}, gold ${rebuild.snapshot.gold}, ` +
+      `plan ${describePlan(plan ?? [])}`,
+  );
+});
+
+test('clears the slot only after a confirmed New match on the entry screen', async ({ page }) => {
+  test.setTimeout(150_000);
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await page.goto('/');
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await enterAsNewMatch(page);
+  await waitForAssetsReady(page);
+
+  await armDefendedWave(page);
+  await page.getByTestId('save-match').click();
+  const raw = await readSlot(page);
+  expect(raw).not.toBeNull();
+  const savedPayload = JSON.parse(raw ?? 'null') as { tick: number; log: unknown[] };
+  expect(savedPayload.log).toHaveLength(3);
+
+  // Back to the entry the way a player goes there.
+  await page.getByTestId('menu-button').click();
+  expect((await readEntry(page)).mode).toBe('live');
+  const parked = await readDebugOrThrow(page);
+
+  // The first press arms and changes nothing: the slot is byte for byte what it was, no rebuild ran,
+  // and the match is the match that was parked. The button and the copy say what the next press does,
+  // and the slot line still names the save the second press is about to destroy.
+  await page.getByTestId('entry-new-match').click();
+  const armed = await readEntry(page);
+  expect(armed.mode).toBe('confirm');
+  expect(armed.armed).toBe(true);
+  expect(armed.confirm).toBe('armed');
+  expect(armed.newMatchLabel).toBe('Erase the save');
+  expect(armed.slotState).toBe('slot');
+  expect(armed.slot).toBe(`Save · tick ${savedPayload.tick} · 3 commands`);
+  expect(armed.continueVisible).toBe(true);
+  expect(armed.hint).toBe('New match erases the save in this browser. Press again to confirm.');
+  expect(await readSlot(page), 'the first press erased the slot').toBe(raw);
+  const duringArm = await readDebugOrThrow(page);
+  expect(duringArm.lastRebuild).toBeNull();
+  expect(duringArm.snapshot).toEqual(parked.snapshot);
+  await page.waitForTimeout(500);
+  expect((await readDebugOrThrow(page)).snapshot, 'the match ran behind the armed entry').toEqual(parked.snapshot);
+  await page.screenshot({ path: 'test-results/entry-screen-confirm.png', fullPage: true });
+
+  // The second press destroys it and starts over. The frame clock is put on a lattice where a tick
+  // cannot arrive inside a round-trip, so the fresh preparation is read on the tick it started on.
+  await setFrameDelta(page, QA_FROZEN_FRAME_SECONDS);
+  await page.getByTestId('entry-new-match').click();
+  await expect(page.getByTestId('entry-screen')).toBeHidden();
+  expect(await readSlot(page)).toBeNull();
+
+  const fresh = await readDebugOrThrow(page);
+  expect(fresh.snapshot.status).toBe('preparation');
+  expect(fresh.snapshot.tick).toBe(0);
+  expect(fresh.snapshot.preparationTicksLeft).toBe(firstWavePrepTicks);
+  expect(fresh.snapshot.gold).toBe(startingGold);
+  expect(fresh.snapshot.pads['pad-east']).toBeNull();
+  expect(fresh.snapshot.towers).toEqual([]);
+  expect(fresh.snapshot.enemies).toEqual([]);
+  expect(fresh.snapshot.rngState).toBe(scenario.seed);
+  expect(fresh.commandCount).toBe(0);
+  expect(fresh.replaying).toBe(false);
+  expect(fresh.replayIndex).toBe(0);
+  expect(fresh.rendered.towers).toBe(0);
+  expect(fresh.eventCounts).toEqual(emptyEventCounts());
+  expect(fresh.lastRebuild).toBeNull();
+  expectProjectionMatchesSnapshot(fresh);
+  await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'empty');
+  await expect(page.getByTestId('save-slot')).toHaveText('No save slot');
+  await expect(page.getByTestId('load-match')).toBeDisabled();
+  await expect(page.getByTestId('save-feedback')).toHaveAttribute('data-result', 'cleared');
+  await expect(page.getByTestId('command-feedback')).toHaveText('New match · fresh preparation, nothing recorded');
+  await expect(page.getByTestId('restart-match')).toBeDisabled();
+  expect(pageErrors).toEqual([]);
+  console.log(
+    `entry confirm: armed at tick ${parked.snapshot.tick} with "${armed.slot}", second press gave ` +
+      `preparation tick ${fresh.snapshot.tick} and slot ${await readSlot(page)}`,
+  );
+});
+
+test('returns to the entry screen from MENU without erasing the slot or the match', async ({ page }) => {
+  test.setTimeout(150_000);
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await page.goto('/');
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await enterAsNewMatch(page);
+  await waitForAssetsReady(page);
+
+  await armDefendedWave(page);
+  await page.getByTestId('start-wave').click();
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.enemies.length ?? 0) > 0, undefined, {
+    timeout: 60_000,
+  });
+  // Frozen and saved, so "MENU changed nothing" is a comparison and not an impression.
+  await page.getByTestId('pause-toggle').click();
+  await page.getByTestId('save-match').click();
+  const saved = await readDebugOrThrow(page);
+  const raw = await readSlot(page);
+  expect(saved.snapshot.status).toBe('wave');
+  expect(saved.snapshot.enemies.length).toBeGreaterThan(0);
+  expect(raw).not.toBeNull();
+
+  await page.getByTestId('menu-button').click();
+  const entry = await readEntry(page);
+  expect(entry.open).toBe(true);
+  expect(entry.mode).toBe('live');
+  expect(entry.continuing).toBe('match');
+  expect(entry.slotState).toBe('live');
+  expect(entry.slot).toBe(`In progress · tick ${saved.snapshot.tick} · ${SAVE_COMMANDS} commands`);
+  expect(entry.inert).toBe(true);
+  expect(entry.focused).toBe('entry-continue');
+  expect(entry.hint).toBe('Menu kept the match and the save where they were. Continue goes back into the match.');
+  // Nothing was erased and nothing moved: the same tick, the same gold, the same pause the player
+  // left, and the slot byte for byte.
+  const parked = await readDebugOrThrow(page);
+  expect(parked.snapshot).toEqual(saved.snapshot);
+  expect(parked.eventCounts).toEqual(saved.eventCounts);
+  expect(parked.commandCount).toBe(SAVE_COMMANDS);
+  expect(parked.paused).toBe(true);
+  expect(parked.lastRebuild).toBeNull();
+  expect(await readSlot(page)).toBe(raw);
+  await expect(page.getByTestId('match-phase')).toHaveAttribute('data-phase', 'wave');
+  await expect(page.getByTestId('save-slot')).toHaveText(
+    `Save · tick ${saved.snapshot.tick} · ${SAVE_COMMANDS} commands`,
+  );
+  await page.waitForTimeout(600);
+  expect((await readDebugOrThrow(page)).snapshot, 'the match ran behind the entry').toEqual(parked.snapshot);
+  await page.screenshot({ path: 'test-results/entry-screen-menu.png', fullPage: true });
+
+  // Continue goes back into the match the player left. It is not a rebuild of the slot: nothing was
+  // restored, the run continued from its own tick, and the player's pause is still the pause.
+  await page.getByTestId('entry-continue').click();
+  await expect(page.getByTestId('entry-screen')).toBeHidden();
+  const returned = await readDebugOrThrow(page);
+  expect(returned.snapshot).toEqual(parked.snapshot);
+  expect(returned.paused).toBe(true);
+  expect(returned.lastRebuild, 'Continue rebuilt the match instead of resuming it').toBeNull();
+  expect(returned.entry.open).toBe(false);
+
+  await page.getByTestId('pause-toggle').click();
+  await page.waitForFunction((tick) => (window.__ECHOES_DEBUG__?.snapshot.tick ?? 0) > tick, parked.snapshot.tick, {
+    timeout: 30_000,
+  });
+  const running = await readDebugOrThrow(page);
+  expect(running.snapshot.tick).toBeGreaterThan(parked.snapshot.tick);
+  expect(running.snapshot.gold).toBe(parked.snapshot.gold);
+  expect(running.snapshot.waveIndex).toBe(parked.snapshot.waveIndex);
+  expect(running.snapshot.towers).toHaveLength(placements.length);
+  expect(running.commandCount).toBe(SAVE_COMMANDS);
+  expect(running.paused).toBe(false);
+  await expect(page.getByTestId('match-phase')).toHaveAttribute('data-phase', 'wave');
+  await expect(page.getByTestId('entry-screen')).toBeHidden();
+
+  // MENU is a way out and back, not a one-way door: the save is still there on the second visit, and
+  // both readings are taken with the entry open, so the tick they name is the tick it was parked on.
+  await page.getByTestId('menu-button').click();
+  const again = await readEntry(page);
+  const reparked = await readDebugOrThrow(page);
+  expect(again.mode).toBe('live');
+  expect(again.slot).toBe(`In progress · tick ${reparked.snapshot.tick} · ${SAVE_COMMANDS} commands`);
+  expect(reparked.snapshot.tick).toBeGreaterThanOrEqual(running.snapshot.tick);
+  expect(await readSlot(page)).toBe(raw);
+  await page.getByTestId('entry-continue').click();
+  await expect(page.getByTestId('entry-screen')).toBeHidden();
+  expect(pageErrors).toEqual([]);
+  console.log(
+    `entry menu: parked at tick ${parked.snapshot.tick} with "${entry.slot}", resumed to ` +
+      `${running.snapshot.tick}, slot intact ${(await readSlot(page)) === raw}`,
+  );
+});
+
+test('keeps the entry labels readable in every state and the dev diagnostics behind it', async ({ page }) => {
+  test.setTimeout(150_000);
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await page.goto('/?dev=1');
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await waitForAssetsReady(page);
+
+  // The flag still creates the diagnostics while the entry is open, and the entry is above them
+  // rather than in place of them: the dev surface is under a scrim, not gone.
+  await expect(page.getByTestId('viewport')).toHaveAttribute('data-diagnostics', 'on');
+  await expect(page.getByTestId('scene-diagnostics')).toHaveCount(1);
+  expect((await readEntry(page)).mode).toBe('empty');
+  expect(await pointInside(page, 'scene-diagnostics', 'entry-screen')).toBe(true);
+
+  const emptyWide = await expectEntryLabelsVisible(page);
+  await page.screenshot({ path: 'test-results/entry-labels-empty.png', fullPage: true });
+  await page.setViewportSize({ width: 560, height: 900 });
+  const emptyNarrow = await expectEntryLabelsVisible(page);
+  await page.screenshot({ path: 'test-results/entry-labels-narrow.png', fullPage: true });
+  await page.setViewportSize({ width: 1280, height: 720 });
+
+  // The panel's widest form is the one with a save: two actions, a tick and a command count.
+  await enterAsNewMatch(page);
+  await armDefendedWave(page);
+  await page.getByTestId('save-match').click();
+  await page.getByTestId('menu-button').click();
+  expect((await readEntry(page)).mode).toBe('live');
+  const liveWide = await expectEntryLabelsVisible(page);
+  await page.setViewportSize({ width: 560, height: 900 });
+  const liveNarrow = await expectEntryLabelsVisible(page);
+  await page.setViewportSize({ width: 1280, height: 720 });
+
+  // And the widest text on the panel is the confirmation, so that state is measured as well.
+  await page.getByTestId('entry-new-match').click();
+  expect((await readEntry(page)).mode).toBe('confirm');
+  const confirmWide = await expectEntryLabelsVisible(page);
+  await page.screenshot({ path: 'test-results/entry-labels-confirm.png', fullPage: true });
+  await page.setViewportSize({ width: 560, height: 900 });
+  const confirmNarrow = await expectEntryLabelsVisible(page);
+  await page.screenshot({ path: 'test-results/entry-labels-confirm-narrow.png', fullPage: true });
+  await page.setViewportSize({ width: 1280, height: 720 });
+
+  // Every measurement above is a glyph-rect check, so each width is a fact of its own and not one
+  // assertion repeated.
+  const labelWidths = (measured: Awaited<ReturnType<typeof expectEntryLabelsVisible>>) =>
+    measured.lines.map((line) => line.glyphs.map((glyph) => glyph.width.toFixed(1)).join('+')).join(' / ');
+  expect(emptyNarrow.lines.length).toBe(emptyWide.lines.length);
+  expect(liveNarrow.lines.length).toBe(liveWide.lines.length);
+  expect(confirmNarrow.lines.length).toBe(confirmWide.lines.length);
+
+  // The entry is gone, and so is the scrim: nothing of it is over the diagnostics any more, which is
+  // what "the overlay did not break ?dev" has to mean.
+  await page.getByTestId('entry-continue').click();
+  await expect(page.getByTestId('entry-screen')).toBeHidden();
+  await expect(page.getByTestId('scene-diagnostics')).toBeVisible();
+  expect(await pointInside(page, 'scene-diagnostics', 'entry-screen')).toBe(false);
+  const dev = await page.evaluate(() => {
+    const rows = Object.fromEntries(
+      Array.from(document.querySelectorAll('[data-testid="scene-diagnostics"] [data-diag]')).map((node) => [
+        (node as HTMLElement).dataset.diag ?? '',
+        node.textContent ?? '',
+      ]),
+    );
+    return { rows, budgets: window.__ECHOES_DEBUG__?.assetBudgets ?? null };
+  });
+  if (!dev.budgets) {
+    throw new Error('debug contract missing');
+  }
+  const reading = dev.budgets.checks.scene;
+  if (!reading) {
+    throw new Error('dev diagnostics are missing a measurement the seam already has');
+  }
+  expect(dev.rows.scene).toContain(`${reading.drawCalls}/${SCENE_BUDGET.drawCalls}`);
+  expect(dev.rows.scene).toContain(`${reading.shaderPrograms}/${SCENE_BUDGET.shaderPrograms}`);
+  expect(dev.rows.checks).toContain('bytes ✓');
+  expect(pageErrors).toEqual([]);
+  console.log(
+    `entry labels: empty "${labelWidths(emptyWide)}" → narrow "${labelWidths(emptyNarrow)}"; ` +
+      `live "${labelWidths(liveWide)}" → narrow "${labelWidths(liveNarrow)}"; ` +
+      `confirm "${labelWidths(confirmWide)}"`,
+  );
 });
