@@ -1,6 +1,6 @@
 # Echoes of Burbenog — CONTEXT
 
-> Последнее обновление: 2026-09-25 23:51
+> Последнее обновление: 2026-09-26 06:24
 
 ## Статус
 
@@ -60,6 +60,7 @@
 | 2026-09-25 | Собран и сохранён подробный research brief по Burbenog TD в `Old-Burbenog/BURBENOG-TD-RESEARCH.md`; закрыт вопрос о точном референсе |
 | 2026-09-25 | План переведён на следующий этап: выбор mechanics subset и pure deterministic simulation core |
 | 2026-09-25 | Реализован и проверен pure simulation core; добавлены content validation, wave transitions и focused scenario checks |
+| 2026-09-26 | План переведён в формат штаба с сквозными заданиями и отметками `[x]/[ ]`; следующая задача `0005` |
 
 ## Структура проекта
 

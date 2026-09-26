@@ -1,145 +1,103 @@
-# Echoes of Burbenog — PLAN
+# Echoes of Burbenog — Plan (штаб)
 
-## Цель плана
-
-Развивать игру вертикальными срезами: каждый этап заканчивается работающим и проверяемым результатом, а будущие компоненты не блокируют текущий. Главный приоритет — короткий LLM-driven feedback loop.
+> Веду я (штаб). Каждый пункт — одно будущее задание кодовой сессии: отдельно сдаётся, отдельно тестируется и отдельно откатывается.
+> Статусы: `[ ]` — не начато, `[x]` — принято штабом после проверки. Номера заданий сквозные.
+> Следующая задача: `0005`. Текущий этап: первый визуальный vertical slice.
 
 ## Принципы
 
-- Сначала измеримый vertical slice, потом расширение.
+- Сначала web и browser QA, потом desktop packaging.
 - Gameplay отделён от rendering и transport.
-- Каждая функция имеет deterministic scenario или тест.
-- Новые зависимости добавляются только после подтверждения необходимости.
-- Визуальная проверка дополняет, но не заменяет проверку состояния.
+- Каждая задача имеет один измеримый критерий и одну проверку.
+- Новая задача не начинается, пока предыдущая не принята и не отмечена `[x]`.
+- Visual screenshot дополняет state check, но не заменяет его.
+- Сторонние Warcraft III/Burbenog assets, UI и map topology не копируются.
 
-## Подтверждённый scope
+## Текущий статус
 
-- Целевые платформы: Windows 10/11.
-- Текущий режим: solo; multiplayer отложен до после solo-версии.
-- Первые визуальные assets: собственные схематичные placeholder-модели.
-- Финальная графика, сеттинг и детальные art rules развиваются позже.
-- Визуальный референс: Warcraft III/Burbenog — плотный TD-бой, build slots, несколько маршрутов, selection и HUD; берём принципы readability, а не surface design.
-- Публичность remote не является продуктовым требованием; текущий репозиторий остаётся private.
+| Фаза | Статус | Последнее принятое задание |
+|------|--------|---------------------------|
+| 0. Repository и contracts | Принята | 0002 — visual identity и scope |
+| 1. Browser bootstrap | Принята | 0003 — Three.js scene и QA |
+| 2. Pure simulation core | Принята | 0004 — deterministic core |
+| 3. Первый визуальный vertical slice | В работе | Следующая: 0005 |
+| 4. Asset pipeline и 3D polish | Ожидает | — |
+| 5. Offline singleplayer | Ожидает | — |
+| 6. Local cooperative mode | Ожидает | — |
+| 7. PvP и mode-specific rules | Ожидает | — |
+| 8. Internet services | Ожидает | — |
+| 9. Desktop release | Ожидает | — |
 
-## Этап 0: Репозиторий и контракты
+## Фаза 0 — Repository и contracts — принята
 
-**Результат:** создан репозиторий, документация, целевая архитектура и список открытых решений.
+- [x] 0001 — Создать GitHub-репозиторий, документационную систему и research brief (принято: `main` синхронизирован, brief сохранён)
+- [x] 0002 — Зафиксировать solo-first scope, Windows 10/11, browser-first stack и оригинальный visual identity (принято: решения в `docs/DECISIONS.md`)
 
-**Готово, когда:**
+## Фаза 1 — Browser bootstrap — принята
 
-- README, AGENTS, CONTEXT, DECISIONS, ARCHITECTURE и PLAN доступны в репозитории;
-- remote настроен на GitHub.com;
-- ветка `main` содержит первый commit.
+- [x] 0003 — Собрать TypeScript + Vite + Three.js сцену, schematic build pads, HUD и Playwright smoke test (принято: typecheck, build, E2E и screenshot review)
 
-## Этап 1: Browser bootstrap
+## Фаза 2 — Pure simulation core — принята
 
-**Результат:** минимальный TypeScript + Vite client с Three.js scene и Playwright smoke test.
+- [x] 0004 — Реализовать pure core: commands, state, events, fixed tick, seeded RNG, маршруты, волны, economy и win/lose (принято: core scenario, two-wave determinism, focused checks и review)
 
-**Готово, когда:**
+## Фаза 3 — Первый визуальный vertical slice — следующая
 
-- приложение запускается одной документированной командой;
-- WebGL2 context и renderer инициализируются;
-- typecheck и production build проходят;
-- Playwright открывает приложение, проверяет canvas и сохраняет screenshot;
-- ошибки и состояние доступны без ручного поиска по исходникам.
+- [ ] 0005 — Связать `MatchSnapshot` с Three.js objects: синхронизировать core, build pads, towers и enemies (критерий: client отображает состояние core без ручного дублирования)
+- [ ] 0006 — Сделать placement по build pads: выбор tower, command в core, стоимость и занятость pad (критерий: placement проходит pure check и E2E)
+- [ ] 0007 — Подключить запуск волны, движение enemies, targeting, damage и win/lose к HUD (критерий: полный игровой цикл воспроизводится в браузере)
+- [ ] 0008 — Принять vertical slice: pause/resume, seed replay, core check, Playwright E2E и screenshot review (критерий: все проверки зелёные, визуальная композиция читаема)
 
-## Этап 2: Pure simulation core
+## Фаза 4 — Asset pipeline и 3D polish — ожидает
 
-**Результат:** headless simulation одного матча.
+- [ ] 0009 — Подключить GLB/glTF, PBR-материалы, освещение и skeletal animation (критерий: placeholder заменяется моделью без изменения gameplay)
+- [ ] 0010 — Добавить asset validator и performance budgets для минимального Windows 10/11 железа (критерий: несовместимый asset отклоняется)
 
-**Готово, когда:**
+## Фаза 5 — Offline singleplayer — ожидает
 
-- есть versioned commands, state и events;
-- fixed tick и seeded random дают одинаковый результат при одном scenario;
-- движение, placement, waves и win/lose не зависят от браузера;
-- один маленький runnable check покрывает ключевой сценарий.
+- [ ] 0011 — Добавить сохранение и восстановление match state/progress (критерий: restart не теряет состояние)
+- [ ] 0012 — Провести полный E2E от меню до victory/defeat (критерий: сценарий проходит без ручных шагов)
 
-## Этап 3: Первый визуальный vertical slice
+## Фаза 6 — Local cooperative mode — ожидает
 
-**Результат:** одна карта, одна волна, schematic towers и enemies, orthographic camera и минимальный HUD.
+- [ ] 0013 — Добавить server session и private rooms для двух client context (критерий: оба клиента видят одно состояние)
+- [ ] 0014 — Проверить permissions, reconnect и late join (критерий: описаны и проверены правила)
 
-**Готово, когда:**
+## Фаза 7 — PvP и mode-specific rules — ожидает
 
-- можно разместить башню, запустить волну, увидеть бой и получить результат;
-- grid используется только для placement;
-- можно pause/resume и повторить сценарий с тем же seed;
-- screenshots подтверждают читаемую композицию и UI.
+- [ ] 0015 — Разделить co-op и PvP victory/economy rules без дублирования transport (критерий: один session layer, разные match rules)
+- [ ] 0016 — Проверить versioned handshake, replay и anti-cheat boundary (критерий: client не меняет server-owned результат)
 
-## Этап 4: Asset pipeline и 3D polish
+## Фаза 8 — Internet services — ожидает
 
-**Результат:** GLB-модели, PBR-материалы, освещение, camera и animation states.
+- [ ] 0017 — Добавить identity, rooms, matchmaking и persistence (критерий: threat model и reconnect определены)
+- [ ] 0018 — Проверить content/version mismatch и rate limits (критерий: некорректная версия отклоняется понятной ошибкой)
 
-**Готово, когда:**
+## Фаза 9 — Desktop release — ожидает
 
-- модель имеет корректные pivot, scale, forward axis и animation clips;
-- idle, move, attack, hit и death не ломают gameplay state;
-- asset validator отклоняет несовместимые файлы;
-- определены draw-call, triangle, texture и memory budgets для минимального железа.
+- [ ] 0019 — Собрать Wails/Go shell с embedded frontend и native settings/saves (критерий: browser smoke повторяется в WebView2)
+- [ ] 0020 — Подготовить release pipeline и desktop regression (критерий: сборка воспроизводима и документирована)
 
-## Этап 5: Offline singleplayer
+## Заморожено / не делаем сейчас
 
-**Результат:** полноценная локальная сессия с сохранением прогресса и restart.
+- Multiplayer, accounts, matchmaking, editor и mods — до стабильной solo-версии.
+- Полный roster башен, heroes и точное копирование числовых формул Burbenog.
+- Level editor до появления рабочего map contract.
+- Wails и dedicated Go server — до измеримой потребности.
+- Новые art assets и final art direction — до стабильного schematic placeholder pipeline.
 
-**Готово, когда:**
+## Правила штаба
 
-- match state восстанавливается из snapshot или save;
-- UI не зависит от внутренних структур simulation;
-- прогресс не теряется при перезапуске;
-- E2E проходит от главного меню до результата матча.
+1. Сессия читает `AGENTS.md`, `docs/CONTEXT.md` и этот файл.
+2. Берётся только следующая `[ ]` задача; задачи выполняются последовательно.
+3. После проверки задача получает `[x]`, а рядом фиксируется evidence: команды, тесты, screenshot или причина отказа.
+4. После каждого задания обновляются `docs/CONTEXT.md`, этот Plan и commit в `main`.
+5. «Заодно» не делать: не расширять scope, новые зависимости и соседние рефакторинги — отдельные задачи.
+6. Следующая задача не выдаётся, пока текущая не прошла typecheck/test/build и визуальную проверку, где она применима.
 
-## Этап 6: Local cooperative mode
+## Источники решений
 
-**Результат:** два независимых client context, одна server session, private room.
-
-**Готово, когда:**
-
-- оба клиента видят согласованное состояние;
-- permissions и ownership экономики определены;
-- reconnect и late join имеют явное поведение;
-- Playwright проверяет оба клиента и network traffic.
-
-## Этап 7: PvP и mode-specific rules
-
-**Результат:** отдельные правила победы и экономики для PvP при общих gameplay primitives.
-
-**Готово, когда:**
-
-- co-op и PvP используют одну transport/session основу;
-- client не может изменить server-owned результат;
-- match rules версионируются и отображаются в handshake;
-- replay или deterministic scenario воспроизводит матч.
-
-## Этап 8: Internet services
-
-**Результат:** internet rooms, identity, matchmaking и persistence.
-
-**Готово, когда:**
-
-- определены threat model и rate limits;
-- reconnect не допускает duplicate commands;
-- content/version mismatch отклоняется понятной ошибкой;
-- matchmaking не становится частью Game Core.
-
-## Этап 9: Desktop release
-
-**Результат:** Wails/Go package с embedded frontend и desktop settings.
-
-**Готово, когда:**
-
-- browser client и WebView2 проходят одинаковые smoke scenarios;
-- settings, saves и crash recovery работают через native adapter;
-- release process воспроизводим и документирован;
-- Go используется только там, где профиль или packaging это оправдывают.
-
-## Информация, которую нужно уточнить у владельца
-
-- Уточнить performance budgets для Windows 10/11 и минимального тестового железа.
-- Дождаться точной версии или видео Burbenog и составить список механик, которые обязательно нужно сохранить.
-- Позже определить art direction, сеттинг и допустимый уровень оригинальности.
-- Инструмент подготовки собственных 3D-моделей, текстур и анимаций.
-- После solo-версии вернуться к multiplayer, accounts, matchmaking, editor и mods.
-- Лицензия проекта.
-
-## Следующий шаг
-
-Перейти к этапу 3: подключить pure core к browser-сцене. Сначала связать snapshot с Three.js objects, затем добавить placement через build pads, запуск wave и combat presentation; после каждого изменения сохранять pure check, E2E и screenshot review.
+- `docs/CONTEXT.md` — живое состояние, glossary и open-проблемы.
+- `docs/DECISIONS.md` — append-only архитектурные решения.
+- `docs/ARCHITECTURE.md` — границы модулей и runtime contract.
+- `Old-Burbenog/BURBENOG-TD-RESEARCH.md` — вспомогательный research brief, не план.

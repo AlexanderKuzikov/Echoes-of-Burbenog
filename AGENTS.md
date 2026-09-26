@@ -36,7 +36,8 @@
 
 ## Documentation rules
 
-- Перед работой прочитать `AGENTS.md` и `docs/CONTEXT.md`.
+- Перед работой прочитать `AGENTS.md`, `docs/CONTEXT.md` и `docs/PLAN.md`.
+- `docs/PLAN.md` — рабочий трекер штаба: брать только следующую `[ ]` задачу, после проверки ставить `[x]` и фиксировать evidence.
 - После работы обновить `docs/CONTEXT.md`.
 - Архитектурные решения добавлять append-only в `docs/DECISIONS.md`.
 - Не создавать новые `.md` файлы без явного разрешения владельца.
