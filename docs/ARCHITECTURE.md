@@ -86,7 +86,7 @@ Snapshot restore и command-log replay в core сознательно отлож
 - `prefers-reduced-motion: reduce` отключает transient-эффекты и ambient-анимацию в canvas, сохраняя статичное читаемое состояние из snapshot.
 - Command events потребляются в той же task, что и сам command, поэтому feedback и счётчики не отстают от ввода на кадр.
 - Позднее источник snapshots заменяется на session, а projection остаётся прежней.
-- `window.__ECHOES_DEBUG__` — QA seam для browser E2E: snapshot, rendered-счётчики, позиции, screen-координаты build pads, выбранный tower, feedback, `eventCounts` по типам, `recentEvents`, clock/replay state, `matchReports`, `motion` и dispatch. Это не gameplay API.
+- `window.__ECHOES_DEBUG__` — QA seam для browser E2E: snapshot, rendered-счётчики, позиции, screen-координаты build pads, выбранный tower, feedback, `eventCounts` по типам, `recentEvents`, clock/replay state, `matchReports`, `motion`, asset status со списком загруженных моделей, `towerModels` (источник view, id модели, число mesh-узлов, узел crystal, его базовая Y, scale и emissive) и dispatch. Это не gameplay API.
 
 ### Server и Session
 
@@ -116,14 +116,28 @@ Server и dedicated server должны использовать одну реа
 
 Content включает data-driven описания карт, башен, врагов, волн и баланса. Assets включают GLB-модели, textures, materials и animation clips.
 
-Asset contract должен задавать:
+Модели производятся собственным генератором `scripts/build-assets.ts` и не коммитятся: `public/models/` под `.gitignore`, сборка идёт через `predev`/`prebuild`, а `npm test` содержит шаг `test:assets`, поэтому Playwright физически не может увидеть устаревшие артефакты.
 
-- единицы и масштаб;
-- root pivot и forward axis;
-- naming;
-- ожидаемые animation states;
-- допустимые material/texture requirements;
-- минимальные performance budgets.
+Asset contract, как реализовано в `0009`:
+
+- glTF 2.0, Y-up, right-handed, +Z forward, 1 unit = 1 world unit, pivot в центре основания: модель ставится на pad без дополнительных смещений;
+- узлы — прямые потомки корня сцены с именами `base`, `stem`, `roof`, `crystal`, `aura`; обязательный узел `crystal` несёт эмиссию и idle bob, остальные имена делают дифф модели читаемым;
+- габарит сопоставим с процедурной башней: высота около 1.6, footprint в пределах pad hit radius 0.85, чтобы подмена модели не меняла читаемость сцены и picking;
+- один материал на узел: `baseColorFactor` + `metallicFactor` + `roughnessFactor`, `emissiveFactor` у emissive-узла, без текстур; факторы линейные, sRGB-цвета кода конвертирует генератор;
+- запрещены сжатие, внешние URI, `extensions`, `SkinnedMesh`, morph targets и animation clips;
+- `manifest.json` — единственный источник ожиданий: `id`, `file`, `bytes`, `contentHash`, `triangles`, `emissiveNode`; `file` — имя файла без пути.
+
+Performance budgets и отклонение несовместимого ассета остаются за `0010`.
+
+### Asset Registry
+
+Data-слой реестра (`src/asset-registry.ts`) отвечает за fail-fast парсинг манифеста, resolve tower id → запись, кэш загрузок по файлу и `assetStatus` (`loading` / `ready` / `error`). Он не импортирует Three.js и не знает про DOM или сцену: загрузчик GLB и инстанцирование view живут в client, а путь к файлу модели получается только через `resolveModelUrl`.
+
+Отсутствие записи для tower id — нормальный ответ, а не ошибка: такой tower остаётся процедурным. Нарушение контракта (нет манифеста, нет файла, битый GLB, нет emissive-узла) — fail-fast: viewport получает `data-assets="error"`, причина читается в `scene-status`, сцена продолжает рендериться процедурными placeholder'ами.
+
+Владение ресурсами: загруженная сцена — единственный владелец своей геометрии и исходных материалов. Tower view получает общую геометку и собственные копии материалов, потому что `emissiveIntensity` узла `crystal` — per-tower presentation state, и на общем материале вспышка одной башни зажигала бы все башни этого типа. `release()` view освобождает только то, чем view владеет, поэтому следующий view той же модели не получает disposed geometry.
+
+Two-phase обновление: view, созданный до ответа реестра, остаётся процедурным; когда модель загрузилась, все существующие views этой башни заменяются на GLB на месте — entity, позиция, rotation и snapshot не меняются, поэтому момент появления модели не может сделать два replay визуально разными.
 
 ### Wails и Go
 
@@ -136,6 +150,7 @@ Wails — поздний desktop adapter: окно, fullscreen, settings, saves 
 - Мир — XZ plane с высотой по Y, даже когда визуальные объекты плоские.
 - Grid — placement layer, а не система координат движения.
 - Временные placeholder meshes заменяются GLB без изменения simulation contracts.
+- PBR доводится IBL: `RoomEnvironment` + PMREM дают `scene.environment`. Проба — новый источник света, а сцена намеренно тёмная tactical read, поэтому её вклад ограничен `scene.environmentIntensity = 0.5`; lights, exposure и tone mapping не перенастраиваются.
 - WebGPU и тяжёлые post-processing остаются последующими оптимизациями.
 
 ## Визуальные принципы

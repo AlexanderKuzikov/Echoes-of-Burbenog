@@ -1,6 +1,6 @@
 # Echoes of Burbenog — CONTEXT
 
-> Последнее обновление: 2026-09-26 09:40
+> Последнее обновление: 2026-09-26 10:40
 
 ## Статус
 
@@ -21,9 +21,9 @@
 | Preparation display | Правдивый | При `preparationTicksLeft === 0` phase clock показывает `Awaiting start`, а не замороженный `T-00:00`; решение по `EOB-013` принято в пользу display |
 | Reduced motion | Проверен | `prefers-reduced-motion: reduce` гасит burst-ring, наведение и вспышку башни, scale-пульс core и ambient-анимацию; позиции, health bars, материалы, combat log и HUD остаются читаемыми |
 | Multiplayer | Отложен | Solo-first; session и protocol seams сохраняются |
-| Asset pipeline | В работе | Задача `0009` выдана: собственная генерация GLB вместо DCC, реестр моделей как data-контракт, первая модель заменяет placeholder. Решение по инструменту принято — `EOB-006` закрыт |
+| Asset pipeline | Сдан, на проверке | Собственный zero-dep генератор GLB (`scripts/build-assets.ts`) с самопроверкой и детерминизмом; `manifest.json` как data-контракт; `pulse-spire` заменяет placeholder через two-phase подмену; IBL через `RoomEnvironment`; артефакты `public/models` генерируются и не коммитятся. Решение по инструменту принято — `EOB-006` закрыт |
 | Desktop packaging | Отложен | Wails/Go после стабилизации browser client |
-| QA/agent harness | Проверен | 9 Playwright-сценариев, включая regression на QA-инъекцию во время replay: log не растёт, два terminal-отчёта совпадают; красный прогон без guard подтверждён |
+| QA/agent harness | Проверен | 11 Playwright-сценариев, включая two-phase подмену модели (gated на маршруте GLB) и fail-fast при недоступном манифесте; красные проги обоих подтверждены |
 
 ## Глоссарий
 
@@ -87,6 +87,7 @@
 | 2026-09-26 | Продолжение сессии независимо перепроверило закрытый `0008`: typecheck, build, test:core (tick 323, gold 229) и 9/9 Playwright зелёные, guard подтверждён в `dispatchPlayerCommand`; `HANDOFF.md` удалён отдельным commit, документация признана актуальной |
 | 2026-09-26 | Штаб принял решение по инструменту подготовки моделей: собственная генерация GLB вместо DCC, модели как текст в репозитории, артефакты генерируются и не коммитятся, реестр моделей — data-контракт; `EOB-006` закрыт, `0021` добавлена в фазу 4 под skeletal animation |
 | 2026-09-26 | Выдано задание `0009` кодовой сессии: asset pipeline с первой GLB-моделью вместо placeholder |
+| 2026-09-26 | Кодовая сессия сдала `0009`: генератор glTF 2.0 binary на голом Node с примитивами, структурной самопроверкой (magic, chunks, accessor↔bufferView, диапазон индексов, winding против нормалей, emissive-узел, `bytes`/`contentHash`) и красными прогонами на битом файле; `manifest.json` как data-контракт и `src/asset-registry.ts` без Three.js и DOM; two-phase подмена `pulse-spire` на месте с сохранением entity, позиции и idle bob от базовой Y crystal; per-view копии материалов при общей геометрии реестра; fail-fast `data-assets="error"` с читаемой причиной и процедурным продолжением; IBL через `RoomEnvironment` с `environmentIntensity = 0.5`; typecheck, build, test:core (tick 323, gold 229) и 11 Playwright (46 s) зелёные, два прогона генератора побайтово идентичны, `git status` после `npm test` чистый; core и content без изменений; задача на проверке штаба |
 
 ## Структура проекта
 
@@ -99,23 +100,25 @@
 - `docs/ARCHITECTURE.md` — архитектура и границы модулей.
 - `docs/PLAN.md` — этапы разработки и критерии готовности.
 - `Old-Burbenog/BURBENOG-TD-RESEARCH.md` — исследовательский brief по оригинальной карте и рекомендации для ремейка.
-- `src/main.ts` — browser bootstrap, presentation entry point, snapshot projection, build palette, pad picking, запуск волны, combat presentation, pause/resume, replay по command log с guard в `dispatchPlayerCommand` и reduced-motion guard.
+- `src/main.ts` — browser bootstrap, presentation entry point, snapshot projection, build palette, pad picking, запуск волны, combat presentation, pause/resume, replay по command log с guard в `dispatchPlayerCommand`, reduced-motion guard, IBL и two-phase подмена tower view на загруженную модель.
 - `src/game-core/` — pure deterministic simulation, content validation и training scenario.
+- `src/asset-registry.ts` — data-слой реестра моделей: типы, fail-fast валидация manifest, resolve по towerId, кэш загрузок, `assetStatus`; без Three.js и DOM.
 - `scripts/check-simulation.ts` — один runnable core check.
-- `scripts/build-assets.ts` — генератор собственных GLB и реестр моделей (задача `0009`, в работе).
-- `tests/smoke.spec.ts` — browser E2E: bootstrap smoke, snapshot binding contract, placement contract, полный цикл до victory и defeat, pause/resume без drift, replay determinism, отклонение команд во время replay, prefers-reduced-motion.
+- `scripts/build-assets.ts` — генератор собственных GLB, реестр моделей и самопроверка артефактов (задача `0009`).
+- `tests/smoke.spec.ts` — browser E2E: bootstrap smoke, snapshot binding contract, placement contract, полный цикл до victory и defeat, pause/resume без drift, replay determinism, отклонение команд во время replay, prefers-reduced-motion, two-phase подмена GLB, fail-fast при недоступном реестре моделей.
 - `docs/tasks/0005-client-snapshot-binding.md` — принятое задание.
 - `docs/tasks/0006-build-pad-placement.md` — принятое задание.
 - `docs/tasks/0007-wave-combat-presentation.md` — принятое задание.
 - `docs/tasks/0008-vertical-slice-acceptance.md` — принятое задание (включая точечный fix).
-- `docs/tasks/0009-asset-pipeline.md` — выданное задание.
+- `docs/tasks/0009-asset-pipeline.md` — сданное задание (на проверке).
 
 Планируемая:
 
 - `src/client/` — выделенный Three.js client, input и presentation.
-- `src/asset-registry.ts` — data-слой реестра моделей: типы, fail-fast валидация manifest, resolve по content id, кэш загруженных GLTF (`0009`).
 - `src/server/` — sessions и transport.
 - `src/protocol/` — versioned network contract.
 - `content/` — карты, башни, враги и волны.
 - `assets/` — модели, текстуры и анимации.
 - `tools/` — asset validation и agent utilities.
+
+Замечание по консоли: IBL добавил один драйверный warning `THREE.WebGLProgram: warning X4122 ... double precision` от компиляции PMREM-шейдера. Это не ошибка и не влияет на рендер; кладётся рядом с известными `[vite]` сообщениями и favicon 404 (`EOB-011`).

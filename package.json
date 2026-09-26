@@ -7,11 +7,15 @@
     "node": ">=20.19.0"
   },
   "scripts": {
+    "predev": "npm run build:assets",
     "dev": "vite",
+    "prebuild": "npm run build:assets",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "npm run test:core && playwright test",
+    "build:assets": "tsx scripts/build-assets.ts --write",
+    "test": "npm run test:core && npm run test:assets && playwright test",
     "test:core": "tsx scripts/check-simulation.ts",
+    "test:assets": "tsx scripts/build-assets.ts --test",
     "test:e2e": "playwright test",
     "typecheck": "tsc --noEmit"
   },

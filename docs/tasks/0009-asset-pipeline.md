@@ -1,6 +1,6 @@
 # 0009 — Asset pipeline: GLB из собственного генератора и первая модель вместо placeholder
 
-> Статус: выдана кодовой сессии
+> Статус: сдана кодовой сессией, на проверке штаба
 > Приоритет: P0
 > Фаза: 4 — Asset pipeline и 3D polish
 > Следующая приёмка: `0010`; skeletal animation вынесена в `0021`
@@ -126,6 +126,98 @@ E2E обязателен реальными canvas-кликами по pad и St
 ## За пределами 0009
 
 - `0021` — skeletal animation и animation states: `SkeletonUtils.clone` при restart/replay, `AnimationMixer`, reduced-motion для клипов.
-- `0010` — asset validator и performance budgets: минимальный Windows 10/11 (`EOB-002`), отклонение несовместимого ассета, проверка manifest и geometry.
+- `0010` — asset validator и performance budgets: минимальное Windows 10/11 (`EOB-002`), отклонение несовместимого ассета, проверка manifest и geometry.
 - Сжатие и текстуры — отдельная задача фазы 4, когда число моделей перестанет помещаться в несжатый GLB.
 - `EOB-014` — разбивка монолитного `src/main.ts`; новая точка входа asset-загрузки должна проектироваться с учётом будущего `src/client/`, но сам split не делается.
+
+## Отчёт сессии
+
+### Изменённые файлы
+
+- `scripts/build-assets.ts` (новый) — генератор GLB, описание модели, запись `manifest.json`, структурная самопроверка, детерминизм и красные прогоны на битом файле.
+- `src/asset-registry.ts` (новый) — data-контракт реестра: типы, fail-fast парсинг манифеста, resolve по `towerId`, кэш загрузок по файлу, `assetStatus`. Без Three.js, DOM и сцены.
+- `src/main.ts` — IBL (`RoomEnvironment` + PMREM, `environmentIntensity = 0.5`), boot-загрузка реестра, two-phase подмена tower view, per-view копии материалов при общей геометрии, `release()` вместо общего dispose для башен, `data-assets` в viewport и статус в `scene-status`, idle bob от запомненной базовой Y crystal, поля `assets` и `towerModels` в debug seam.
+- `index.html` — атрибут `data-assets="loading"` на `viewport-shell` по образцу `data-phase`/`data-paused`/`data-replay`; нового UI chrome нет.
+- `tests/smoke.spec.ts` — два новых сценария, единый helper `waitForAssetsReady` во всех screenshot-сценариях, чтение `assets`/`towerModels` из debug seam, проверка model-source после victory.
+- `package.json` — `build:assets`, `test:assets`, hooks `predev` и `prebuild`, `test` = `test:core` + `test:assets` + `playwright test`. Новых зависимостей нет, `package-lock.json` не тронут.
+- `.gitignore` — `public/models/`.
+- `docs/ARCHITECTURE.md`, `docs/CONTEXT.md`, `docs/PLAN.md`, `docs/DECISIONS.md`, этот файл — asset contract, статус и evidence.
+- `src/game-core/*`, `content` (внутри `src/game-core/scenario.ts`) — только чтение.
+
+### Модель и манифест
+
+```json
+{
+  "version": 1,
+  "models": [
+    {
+      "id": "pulse-spire",
+      "file": "pulse-spire.glb",
+      "bytes": 17996,
+      "contentHash": "sha256:25b4af43806b6fc65fcfee270ab85d8e717df47999a1cb10af3ad9271068eac5",
+      "triangles": 580,
+      "emissiveNode": "crystal"
+    }
+  ]
+}
+```
+
+Параметры `pulse-spire` (узлы — прямые потомки корня, pivot в центре основания, высота ≈ 1.61, footprint 0.57 против pad hit radius 0.85):
+
+| Узел | Геометрия | Node Y | Треугольников | Цвет (sRGB) | metallic | roughness | emissive |
+|------|-----------|--------|--------------|-------------|----------|-----------|----------|
+| `base` | cylinder 0.46/0.56 × 0.3, 6 сегментов | 0.15 | 24 | `0x1d4651` | 0.34 | 0.46 | — |
+| `stem` | cylinder 0.2/0.28 × 0.78, 6 сегментов | 0.5 | 24 | `0x346f75` | 0.5 | 0.34 | — |
+| `roof` | cone 0.45 × 0.42, 6 сегментов | 1.08 | 12 | `0xd29b62` | 0.3 | 0.3 | — |
+| `crystal` | octahedron 0.18 | 1.43 | 8 | `0x6ee2cf` | 0.15 | 0.18 | `0x6ee2cf` |
+| `aura` | torus 0.57/0.025, 8×32 | 0.18 | 512 | `0x6ee2cf`, alpha 0.7, `BLEND` | 0 | 0.25 | `0x6ee2cf` |
+
+Цвета совпадают с `towerVisuals['pulse-spire']` и с материалами процедурной башни; sRGB-значения переводятся в линейные факторы генератором, поэтому GLB читается как та же башня. `aura` — единственное отступление от процедурного вида: glTF не имеет unlit-материала, поэтому кольцо аппроксимировано blended emissive PBR с тем же силуэтом и той же прозрачностью.
+
+### Детерминизм и красные прогоны
+
+- Два прогона `npm run build:assets` подряд: `pulse-spire.glb` — одинаковый SHA-256, `manifest.json` — побайтово идентичен. Отдельный verify-only прогон `npx tsx scripts/build-assets.ts --check` перечитывает артефакты с диска и сверяет их с манифестом.
+- Детерминизм проверяется и внутри генератора: `test:assets` собирает модель второй раз в том же процессе и сравнивает байты и хеш с записанным файлом.
+- Самопроверка красная на пяти видах поломки, каждая падает с внятным сообщением и печатается в лог `test:assets`:
+  - сломанный magic → `pulse-spire.glb: bad magic, expected glTF`;
+  - обрезанный chunk → `chunk 0x4e4942 runs past the end of the file`;
+  - индекс вне accessor → `mesh 0 primitive 0: triangle 0 references vertex 37 of a 30 vertex accessor`;
+  - неверная версия контейнера → `unsupported container version 1`;
+  - несовпадение длины в заголовке → `header length 18000 does not match the 17996 bytes on disk`.
+  Каждый битый файл перед проверкой перехешируется под манифест, иначе сработала бы более ранняя проверка байтов и целевая проверка не была бы проверена.
+- Дополнительно самопроверка сверяет winding каждого треугольника с вершинными нормалями (все 580), границы `bufferView` внутри буфера, выравнивание accessor'ов, наличие `emissiveFactor` у узла `crystal` и совпадение `triangles` с манифестом.
+- Красный прогон E2E: с временно отключённым шагом asset status (`viewportShell.dataset.assets`) оба новых сценария красные (`data-assets` остаётся `loading`); с временно отключённой two-phase подменой (`upgradeTowerViews`) красный сценарий подмены на `['procedural', 'procedural', 'procedural']` вместо `['model', ...]`. В обоих случаях правка снята.
+
+### Сценарии и two-phase подмена
+
+- `swaps a placed placeholder for the generated GLB without touching the snapshot` — маршрут `**/models/*.glb` удерживает ответ, поэтому башни гарантированно строятся процедурными. До разблокировки: `data-assets="loading"`, `source: 'procedural'`, `modelId: null`. После: тот же `entityId`, та же позиция на pad, тот же gold, `source: 'model'`, `modelId: 'pulse-spire'`, `meshCount: 5`, `crystalBaseY: 1.43`; два соседних башни без модели остались процедурными. Idle bob не уводит crystal от базовой Y (|Δ| ≤ 0.08) и продолжает двигаться; при выстреле снят кадр прямо в странице, где `crystalEmissive > 2.4` и `crystalScale > 1`, после чего эмиссия возвращается к idle. Скриншот `test-results/vertical-slice-asset-swap.png`.
+- `keeps the match playable and names the failure when the model registry is unavailable` — манифест отдаёт 404: `data-assets="error"`, в `scene-status` читается `model registry failed: model registry responded 404`, `assets.error` заполнен, башня остаётся процедурной, Start Wave проходит, `pageerror` пуст — unhandled rejection нет.
+- Остальные девять сценариев не потеряли проверок; `data-assets="ready"` добавлен единым helper'ом во все screenshot-сценарии, а полный прогон до victory теперь дополнительно утверждает, что spire на pad — загруженная модель.
+
+### Gameplay-контракты
+
+- `test:core` до и после: `{ status: victory, tick: 323, gold: 229, towers: 3, enemies: 0, coreHealth: 10 }` — совпадает.
+- E2E-значения не изменились: gold 229 при полном заходе, `pad` occupancy из snapshot, terminal-отчёты двух прогонов replay идентичны, `commandCount` = 4, snapshot-контракт и `commandLog` не тронуты.
+- SkinnedMesh, animation clips и морфов в модели нет; `SkeletonUtils` не импортируется; `package.json` изменён только скриптами, `package-lock.json` пуст в diff.
+
+### Команды и результат
+
+| Команда | Результат |
+|---------|-----------|
+| `npm run typecheck` | ok |
+| `npm run build` | ok, `prebuild` сгенерировал assets, `dist/models` содержит `manifest.json` и `pulse-spire.glb` |
+| `npm run test:core` | victory, tick 323, gold 229 |
+| `npm run test:assets` | ok + 5 красных проверок |
+| `npx playwright test` | 11 passed (46 s) |
+| `npm run build:assets` × 2 | одинаковые хеши, `git status` чистый |
+
+Screenshots: `test-results/vertical-slice-asset-swap.png` (GLB-башня на pad), перечитаны `wave-combat-midwave.png`, `wave-combat-victory.png`, `wave-combat-defeat.png`, `vertical-slice-paused.png`, `vertical-slice-replay-reset.png`, `build-pad-placement.png`. Композиция, маршруты и HUD сохранились; IBL добавил один драйверный warning `X4122` от компиляции PMREM-шейдера — не ошибка, вместе с favicon 404 (`EOB-011`) он единственный не-`[vite]` вывод в консоли.
+
+### Остаток проблем
+
+- `0010` — asset validator и performance budgets: минимальное железо (`EOB-002`), отклонение несовместимого ассета, проверка manifest и geometry; там же пересмотр `environmentIntensity`.
+- `0021` — skeletal animation и animation states.
+- `EOB-016` — provenance моделей из внешнего редактора: контракт валидирует только то, что собрал генератор.
+- Сжатие и текстуры — отдельная задача фазы 4.
+
+Статус задачи: `на проверке`.

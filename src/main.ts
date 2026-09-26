@@ -1,6 +1,10 @@
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { TICK_RATE, createSimulation, createTrainingScenario } from './game-core/index.ts';
 import type { Command, CommandResult, MatchSnapshot, MatchStatus, SimulationEvent } from './game-core/index.ts';
+import { ASSET_MANIFEST_URL, AssetContractError, createAssetRegistry, parseAssetManifest, resolveModelUrl } from './asset-registry.ts';
+import type { AssetRegistry, AssetStatus, ModelManifestEntry } from './asset-registry.ts';
 import './styles.css';
 
 type RenderCounters = {
@@ -53,6 +57,8 @@ type DebugState = {
   readonly commandCount: number;
   readonly matchReports: MatchReport[];
   readonly motion: { reducedMotion: boolean; combatBursts: number; enemyBob: number };
+  readonly assets: { status: AssetStatus; models: string[]; error: string | null };
+  readonly towerModels: TowerModelReading[];
 };
 
 type FeedbackState = 'idle' | 'accepted' | 'rejected' | 'terminal';
@@ -82,12 +88,40 @@ type PadView = {
   errorUntil: number;
 };
 
+type LoadedModel = {
+  entry: ModelManifestEntry;
+  scene: THREE.Group;
+  emissiveNode: string;
+};
+
+type TowerModelReading = {
+  entityId: number;
+  towerId: string;
+  source: 'procedural' | 'model';
+  modelId: string | null;
+  meshCount: number;
+  crystalNode: string | null;
+  crystalBaseY: number;
+  crystalY: number;
+  crystalScale: number;
+  crystalEmissive: number;
+};
+
 type TowerView = {
+  towerId: string;
   group: THREE.Group;
   crystal: THREE.Mesh;
   crystalMaterial: THREE.MeshStandardMaterial;
+  // The idle bob is measured from wherever the emissive node starts, so a loaded model and
+  // the procedural placeholder cannot drift apart on a hardcoded height.
+  crystalBaseY: number;
+  source: 'procedural' | 'model';
+  modelId: string | null;
   firedUntil: number;
   aimAngle: number;
+  // Releases exactly what this view owns: the geometry and the source materials of a loaded
+  // model stay with the registry, or the next view of the same model would get a disposed one.
+  release: () => void;
 };
 
 type EnemyView = {
@@ -183,6 +217,19 @@ sceneMount.append(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x08131b);
 scene.fog = new THREE.Fog(0x08131b, 15, 31);
+
+// Image based lighting: metalness and roughness only read as metal under an environment, so
+// the PBR materials of the generated models get a prefiltered room probe.
+const pmremGenerator = new THREE.PMREMGenerator(renderer);
+const roomEnvironment = new RoomEnvironment();
+const environmentTarget = pmremGenerator.fromScene(roomEnvironment, 0.04);
+scene.environment = environmentTarget.texture;
+// The probe is a new light source, and the scene is a deliberately dark tactical read, so its
+// contribution is capped instead of being applied at full strength. Lights, exposure and tone
+// mapping stay exactly as they were.
+scene.environmentIntensity = 0.5;
+roomEnvironment.dispose();
+pmremGenerator.dispose();
 
 const camera = new THREE.OrthographicCamera(-8, 8, 5, -5, 0.1, 100);
 camera.position.set(9, 10, 9);
@@ -293,7 +340,70 @@ const towerVisuals: Record<string, { accent: number; roof: number; scale: number
 const unknownTowerVisual = { accent: 0x9fd6c8, roof: 0x5b7f86, scale: 1 };
 
 const towerViews = new Map<number, TowerView>();
-const createTowerView = (towerId: string): TowerView => {
+const modelStore = new Map<string, LoadedModel>();
+
+// The loaded scene stays the single owner of its geometry and of its source materials. A view
+// borrows that geometry and gets its own material copies, because the crystal emissive is
+// per-tower presentation state: on a shared material one tower firing would flash every tower
+// of that type at the same time. No skin, no morph and no clip, so a structural clone is the
+// whole of what instantiating a model needs.
+const cloneModelNode = (source: THREE.Object3D, owned: THREE.Material[]): THREE.Object3D => {
+  if (source instanceof THREE.Mesh) {
+    const material = (source.material as THREE.Material).clone();
+    owned.push(material);
+    const mesh = new THREE.Mesh(source.geometry, material);
+    mesh.name = source.name;
+    mesh.position.copy(source.position);
+    mesh.quaternion.copy(source.quaternion);
+    mesh.scale.copy(source.scale);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    return mesh;
+  }
+  const group = new THREE.Group();
+  group.name = source.name;
+  group.position.copy(source.position);
+  group.quaternion.copy(source.quaternion);
+  group.scale.copy(source.scale);
+  for (const child of source.children) {
+    group.add(cloneModelNode(child, owned));
+  }
+  return group;
+};
+
+const createModelTowerView = (towerId: string, model: LoadedModel): TowerView => {
+  const visual = towerVisuals[towerId] ?? unknownTowerVisual;
+  const owned: THREE.Material[] = [];
+  const root = cloneModelNode(model.scene, owned) as THREE.Group;
+  const group = new THREE.Group();
+  group.name = `tower:${towerId}`;
+  group.scale.setScalar(visual.scale);
+  group.add(root);
+  const emissive = root.getObjectByName(model.emissiveNode);
+  if (!(emissive instanceof THREE.Mesh) || !(emissive.material instanceof THREE.MeshStandardMaterial)) {
+    throw new AssetContractError(`model ${model.entry.id} has no ${model.emissiveNode} mesh to animate`);
+  }
+  const crystalMaterial = emissive.material;
+  crystalMaterial.emissiveIntensity = towerCrystalIdleIntensity;
+  return {
+    towerId,
+    group,
+    crystal: emissive,
+    crystalMaterial,
+    crystalBaseY: emissive.position.y,
+    source: 'model',
+    modelId: model.entry.id,
+    firedUntil: 0,
+    aimAngle: 0,
+    release: () => {
+      for (const material of owned) {
+        material.dispose();
+      }
+    },
+  };
+};
+
+const createProceduralTowerView = (towerId: string): TowerView => {
   const visual = towerVisuals[towerId] ?? unknownTowerVisual;
   const group = new THREE.Group();
   group.scale.setScalar(visual.scale);
@@ -345,7 +455,23 @@ const createTowerView = (towerId: string): TowerView => {
   aura.position.y = 0.18;
   group.add(aura);
 
-  return { group, crystal, crystalMaterial: crystal.material as THREE.MeshStandardMaterial, firedUntil: 0, aimAngle: 0 };
+  return {
+    towerId,
+    group,
+    crystal,
+    crystalMaterial: crystal.material as THREE.MeshStandardMaterial,
+    crystalBaseY: crystal.position.y,
+    source: 'procedural',
+    modelId: null,
+    firedUntil: 0,
+    aimAngle: 0,
+    release: () => disposeInstance(group),
+  };
+};
+
+const createTowerView = (towerId: string): TowerView => {
+  const model = modelStore.get(towerId);
+  return model ? createModelTowerView(towerId, model) : createProceduralTowerView(towerId);
 };
 
 const enemyVisuals: Record<string, { color: number; scale: number }> = {
@@ -476,6 +602,89 @@ for (const tower of config.towers) {
     throw new Error(`Tower ${tower.id} has no build button`);
   }
 }
+
+const assetRegistry: AssetRegistry = createAssetRegistry();
+const gltfLoader = new GLTFLoader();
+
+const loadModel = async (entry: ModelManifestEntry): Promise<LoadedModel> => {
+  const response = await fetch(resolveModelUrl(entry));
+  if (!response.ok) {
+    throw new AssetContractError(`model ${entry.id} responded ${response.status}`);
+  }
+  const gltf = await gltfLoader.parseAsync(await response.arrayBuffer(), '');
+  if (!gltf.scene.getObjectByName(entry.emissiveNode)) {
+    throw new AssetContractError(`model ${entry.id} has no ${entry.emissiveNode} node to animate`);
+  }
+  return { entry, scene: gltf.scene, emissiveNode: entry.emissiveNode };
+};
+
+const applyAssetStatus = () => {
+  const status = assetRegistry.status;
+  viewportShell.dataset.assets = status;
+  if (status === 'ready') {
+    statusLabel.textContent = `Scene online · models ready (${assetRegistry.modelIds.join(', ')})`;
+    return;
+  }
+  if (status === 'error') {
+    statusLabel.textContent = `Scene online · model registry failed: ${assetRegistry.error ?? 'unknown reason'}`;
+    return;
+  }
+  statusLabel.textContent = 'Scene online · loading models';
+};
+
+// Two-phase swap. A view built before the registry answered keeps rendering, and once the model
+// is in it is replaced in place: no entity is recreated, no position changes and the snapshot is
+// not touched, so a late model cannot make two replays of the same run look different.
+const upgradeTowerViews = () => {
+  for (const [entityId, view] of [...towerViews]) {
+    if (view.source === 'model' || !modelStore.has(view.towerId)) {
+      continue;
+    }
+    const next = createTowerView(view.towerId);
+    next.group.position.copy(view.group.position);
+    next.group.rotation.y = view.group.rotation.y;
+    next.firedUntil = view.firedUntil;
+    next.aimAngle = view.aimAngle;
+    scene.remove(view.group);
+    view.release();
+    scene.add(next.group);
+    towerViews.set(entityId, next);
+  }
+};
+
+const countMeshes = (object: THREE.Object3D): number => {
+  let total = 0;
+  object.traverse((child) => {
+    if (child instanceof THREE.Mesh) {
+      total += 1;
+    }
+  });
+  return total;
+};
+
+const bootAssets = async () => {
+  applyAssetStatus();
+  try {
+    const response = await fetch(ASSET_MANIFEST_URL);
+    if (!response.ok) {
+      throw new AssetContractError(`model registry responded ${response.status}`);
+    }
+    assetRegistry.setManifest(parseAssetManifest(await response.json()));
+    const loaded = await Promise.all(
+      assetRegistry.entries().map((entry) => assetRegistry.load<LoadedModel>(entry, () => loadModel(entry))),
+    );
+    for (const model of loaded) {
+      modelStore.set(model.entry.id, model);
+    }
+    assetRegistry.markReady(loaded.map((model) => model.entry.id));
+  } catch (error) {
+    // A broken contract is stated in the viewport instead of degrading silently, and the scene
+    // keeps rendering procedural placeholders so the match stays playable.
+    assetRegistry.markFailed(error instanceof Error ? error.message : String(error));
+  }
+  applyAssetStatus();
+  upgradeTowerViews();
+};
 
 const rejectionMessages: Record<string, string> = {
   'pad-occupied': 'Pad already occupied',
@@ -712,7 +921,7 @@ const applySnapshot = (next: MatchSnapshot) => {
       continue;
     }
     scene.remove(view.group);
-    disposeInstance(view.group);
+    view.release();
     towerViews.delete(entityId);
   }
 
@@ -1109,11 +1318,11 @@ reducedMotionQuery.addEventListener('change', (event) => {
 syncSelection();
 setFeedback('idle', 'Left click a build pad to place');
 applySnapshot(snapshot);
+void bootAssets();
 
 let accumulator = 0;
 let previousTimestamp = performance.now();
 
-statusLabel.textContent = 'Scene online';
 window.__ECHOES_DEBUG__ = {
   ready: true,
   renderer: 'Three.js WebGL',
@@ -1189,6 +1398,25 @@ window.__ECHOES_DEBUG__ = {
   get motion() {
     return { reducedMotion, combatBursts: combatBursts.length, enemyBob: enemyBobOffset };
   },
+  get assets() {
+    return { status: assetRegistry.status, models: assetRegistry.modelIds, error: assetRegistry.error };
+  },
+  get towerModels(): TowerModelReading[] {
+    return Array.from(towerViews, ([entityId, view]) => ({
+      entityId,
+      towerId: view.towerId,
+      source: view.source,
+      modelId: view.modelId,
+      meshCount: countMeshes(view.group),
+      // The procedural placeholder has no name on its emissive mesh, so this is also the
+      // cheapest way to see which node of the model the client ended up animating.
+      crystalNode: view.crystal.name || null,
+      crystalBaseY: view.crystalBaseY,
+      crystalY: view.crystal.position.y,
+      crystalScale: view.crystal.scale.x,
+      crystalEmissive: view.crystalMaterial.emissiveIntensity,
+    }));
+  },
   // The QA seam goes through the logging path as well, so the command log always stays
   // the complete input of the match that Restart replays.
   dispatch: dispatchPlayerCommand,
@@ -1236,7 +1464,7 @@ const renderFrame = (timestamp: number) => {
       view.crystal.scale.setScalar(1);
       view.crystalMaterial.emissiveIntensity = towerCrystalIdleIntensity;
     }
-    view.crystal.position.y = 1.43 + (reducedMotion ? 0 : Math.sin(elapsed * 2.1 + towerSlot) * 0.07);
+    view.crystal.position.y = view.crystalBaseY + (reducedMotion ? 0 : Math.sin(elapsed * 2.1 + towerSlot) * 0.07);
     towerSlot += 1;
   }
   let enemySlot = 0;

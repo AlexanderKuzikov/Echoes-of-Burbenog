@@ -51,6 +51,19 @@ type DebugReading = {
   commandCount: number;
   matchReports: MatchReport[];
   motion: { reducedMotion: boolean; combatBursts: number; enemyBob: number };
+  assets: { status: string; models: string[]; error: string | null };
+  towerModels: Array<{
+    entityId: number;
+    towerId: string;
+    source: string;
+    modelId: string | null;
+    meshCount: number;
+    crystalNode: string | null;
+    crystalBaseY: number;
+    crystalY: number;
+    crystalScale: number;
+    crystalEmissive: number;
+  }>;
   snapshot: NonNullable<typeof window.__ECHOES_DEBUG__>['snapshot'];
 };
 
@@ -114,6 +127,8 @@ const readDebug = (page: Page) =>
       commandCount: debug.commandCount,
       matchReports: debug.matchReports,
       motion: debug.motion,
+      assets: debug.assets,
+      towerModels: debug.towerModels,
       snapshot: debug.snapshot,
     };
   });
@@ -202,6 +217,11 @@ const armDefendedWave = async (page: Page) => {
   await clickPad(page, 'pad-south');
 };
 
+// Every screenshot scenario waits for the model registry first, so a shot can never be taken
+// against a scene that is still swapping placeholders for loaded models.
+const waitForAssetsReady = (page: Page) =>
+  expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'ready');
+
 const emptyEventCounts = (): Record<SimulationEvent['type'], number> => ({
   towerPlaced: 0,
   preparationEnded: 0,
@@ -233,15 +253,18 @@ const expectProjectionMatchesSnapshot = (debug: DebugReading) => {
 
 test('renders the first 3D-ready scene and accepts build selection', async ({ page }) => {
   await page.goto('/');
+  await waitForAssetsReady(page);
 
   await expect(page.getByTestId('game-title')).toHaveText('First Contact');
-  await expect(page.getByTestId('scene-status')).toHaveText('Scene online');
+  await expect(page.getByTestId('scene-status')).toContainText('Scene online');
+  await expect(page.getByTestId('scene-status')).toContainText('models ready (pulse-spire)');
   await expect(page.getByTestId('scene-canvas')).toBeVisible();
 
   const debugState = await readDebug(page);
 
   expect(debugState?.ready).toBe(true);
   expect(debugState?.objectCount).toBeGreaterThan(0);
+  expect(debugState?.assets).toEqual({ status: 'ready', models: ['pulse-spire'], error: null });
 
   const webglAvailable = await page.getByTestId('scene-canvas').evaluate((element) => {
     return Boolean((element as HTMLCanvasElement).getContext('webgl2'));
@@ -448,6 +471,7 @@ test('places the selected tower on a clicked build pad through the command contr
   // The pad rejection flash is a short cosmetic pulse; let the earlier one expire
   // so the screenshot only shows the flash of the final rejected pad.
   await page.waitForTimeout(900);
+  await waitForAssetsReady(page);
   // By now the short prep window is over, so the phase clock reports the neutral state.
   await expect(page.getByTestId('phase-timer')).toHaveText('Awaiting start');
   await page.screenshot({ path: 'test-results/build-pad-placement.png', fullPage: true });
@@ -552,6 +576,7 @@ test('plays a defended wave from real clicks and reports victory from the snapsh
   expect(fighting.snapshot.towers).toHaveLength(placements.length);
   expectProjectionMatchesSnapshot(fighting);
 
+  await waitForAssetsReady(page);
   await page.screenshot({ path: 'test-results/wave-combat-midwave.png', fullPage: true });
 
   await page.waitForFunction(() => window.__ECHOES_DEBUG__?.snapshot.status === 'victory', undefined, {
@@ -593,7 +618,13 @@ test('plays a defended wave from real clicks and reports victory from the snapsh
   await expect(page.getByTestId('match-result')).toHaveText('Sector secured');
   await expect(page.getByTestId('event-feed')).toContainText('Sector secured');
   await expect(page.getByTestId('viewport')).toHaveAttribute('data-phase', 'victory');
+  // The registry answered long before the wave ended, so the spire on the pad is the generated
+  // model and the same victory numbers are reached with it in the scene.
+  expect(finished.assets).toEqual({ status: 'ready', models: ['pulse-spire'], error: null });
+  expect(finished.towerModels.map((view) => view.source)).toEqual(['model', 'procedural', 'procedural']);
+  expect(finished.towerModels[0]?.meshCount).toBe(5);
 
+  await waitForAssetsReady(page);
   await page.screenshot({ path: 'test-results/wave-combat-victory.png', fullPage: true });
 });
 
@@ -651,6 +682,7 @@ test('reports defeat when an undefended wave reaches the core', async ({ page })
   await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'terminal');
   await expect(page.getByTestId('command-feedback')).toHaveText('Core breached · restart repeats this run exactly');
 
+  await waitForAssetsReady(page);
   await page.screenshot({ path: 'test-results/wave-combat-defeat.png', fullPage: true });
 });
 
@@ -705,6 +737,7 @@ test('freezes and resumes the fixed-step clock without drift', async ({ page }) 
   expect(held.recentEvents).toEqual(frozen.recentEvents);
   expectProjectionMatchesSnapshot(held);
 
+  await waitForAssetsReady(page);
   await page.screenshot({ path: 'test-results/vertical-slice-paused.png', fullPage: true });
 
   await page.getByTestId('pause-toggle').click();
@@ -792,6 +825,7 @@ test('restarts from the same seed and replays the recorded command log', async (
   await expect(page.getByRole('button', { name: 'Grove Lens' })).toBeDisabled();
   await expect(page.getByTestId('command-feedback')).toHaveText('Replaying recorded commands');
   await expect(page.getByTestId('gold-value')).toHaveText(String(startingGold));
+  await waitForAssetsReady(page);
   await page.screenshot({ path: 'test-results/vertical-slice-replay-reset.png', fullPage: true });
 
   await page.getByTestId('pause-toggle').click();
@@ -826,6 +860,7 @@ test('restarts from the same seed and replays the recorded command log', async (
   await expect(page.getByTestId('viewport')).toHaveAttribute('data-replay', 'idle');
   await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'terminal');
   await expect(page.getByTestId('match-result')).toHaveText('Sector secured');
+  await waitForAssetsReady(page);
   await page.screenshot({ path: 'test-results/vertical-slice-replay-victory.png', fullPage: true });
 });
 
@@ -966,6 +1001,163 @@ test('drops transient canvas effects under prefers-reduced-motion', async ({ pag
   expect(hud.integrity).toBe(hud.snapshotIntegrity);
   expect(hud.feedTypes).toContain('enemySpawned');
 
-
+  await waitForAssetsReady(page);
   await page.screenshot({ path: 'test-results/vertical-slice-reduced-motion.png', fullPage: true });
+});
+
+test('swaps a placed placeholder for the generated GLB without touching the snapshot', async ({ page }) => {
+  test.setTimeout(120_000);
+  // The model request is held open so the tower is guaranteed to be built while the registry
+  // is still loading. That makes the two-phase swap deterministic instead of a race.
+  let releaseModel: () => void = () => {};
+  const modelGate = new Promise<void>((resolve) => {
+    releaseModel = resolve;
+  });
+  await page.route('**/models/*.glb', async (route) => {
+    await modelGate;
+    await route.continue();
+  });
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+
+  await page.goto('/');
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'loading');
+
+  // Only pulse-spire has a model in this task, so the scene holds one model and two procedural
+  // placeholders at the same time and the mixed state has to stay readable and playable.
+  await armDefendedWave(page);
+
+  const procedural = await readDebugOrThrow(page);
+  expect(procedural.assets.status).toBe('loading');
+  expect(procedural.snapshot.pads['pad-east']).toBe('pulse-spire');
+  expect(procedural.towerModels).toHaveLength(placements.length);
+  expect(procedural.towerModels.map((view) => view.source)).toEqual(['procedural', 'procedural', 'procedural']);
+  const before = procedural.towerModels[0];
+  expect(before?.source).toBe('procedural');
+  expect(before?.modelId).toBeNull();
+  expect(before?.crystalNode).toBeNull();
+  expect(before?.crystalBaseY).toBeCloseTo(1.43, 5);
+  const padEast = padById.get('pad-east');
+  expect(procedural.towerPositions[0]?.x).toBeCloseTo(padEast?.position.x ?? 0, 5);
+  expect(procedural.towerPositions[0]?.z).toBeCloseTo(padEast?.position.z ?? 0, 5);
+
+  releaseModel();
+  await waitForAssetsReady(page);
+  await expect(page.getByTestId('scene-status')).toContainText('models ready (pulse-spire)');
+
+  const swapped = await readDebugOrThrow(page);
+  expect(swapped.assets).toEqual({ status: 'ready', models: ['pulse-spire'], error: null });
+  // Same entity, same pad, same money: the swap is a view change, not a gameplay change.
+  expect(swapped.snapshot.pads['pad-east']).toBe('pulse-spire');
+  expect(swapped.snapshot.gold).toBe(procedural.snapshot.gold);
+  expect(swapped.snapshot.tick).toBeGreaterThanOrEqual(procedural.snapshot.tick);
+  expect(swapped.rendered.towers).toBe(placements.length);
+  expect(swapped.towerPositions).toEqual(procedural.towerPositions);
+  expect(swapped.towerModels.map((view) => view.source)).toEqual(['model', 'procedural', 'procedural']);
+  const after = swapped.towerModels[0];
+  expect(after?.entityId).toBe(before?.entityId);
+  expect(after?.towerId).toBe('pulse-spire');
+  expect(after?.source).toBe('model');
+  expect(after?.modelId).toBe('pulse-spire');
+  expect(after?.crystalNode).toBe('crystal');
+  // base, stem, roof, crystal and aura: the procedural placeholder had no mesh count to report.
+  expect(after?.meshCount).toBe(5);
+  expect(after?.crystalBaseY).toBeCloseTo(1.43, 5);
+
+  // Idle bob is measured from the node the model shipped with, so it may never move the crystal
+  // to another height, and it has to keep moving while the match is not paused.
+  const firstBob = await readDebugOrThrow(page);
+  await page.waitForTimeout(320);
+  const secondBob = await readDebugOrThrow(page);
+  for (const sample of [firstBob, secondBob]) {
+    const view = sample.towerModels[0];
+    expect(Math.abs((view?.crystalY ?? 0) - (view?.crystalBaseY ?? 0))).toBeLessThanOrEqual(0.08);
+    expect(view?.crystalScale).toBeCloseTo(1, 5);
+    expect(view?.crystalEmissive).toBeCloseTo(2.4, 5);
+  }
+  expect(secondBob.towerModels[0]?.crystalY).not.toBe(firstBob.towerModels[0]?.crystalY);
+
+  await page.getByTestId('start-wave').click();
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.eventCounts.towerFired ?? 0) > 0, undefined, {
+    timeout: 60_000,
+  });
+
+  // The loaded crystal keeps the combat presentation of the procedural one. The sample is taken
+  // in the page on the frame the flash is visible, because the flash only lasts 0.22s.
+  const flash = await page
+    .waitForFunction(() => {
+      const view = window.__ECHOES_DEBUG__?.towerModels[0];
+      if (!view || view.crystalEmissive <= 2.4) {
+        return null;
+      }
+      return {
+        emissive: view.crystalEmissive,
+        scale: view.crystalScale,
+        crystalY: view.crystalY,
+        crystalBaseY: view.crystalBaseY,
+      };
+    }, undefined, { timeout: 60_000 })
+    .then((handle) => handle.jsonValue() as Promise<{ emissive: number; scale: number; crystalY: number; crystalBaseY: number } | null>);
+  if (!flash) {
+    throw new Error('crystal flash sample missing');
+  }
+  expect(flash.emissive).toBeGreaterThan(2.4);
+  expect(flash.scale).toBeGreaterThan(1);
+  expect(Math.abs(flash.crystalY - flash.crystalBaseY)).toBeLessThanOrEqual(0.08);
+  // And the presentation has to settle back, so the flash is a transient and not a latch.
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.towerModels[0]?.crystalEmissive ?? 0) <= 2.4, undefined, {
+    timeout: 60_000,
+  });
+  const fighting = await readDebugOrThrow(page);
+  // The swap never became a gameplay change: the snapshot keeps driving everything, and the
+  // towers without a model in the registry are still procedural next to the loaded one.
+  expect(fighting.rendered.towers).toBe(placements.length);
+  expect(fighting.towerModels.map((view) => view.source)).toEqual(['model', 'procedural', 'procedural']);
+  expect(fighting.snapshot.pads['pad-east']).toBe('pulse-spire');
+  expect(fighting.towerPositions[0]?.x).toBeCloseTo(padEast?.position.x ?? 0, 5);
+  expect(fighting.towerPositions[0]?.z).toBeCloseTo(padEast?.position.z ?? 0, 5);
+  expectProjectionMatchesSnapshot(fighting);
+  expect(pageErrors).toEqual([]);
+
+  await page.screenshot({ path: 'test-results/vertical-slice-asset-swap.png', fullPage: true });
+});
+
+test('keeps the match playable and names the failure when the model registry is unavailable', async ({ page }) => {
+  test.setTimeout(60_000);
+  await page.route('**/models/manifest.json', (route) =>
+    route.fulfill({ status: 404, contentType: 'text/plain', body: 'not found' }),
+  );
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+
+  await page.goto('/');
+  await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'error');
+
+  // Fail-fast is visible, not silent: the reason is in the viewport, not in a console warning.
+  const status = page.getByTestId('scene-status');
+  await expect(status).toContainText('model registry failed');
+  await expect(status).toContainText('404');
+
+  const failed = await readDebugOrThrow(page);
+  expect(failed.assets.status).toBe('error');
+  expect(failed.assets.models).toEqual([]);
+  expect(failed.assets.error).toContain('model registry responded 404');
+
+  // A tower without a model entry is normal and stays procedural, and the match keeps running.
+  await page.getByRole('button', { name: 'Pulse Spire' }).click();
+  await clickPad(page, 'pad-east');
+  const placed = await readDebugOrThrow(page);
+  expect(placed.snapshot.pads['pad-east']).toBe('pulse-spire');
+  expect(placed.rendered.towers).toBe(1);
+  expect(placed.towerModels[0]?.source).toBe('procedural');
+  expect(placed.towerModels[0]?.crystalBaseY).toBeCloseTo(1.43, 5);
+
+  await page.getByTestId('start-wave').click();
+  const started = await readDebugOrThrow(page);
+  expect(started.snapshot.status).toBe('wave');
+  expect(started.eventCounts.waveStarted).toBe(1);
+  await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'error');
+  // A contract failure must not surface as an unhandled rejection either.
+  expect(pageErrors).toEqual([]);
 });
