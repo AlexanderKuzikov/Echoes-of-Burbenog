@@ -1,7 +1,81 @@
 import { test, expect, type Page } from '@playwright/test';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { createTrainingScenario } from '../src/game-core/index.ts';
 import type { SimulationEvent } from '../src/game-core/index.ts';
 import { MODEL_BUDGET } from '../src/asset-budgets.ts';
+
+const GLB_MODEL_PATH = 'public/models/pulse-spire.glb';
+const IDENTITY_MATRIX = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+const align4 = (length: number) => length + ((4 - (length % 4)) % 4);
+
+// Rewrites the generated model with `extra` more bones: the skin names them, the inverse bind
+// matrices follow, and they are reachable from the scene so the loader builds them as Bones. This is
+// the only honest way to reach a runtime refusal on the skeleton budget — the client measures the
+// tree it loaded, so the file itself has to carry the rig that breaks the limit. The result is a
+// plain glTF file, so nothing about the refusal depends on how it was produced.
+const withExtraBones = (source: Buffer, extra: number): Buffer => {
+  const jsonLength = source.readUInt32LE(12);
+  const gltf = JSON.parse(source.subarray(20, 20 + jsonLength).toString('utf8').trim()) as {
+    nodes: Array<Record<string, unknown>>;
+    scenes: Array<{ nodes: number[] }>;
+    skins: Array<{ joints: number[]; inverseBindMatrices: number }>;
+    bufferViews: Array<Record<string, unknown>>;
+    accessors: Array<Record<string, unknown>>;
+    buffers: Array<{ byteLength: number }>;
+  };
+  const binHeader = 20 + jsonLength;
+  const bin = source.subarray(binHeader + 8, binHeader + 8 + source.readUInt32LE(binHeader));
+
+  // The inverse bind matrices have to keep up with the joints: the array is rewritten with the
+  // matrices that are already in the buffer followed by one identity per new bone, so the bind pose
+  // of the two bones the model shipped with is untouched.
+  const bindAccessor = gltf.accessors[gltf.skins[0]!.inverseBindMatrices] as { bufferView: number; count: number };
+  const bindView = gltf.bufferViews[bindAccessor.bufferView] as { byteOffset: number; byteLength: number };
+  const existing = bin.subarray(bindView.byteOffset, bindView.byteOffset + bindView.byteLength);
+  const added = new Float32Array(extra * 16);
+  for (let bone = 0; bone < extra; bone += 1) {
+    added.set(IDENTITY_MATRIX, bone * 16);
+  }
+  const matrices = Buffer.concat([existing, Buffer.from(added.buffer)]);
+  const offset = align4(gltf.buffers[0]!.byteLength);
+  const nextBin = Buffer.concat([bin.subarray(0, offset), matrices]);
+  gltf.bufferViews.push({ buffer: 0, byteOffset: offset, byteLength: matrices.length });
+  gltf.accessors.push({
+    bufferView: gltf.bufferViews.length - 1,
+    byteOffset: 0,
+    componentType: 5126,
+    count: bindAccessor.count + extra,
+    type: 'MAT4',
+  });
+  gltf.skins[0]!.inverseBindMatrices = gltf.accessors.length - 1;
+  for (let bone = 0; bone < extra; bone += 1) {
+    const index = gltf.nodes.length;
+    gltf.nodes.push({ name: `pad-bone-${bone}`, translation: [0, 0.1 * (bone + 1), 0] });
+    gltf.scenes[0]!.nodes.push(index);
+    gltf.skins[0]!.joints.push(index);
+  }
+  gltf.buffers[0]!.byteLength = nextBin.length;
+
+  const json = Buffer.from(JSON.stringify(gltf), 'utf8');
+  const jsonChunk = Buffer.concat([json, Buffer.alloc((4 - (json.length % 4)) % 4, 0x20)]);
+  const binChunk = nextBin;
+  const total = 12 + 8 + jsonChunk.length + 8 + binChunk.length;
+  const glb = Buffer.alloc(total);
+  glb.writeUInt32LE(0x46546c67, 0);
+  glb.writeUInt32LE(2, 4);
+  glb.writeUInt32LE(total, 8);
+  glb.writeUInt32LE(jsonChunk.length, 12);
+  glb.writeUInt32LE(0x4e4f534a, 16);
+  jsonChunk.copy(glb, 20);
+  const patchedBinHeader = 20 + jsonChunk.length;
+  glb.writeUInt32LE(binChunk.length, patchedBinHeader);
+  glb.writeUInt32LE(0x004e4942, patchedBinHeader + 4);
+  binChunk.copy(glb, patchedBinHeader + 8);
+  return glb;
+};
+
+const sha256 = (bytes: Buffer): string => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 
 const scenario = createTrainingScenario();
 const padById = new Map(scenario.map.buildPads.map((pad) => [pad.id, pad]));
@@ -54,7 +128,7 @@ type DebugReading = {
   replayIndex: number;
   commandCount: number;
   matchReports: MatchReport[];
-  motion: { reducedMotion: boolean; combatBursts: number; enemyBob: number };
+  motion: { reducedMotion: boolean; combatBursts: number; enemyBob: number; clips: number; clipsPlaying: number };
   assets: { status: string; models: string[]; error: string | null };
   probe: {
     environment: boolean;
@@ -81,6 +155,15 @@ type DebugReading = {
     crystalY: number;
     crystalScale: number;
     crystalEmissive: number;
+    clip: {
+      clipName: string;
+      duration: number;
+      phase: number;
+      time: number;
+      playing: boolean;
+      boneName: string;
+      pose: [number, number, number, number];
+    } | null;
   }>;
   snapshot: NonNullable<typeof window.__ECHOES_DEBUG__>['snapshot'];
 };
@@ -241,6 +324,50 @@ const armDefendedWave = async (page: Page) => {
 // against a scene that is still swapping placeholders for loaded models.
 const waitForAssetsReady = (page: Page) =>
   expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'ready');
+
+type ClipReading = {
+  clipName: string;
+  duration: number;
+  phase: number;
+  time: number;
+  playing: boolean;
+  boneName: string;
+  pose: [number, number, number, number];
+};
+
+type ClipSample = ClipReading & { tick: number };
+
+const round4 = (value: number): number => Number(value.toFixed(4));
+
+const logClip = (label: string, tick: number, clip: ClipReading | null): void => {
+  console.log(
+    `${label}: tick ${tick}, time ${(clip?.time ?? 0).toFixed(3)}s, ` +
+      `playing ${String(clip?.playing ?? false)}, pose [${(clip?.pose ?? []).map(round4)}]`,
+  );
+};
+
+// The clip clock only moves while the match clock does, so the condition is sampled from the page
+// and not from a poll in the test process: the reading and the number it is judged against have to
+// come from the same frame. `awayFrom` is the pose the clip has to have left behind, which is what
+// tells "the clip is running" apart from "the clip is somewhere new".
+const waitForClip = async (page: Page, pastTime: number, awayFrom?: readonly number[], timeout = 30_000) => {
+  const handle = await page.waitForFunction(
+    ({ time, pose }) => {
+      const debug = window.__ECHOES_DEBUG__;
+      const view = debug?.towerModels.find((entry) => entry.modelId === 'pulse-spire');
+      if (!view?.clip || view.clip.time <= time) {
+        return null;
+      }
+      if (pose.length > 0 && view.clip.pose.join() === pose.join()) {
+        return null;
+      }
+      return { ...view.clip, tick: debug?.snapshot.tick ?? 0 };
+    },
+    { time: pastTime, pose: [...(awayFrom ?? [])] },
+    { timeout },
+  );
+  return (await handle.jsonValue()) as ClipSample;
+};
 
 // The refusal reason and the sector caption share one strip of viewport chrome, so "the sector
 // label is still readable" is measurable as "the chip covers none of its text". The comparison is
@@ -1036,12 +1163,28 @@ test('drops transient canvas effects under prefers-reduced-motion', async ({ pag
   expect(fighting.reducedMotion).toBe(true);
   expectProjectionMatchesSnapshot(fighting);
 
+  // The skeletal clip is in the same list: it does not play slowly, it does not play at all. The
+  // bones stay in the rest pose the model was authored in, and the tower keeps its materials.
+  const reducedView = fighting.towerModels.find((view) => view.modelId === 'pulse-spire');
+  expect(reducedView?.clip).not.toBeNull();
+  expect(reducedView?.clip?.playing).toBe(false);
+  expect(reducedView?.clip?.time).toBe(0);
+  expect(reducedView?.clip?.pose).toEqual([0, 0, 0, 1]);
+  expect(fighting.motion.clips).toBe(1);
+  expect(fighting.motion.clipsPlaying).toBe(0);
+  expect(reducedView?.crystalEmissive).toBeCloseTo(2.4, 5);
+  logClip('clip under reduced motion', fighting.snapshot.tick, reducedView?.clip ?? null);
+
   await page.waitForTimeout(500);
 
   const settled = await readDebugOrThrow(page);
   expect(settled.motion.combatBursts).toBe(0);
   expect(settled.motion.enemyBob).toBe(0);
   expect(settled.eventCounts.enemyKilled).toBeGreaterThan(0);
+  const held = settled.towerModels.find((view) => view.modelId === 'pulse-spire');
+  expect(held?.clip?.time).toBe(0);
+  expect(held?.clip?.pose).toEqual(reducedView?.clip?.pose);
+  expect(held?.meshCount).toBe(5);
   // Static state stays readable: health bars and HUD still track the snapshot.
   const hud = await readHud(page);
   if (!hud) {
@@ -1129,6 +1272,17 @@ test('swaps a placed placeholder for the generated GLB without touching the snap
     expect(view?.crystalEmissive).toBeCloseTo(2.4, 5);
   }
   expect(secondBob.towerModels[0]?.crystalY).not.toBe(firstBob.towerModels[0]?.crystalY);
+
+  // The upgrade hands the tower its skeleton once and only once: a second mixer on the same view
+  // would double every pose change, and a leftover one would keep animating a released view.
+  const upgraded = await readDebugOrThrow(page);
+  expect(upgraded.motion.clips).toBe(1);
+  expect(upgraded.motion.clipsPlaying).toBe(1);
+  expect(upgraded.towerModels[0]?.clip?.clipName).toBe('pulse');
+  expect(upgraded.towerModels[0]?.clip?.boneName).toBe('crystal-sway');
+  expect(upgraded.towerModels[0]?.clip?.playing).toBe(true);
+  const swappedPose = await waitForClip(page, (upgraded.towerModels[0]?.clip?.time ?? 0) + 0.2);
+  expect(swappedPose.time).toBeGreaterThan((upgraded.towerModels[0]?.clip?.time ?? 0) + 0.2);
 
   await page.getByTestId('start-wave').click();
   await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.eventCounts.towerFired ?? 0) > 0, undefined, {
@@ -1320,6 +1474,180 @@ test('weights the environment probe per material and keeps the generated model a
   expect(flashSamples.loneSpireFrames).toBeLessThanOrEqual(flashSamples.spireFrames);
 });
 
+test('plays the tower clip on presentation time and freezes it while paused', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto('/');
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  // The model is in place before the tower is built, so the view is a model view from the start and
+  // the clip belongs to that tower rather than to a swap that happened at an unknown moment.
+  await waitForAssetsReady(page);
+  await page.getByRole('button', { name: 'Pulse Spire' }).click();
+  await clickPad(page, 'pad-east');
+
+  const armed = await readDebugOrThrow(page);
+  const clip = armed.towerModels[0]?.clip;
+  expect(armed.towerModels[0]?.source).toBe('model');
+  expect(armed.towerModels[0]?.meshCount).toBe(5);
+  expect(clip?.clipName).toBe('pulse');
+  expect(clip?.duration).toBe(2);
+  expect(clip?.boneName).toBe('crystal-sway');
+  // One mixer for one animated view, and the phase is a property of the tower: the first spire in
+  // the match starts at the beginning of the loop, the second one does not.
+  expect(armed.motion.clips).toBe(1);
+  expect(armed.motion.clipsPlaying).toBe(1);
+  expect(clip?.phase).toBe(0);
+  expect(clip?.playing).toBe(true);
+
+  const played = await waitForClip(page, (clip?.time ?? 0) + 0.3);
+  expect(played.time).toBeGreaterThan((clip?.time ?? 0) + 0.3);
+  logClip('clip armed', armed.snapshot.tick, clip ?? null);
+  logClip('clip playing', played.tick, played);
+
+  // Pause is a clock control, and the clip is on that clock: the pose has to hold for as long as the
+  // player looks at it, or a paused snapshot and a paused screenshot would show different towers.
+  await page.getByTestId('pause-toggle').click();
+  const frozen = await readDebugOrThrow(page);
+  const frozenClip = frozen.towerModels[0]?.clip;
+  expect(frozen.paused).toBe(true);
+  expect(frozenClip?.playing).toBe(true);
+  await page.waitForTimeout(1_200);
+  const held = await readDebugOrThrow(page);
+  expect(held.snapshot.tick).toBe(frozen.snapshot.tick);
+  expect(held.towerModels[0]?.clip?.time).toBe(frozenClip?.time);
+  expect(held.towerModels[0]?.clip?.pose).toEqual(frozenClip?.pose);
+  logClip('clip paused at freeze', frozen.snapshot.tick, frozenClip ?? null);
+  logClip('clip paused after 1.2s', held.snapshot.tick, held.towerModels[0]?.clip ?? null);
+  await page.screenshot({ path: 'test-results/asset-animation-paused.png', fullPage: true });
+
+  await page.getByTestId('pause-toggle').click();
+  const moved = await waitForClip(page, (frozenClip?.time ?? 0) + 0.2, frozenClip?.pose);
+  expect(moved.playing).toBe(true);
+  logClip('clip resumed', moved.tick, moved);
+});
+
+test('reproduces the same clip pose on the same tick after a restart', async ({ page }) => {
+  test.setTimeout(180_000);
+  await page.goto('/');
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await waitForAssetsReady(page);
+  await armDefendedWave(page);
+  await page.getByTestId('start-wave').click();
+  await page.waitForFunction(() => window.__ECHOES_DEBUG__?.snapshot.status === 'victory', undefined, {
+    timeout: 90_000,
+  });
+
+  // Victory stops the match clock, so the terminal tick is a tick the pose can be read on and read
+  // again: the skeleton holds the pose the last tick implies, and both runs end on the same one.
+  const first = await readDebugOrThrow(page);
+  const firstView = first.towerModels.find((view) => view.modelId === 'pulse-spire');
+  expect(first.snapshot.tick).toBeGreaterThan(0);
+  expect(firstView?.clip?.time).toBeGreaterThan(0);
+  const firstTime = firstView?.clip?.time ?? -1;
+  const firstPose = firstView?.clip?.pose ?? [];
+  const firstEntity = firstView?.entityId;
+
+  await page.waitForTimeout(600);
+  const stillHeld = await readDebugOrThrow(page);
+  expect(stillHeld.towerModels.find((view) => view.modelId === 'pulse-spire')?.clip?.time).toBe(firstTime);
+
+  // Restart replays the recorded placements on their original ticks, so the run reaches the same
+  // terminal tick. The clip clock starts over with the match, which is the whole claim: the pose of
+  // a tick is a function of that tick and not of when the browser got around to drawing it.
+  await page.getByTestId('restart-match').click();
+  await page.waitForFunction(() => window.__ECHOES_DEBUG__?.snapshot.status === 'victory', undefined, {
+    timeout: 90_000,
+  });
+
+  const second = await readDebugOrThrow(page);
+  const secondView = second.towerModels.find((view) => view.modelId === 'pulse-spire');
+  expect(second.snapshot.tick).toBe(first.snapshot.tick);
+  expect(second.snapshot.gold).toBe(first.snapshot.gold);
+  expect(secondView?.entityId).toBe(firstEntity);
+  expect(secondView?.clip?.phase).toBe(firstView?.clip?.phase);
+  // The accumulation of tick-sized steps is summed per frame, so the two runs may differ in the
+  // last bits and nowhere else.
+  expect(secondView?.clip?.time).toBeCloseTo(firstTime, 6);
+  secondView?.clip?.pose.forEach((component, index) => {
+    expect(component).toBeCloseTo(firstPose[index] ?? Number.NaN, 6);
+  });
+  logClip('clip at terminal tick, first run', first.snapshot.tick, firstView?.clip ?? null);
+  logClip('clip at terminal tick, replay', second.snapshot.tick, secondView?.clip ?? null);
+  console.log(
+    `terminal reports: ${JSON.stringify(first.matchReports)} vs ${JSON.stringify(second.matchReports)}`,
+  );
+});
+
+test('refuses a model whose skeleton carries more bones than the budget allows', async ({ page }) => {
+  test.setTimeout(60_000);
+  // The rig is added to the file on the way out and never on disk, and the manifest is told the
+  // truth about the file being served, so the refusal cannot be a byte or hash mismatch in
+  // disguise. The client measures the tree it loaded, which means the tree has to be the thing that
+  // breaks the limit.
+  const extraBones = MODEL_BUDGET.bones;
+  const patched = withExtraBones(readFileSync(GLB_MODEL_PATH), extraBones);
+  await page.route('**/models/*.glb', (route) =>
+    route.fulfill({ status: 200, contentType: 'model/gltf-binary', body: patched }),
+  );
+  await page.route('**/models/manifest.json', async (route) => {
+    const response = await route.fetch();
+    const manifest = (await response.json()) as { models: Array<{ bytes: number; contentHash: string }> };
+    for (const model of manifest.models) {
+      model.bytes = patched.length;
+      model.contentHash = sha256(patched);
+    }
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(manifest) });
+  });
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+
+  await page.goto('/');
+  await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'error');
+
+  // A skeleton is allowed now, so the refusal has to name the number that broke the budget rather
+  // than the feature.
+  const status = page.getByTestId('scene-status');
+  await expect(status).toContainText('model registry failed');
+  await expect(status).toContainText('pulse-spire');
+  await expect(status).toContainText('bones');
+  await expect(status).toContainText(`budget allows ${MODEL_BUDGET.bones}`);
+
+  const failed = await readDebugOrThrow(page);
+  expect(failed.assets.status).toBe('error');
+  expect(failed.assets.models).toEqual([]);
+  const refused = failed.assetBudgets.checks.models[0];
+  expect(refused?.modelId).toBe('pulse-spire');
+  expect(refused?.accepted).toBe(false);
+  // Same node types as the accepted model: what changed is the bone count, so this scenario cannot
+  // pass by refusing skeletons as such.
+  expect(refused?.nodeTypes).toEqual(['Bone', 'Group', 'Mesh', 'SkinnedMesh']);
+  expect(refused?.skeleton?.bones).toBeGreaterThan(MODEL_BUDGET.bones);
+  expect(refused?.skeleton?.clipNames).toEqual(['pulse']);
+  expect(refused?.failures.join(' ')).toContain(`budget allows ${MODEL_BUDGET.bones}`);
+  expect(failed.assetBudgets.failures.join(' ')).toContain('bones is');
+  // Everything ahead of the budget had to pass for the budget to be the thing that said no.
+  expect(failed.assetBudgets.checks.performed.bytes).toBe(true);
+  expect(failed.assetBudgets.checks.performed.contentHash).toBe(true);
+  expect(failed.assetBudgets.checks.performed.nodeTypes).toBe(true);
+  expect(failed.assetBudgets.checks.performed.modelBudget).toBe(true);
+  expect(refused?.contentHash).toEqual({ performed: true, matches: true, skippedReason: null });
+  expect(refused?.actualBytes).toBe(refused?.expectedBytes);
+
+  // The match stays playable on procedural placeholders, and the refusal stays local.
+  await page.getByRole('button', { name: 'Pulse Spire' }).click();
+  await clickPad(page, 'pad-east');
+  await page.getByTestId('start-wave').click();
+  const started = await readDebugOrThrow(page);
+  expect(started.snapshot.pads['pad-east']).toBe('pulse-spire');
+  expect(started.towerModels[0]?.source).toBe('procedural');
+  expect(started.towerModels[0]?.clip).toBeNull();
+  expect(started.motion.clips).toBe(0);
+  expect(started.snapshot.status).toBe('wave');
+  await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'error');
+  await expectNoChromeOverlap(page);
+  await page.screenshot({ path: 'test-results/asset-refused-bone-budget.png', fullPage: true });
+  expect(pageErrors).toEqual([]);
+});
+
 test('keeps the match playable and names the failure when the model registry is unavailable', async ({ page }) => {
   test.setTimeout(60_000);
   await page.route('**/models/manifest.json', (route) =>
@@ -1396,10 +1724,28 @@ test('keeps the current scene inside the model, registry and scene budgets', asy
   expect(spire?.accepted).toBe(true);
   expect(spire?.actualBytes).toBe(spire?.expectedBytes);
   expect(spire?.contentHash).toEqual({ performed: true, matches: true, skippedReason: null });
-  // The scene root and the five part meshes, and nothing the clone could not reproduce.
-  expect(spire?.nodeTypes).toEqual(['Group', 'Mesh']);
+  // The scene root, the five part meshes, the skinned crystal and its two bones. `SkinnedMesh` and
+  // `Bone` are accepted types since the pipeline can clone them, so the node type check is no longer
+  // what refuses a skeleton — the bone budget below is.
+  expect(spire?.nodeTypes).toEqual(['Bone', 'Group', 'Mesh', 'SkinnedMesh']);
   expect(spire?.triangles).toBeLessThanOrEqual(budgets.model.triangles);
   expect(spire?.expectedBytes).toBeLessThanOrEqual(budgets.model.bytes);
+  // The skeleton numbers the client measured on the loaded tree, checked against the same budget the
+  // generator enforced on the build. A clip that plays is the point of them being readable at all.
+  const rig = spire?.skeleton;
+  expect(rig?.skins).toBe(1);
+  expect(rig?.bones).toBeGreaterThan(0);
+  expect(rig?.bones).toBeLessThanOrEqual(budgets.model.bones);
+  expect(rig?.animationClips).toBe(1);
+  expect(rig?.animationClips).toBeLessThanOrEqual(budgets.model.animationClips);
+  expect(rig?.weightSlots).toBe(budgets.model.weightSlots);
+  expect(rig?.boneInfluences).toBeLessThanOrEqual(budgets.model.boneInfluences);
+  expect(rig?.boneInfluences).toBeGreaterThan(0);
+  expect(rig?.clipSeconds).toBeLessThanOrEqual(budgets.model.clipSeconds);
+  expect(rig?.clipNames).toEqual(['pulse']);
+  // Every channel of the clip names a bone the mixer drives, in the glTF wording of the contract:
+  // a Three.js track says `crystal-sway.quaternion`, and the client reads that back as `rotation`.
+  expect(rig?.clipTargets).toEqual([{ clip: 'pulse', node: 'crystal-sway', path: 'rotation' }]);
 
   expect(checks.registry).not.toBeNull();
   expect(checks.registry?.models).toBeLessThanOrEqual(budgets.registry.models);
@@ -1551,7 +1897,7 @@ test('refuses a model whose manifest claims more triangles than the model budget
   expect(failed.assetBudgets.checks.performed.nodeTypes).toBe(true);
   expect(failed.assetBudgets.checks.performed.modelBudget).toBe(true);
   expect(refused?.contentHash).toEqual({ performed: true, matches: true, skippedReason: null });
-  expect(refused?.nodeTypes).toEqual(['Group', 'Mesh']);
+  expect(refused?.nodeTypes).toEqual(['Bone', 'Group', 'Mesh', 'SkinnedMesh']);
   // A single model is far below the registry total, so the registry budgets are not what refused.
   expect(failed.assetBudgets.checks.registry?.triangles).toBeLessThanOrEqual(
     failed.assetBudgets.budgets.registry.triangles,

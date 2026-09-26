@@ -18,6 +18,12 @@ export type ModelBudget = {
   skins: number;
   morphTargets: number;
   animationClips: number;
+  // Skeleton budget. Bones and the influence limits bound what a single tower view may ask the GPU
+  // to transform every frame, and the clip limits bound what the mixer may have to seek.
+  bones: number;
+  weightSlots: number;
+  boneInfluences: number;
+  clipSeconds: number;
   height: number;
   footprintRadius: number;
   pivotYTolerance: number;
@@ -42,12 +48,19 @@ export const MODEL_BUDGET: ModelBudget = {
   nodes: 32,
   meshes: 32,
   materials: 16,
-  // Textures, skins, morphs and clips are zero on purpose: each of them needs its own budget and
-  // its own task, and a contract that cannot execute a feature must not accept the feature.
+  // Textures and morph targets stay zero on purpose: each of them needs its own budget and its own
+  // task, and a contract that cannot execute a feature must not accept the feature. Skeletons and
+  // clips now have a budget of their own, so one skin with one looping clip is allowed.
   textures: 0,
-  skins: 0,
+  skins: 1,
   morphTargets: 0,
-  animationClips: 0,
+  animationClips: 1,
+  bones: 24,
+  // The influence vectors are VEC4, so four slots and four influencing bones are the format limit
+  // rather than a number of our own choosing.
+  weightSlots: 4,
+  boneInfluences: 4,
+  clipSeconds: 2,
   height: 4.0,
   // A model may not reach further from the pivot than a pad click does, or the picture and the
   // picking would disagree about where a tower is.
@@ -68,11 +81,35 @@ export const SCENE_BUDGET: SceneBudget = {
   assetLoadMs: 1_500,
 };
 
-// What `cloneModelNode` in the client can reproduce. A node type outside this set is refused on
-// load, because `SkinnedMesh` is also a `Mesh` and would otherwise render broken with no error.
-export const SUPPORTED_NODE_TYPES: readonly string[] = ['Mesh', 'Group'];
+// What the client can instantiate out of a loaded model. A node type outside this set is refused on
+// load, because the client walks a known tree and nothing tells it how to reproduce a light node or
+// a point cloud. `SkinnedMesh` and `Bone` are in the set because `SkeletonUtils.clone` rebuilds the
+// skeleton, and both arrive as ordinary clones of a model the contract already accepted.
+export const SUPPORTED_NODE_TYPES: readonly string[] = ['Mesh', 'Group', 'SkinnedMesh', 'Bone'];
+
+// The animation channels the client plays. A clip is only reproducible if everything it animates is
+// something the mixer can drive from the model alone: `weights` needs morph targets, which the model
+// budget forbids, so a clip carrying one is refused instead of half-played.
+export const REPLAYABLE_CLIP_PATHS: readonly string[] = ['translation', 'rotation', 'scale'];
+
+// A glTF channel names the transform it animates, while a Three.js track names the property the
+// mixer writes. The two sides of the pipeline read different halves of that sentence, so the
+// mapping belongs here: a list on one side only would refuse every model the other side produced.
+const TRACK_PROPERTIES: Readonly<Record<string, string>> = {
+  position: 'translation',
+  quaternion: 'rotation',
+  scale: 'scale',
+  morphTargetInfluences: 'weights',
+};
+
+export const gltfPathForTrack = (trackName: string): string => {
+  const property = trackName.split('.').pop() ?? '';
+  return TRACK_PROPERTIES[property] ?? property;
+};
 
 export type NodeReading = { type: string; path: string };
+
+export type ClipTargetReading = { clip: string; node: string; path: string };
 
 export type RegistryReading = { models: number; bytes: number; triangles: number };
 
@@ -99,6 +136,10 @@ export type ModelMeasurement = {
   skins?: number;
   morphTargets?: number;
   animationClips?: number;
+  bones?: number;
+  weightSlots?: number;
+  boneInfluences?: number;
+  clipSeconds?: number;
   height?: number;
   footprintRadius?: number;
   pivotY?: number;
@@ -119,7 +160,10 @@ type MeasuredCountKey =
   | 'textures'
   | 'skins'
   | 'morphTargets'
-  | 'animationClips';
+  | 'animationClips'
+  | 'bones'
+  | 'weightSlots'
+  | 'boneInfluences';
 
 const OPTIONAL_MODEL_COUNTS: readonly MeasuredCountKey[] = [
   'nodes',
@@ -129,6 +173,9 @@ const OPTIONAL_MODEL_COUNTS: readonly MeasuredCountKey[] = [
   'skins',
   'morphTargets',
   'animationClips',
+  'bones',
+  'weightSlots',
+  'boneInfluences',
 ];
 
 export const checkModelContract = (
@@ -158,6 +205,12 @@ export const checkModelContract = (
   if (measurement.pivotY !== undefined && Math.abs(measurement.pivotY) > budget.pivotYTolerance) {
     failures.push(overBudget(id, 'pivot Y', measurement.pivotY, budget.pivotYTolerance));
   }
+  // A clip length is a duration rather than a count, so it cannot ride the table above: a loop the
+  // mixer has to seek inside costs more the longer it is, and two seconds is what one idle sway of
+  // a schematic tower needs.
+  if (measurement.clipSeconds !== undefined && measurement.clipSeconds > budget.clipSeconds) {
+    failures.push(overBudget(id, 'clip seconds', measurement.clipSeconds, budget.clipSeconds));
+  }
   return failures;
 };
 
@@ -185,6 +238,11 @@ export const checkRegistryBudgets = (
   return failures;
 };
 
+// "Mesh, Group, SkinnedMesh and Bone" — the refusal text names every type the client does accept,
+// so an operator reading it in the viewport does not have to open this file to learn the list.
+const joinList = (items: readonly string[]): string =>
+  items.length <= 1 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+
 export const checkNodeTypes = (
   modelId: string,
   nodes: readonly NodeReading[],
@@ -195,7 +253,22 @@ export const checkNodeTypes = (
     .map((node) => ({
       modelId,
       parameter: 'nodeType',
-      reason: `${modelId}: node ${node.path} is a ${node.type}; only ${supported.join(' and ')} can be instantiated`,
+      reason: `${modelId}: node ${node.path} is a ${node.type}; only ${joinList(supported)} can be instantiated`,
+    }));
+
+// Both sides read the same list, so a channel the generator would write and a channel the client
+// would refuse can never drift apart into a green build and a broken picture.
+export const checkClipTargets = (
+  modelId: string,
+  targets: readonly ClipTargetReading[],
+  supported: readonly string[] = REPLAYABLE_CLIP_PATHS,
+): AssetFailure[] =>
+  targets
+    .filter((target) => !supported.includes(target.path))
+    .map((target) => ({
+      modelId,
+      parameter: 'clipTarget',
+      reason: `${modelId}: clip ${target.clip} animates ${target.node} .${target.path}; the client plays only ${joinList(supported)}`,
     }));
 
 export const checkSceneBudget = (reading: SceneReading, budget: SceneBudget = SCENE_BUDGET): AssetFailure[] => {

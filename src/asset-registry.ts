@@ -6,7 +6,7 @@
 // both are facts about a load and not about the scene: the QA seam reads them, and the client
 // decides what to refuse.
 
-import type { RegistryReading, SceneReading } from './asset-budgets.ts';
+import type { ClipTargetReading, RegistryReading, SceneReading } from './asset-budgets.ts';
 
 const ASSET_BASE_URL = '/models/';
 export const ASSET_MANIFEST_URL = `${ASSET_BASE_URL}manifest.json`;
@@ -35,6 +35,20 @@ export class AssetContractError extends Error {}
 // all, and a seam that could not tell those two cases apart would be lying about the load.
 export type AssetCheckName = 'bytes' | 'contentHash' | 'nodeTypes' | 'modelBudget' | 'registryBudget' | 'sceneBudget';
 
+// What the loaded tree said about its own skeleton, measured on the client and not declared by the
+// manifest: the joint count, the influence vectors, and the clips that came with the file. It is
+// published so the budget check can be compared against real numbers instead of against a claim.
+export type ModelSkeletonReading = {
+  skins: number;
+  bones: number;
+  animationClips: number;
+  weightSlots: number;
+  boneInfluences: number;
+  clipSeconds: number;
+  clipNames: string[];
+  clipTargets: ClipTargetReading[];
+};
+
 export type ModelCheck = {
   modelId: string;
   accepted: boolean;
@@ -42,6 +56,7 @@ export type ModelCheck = {
   actualBytes: number;
   triangles: number;
   nodeTypes: string[];
+  skeleton: ModelSkeletonReading | null;
   contentHash: { performed: boolean; matches: boolean; skippedReason: string | null };
   failures: string[];
 };
@@ -154,7 +169,13 @@ export const createAssetRegistry = () => {
       return [...loadedModelIds];
     },
     get modelChecks(): ModelCheck[] {
-      return checks.models.map((check) => ({ ...check, nodeTypes: [...check.nodeTypes], contentHash: { ...check.contentHash }, failures: [...check.failures] }));
+      return checks.models.map((check) => ({
+        ...check,
+        nodeTypes: [...check.nodeTypes],
+        skeleton: check.skeleton === null ? null : { ...check.skeleton, clipNames: [...check.skeleton.clipNames], clipTargets: check.skeleton.clipTargets.map((target) => ({ ...target })) },
+        contentHash: { ...check.contentHash },
+        failures: [...check.failures],
+      }));
     },
     // The scene reading is only complete once the load finished: a frame counter without the
     // load time would let the scene budget pass on a half-measured load.

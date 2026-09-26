@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { TICK_RATE, createSimulation, createTrainingScenario } from './game-core/index.ts';
 import type { Command, CommandResult, MatchSnapshot, MatchStatus, SimulationEvent } from './game-core/index.ts';
 import { ASSET_MANIFEST_URL, AssetContractError, createAssetRegistry, parseAssetManifest, resolveModelUrl } from './asset-registry.ts';
@@ -9,14 +10,16 @@ import {
   MODEL_BUDGET,
   REGISTRY_BUDGET,
   SCENE_BUDGET,
+  checkClipTargets,
   checkModelContract,
   checkNodeTypes,
   checkRegistryBudgets,
   checkSceneBudget,
   describeFailures,
+  gltfPathForTrack,
   sumRegistry,
 } from './asset-budgets.ts';
-import type { AssetFailure, NodeReading, SceneReading } from './asset-budgets.ts';
+import type { AssetFailure, ClipTargetReading, NodeReading, SceneReading } from './asset-budgets.ts';
 import './styles.css';
 
 type RenderCounters = {
@@ -68,7 +71,7 @@ type DebugState = {
   readonly replayIndex: number;
   readonly commandCount: number;
   readonly matchReports: MatchReport[];
-  readonly motion: { reducedMotion: boolean; combatBursts: number; enemyBob: number };
+  readonly motion: { reducedMotion: boolean; combatBursts: number; enemyBob: number; clips: number; clipsPlaying: number };
   readonly assets: { status: AssetStatus; models: string[]; error: string | null };
   // The environment probe sits on the scene at full strength, so what dims it is a property of
   // each material. The seam publishes every standard material of the live scene with the weight it
@@ -120,6 +123,7 @@ type LoadedModel = {
   entry: ModelManifestEntry;
   scene: THREE.Group;
   emissiveNode: string;
+  clips: THREE.AnimationClip[];
 };
 
 type TowerModelReading = {
@@ -133,6 +137,21 @@ type TowerModelReading = {
   crystalY: number;
   crystalScale: number;
   crystalEmissive: number;
+  // Null on a tower without a skeleton. `time` and `pose` are the facts the determinism claim rests
+  // on: the same tick has to give the same two numbers in a run and in the replay of that run.
+  clip: TowerClipReading | null;
+};
+
+type TowerClipReading = {
+  clipName: string;
+  duration: number;
+  // Slot-derived offset the clip starts at, in seconds. Two spires never stand in the same pose,
+  // and the offset comes from the order the towers were built, so it replays with them.
+  phase: number;
+  time: number;
+  playing: boolean;
+  boneName: string;
+  pose: [number, number, number, number];
 };
 
 type ProbeMaterialReading = {
@@ -155,6 +174,20 @@ type ProbeMaterialReading = {
   explicit: boolean;
 };
 
+// The animated part of a tower view. It is presentation state and lives with the view: the
+// snapshot does not know it exists, and nothing in the simulation reads it. `applied` is the
+// presentation time the clip has been brought up to, so the update is a difference between two
+// readings of one clock and never a function of where in the frame the view was created.
+type TowerClip = {
+  mixer: THREE.AnimationMixer;
+  action: THREE.AnimationAction;
+  clipName: string;
+  duration: number;
+  phase: number;
+  bone: THREE.Bone;
+  applied: number;
+};
+
 type TowerView = {
   towerId: string;
   group: THREE.Group;
@@ -165,6 +198,7 @@ type TowerView = {
   crystalBaseY: number;
   source: 'procedural' | 'model';
   modelId: string | null;
+  clip: TowerClip | null;
   firedUntil: number;
   aimAngle: number;
   // Releases exactly what this view owns: the geometry and the source materials of a loaded
@@ -448,33 +482,71 @@ const modelStore = new Map<string, LoadedModel>();
 // The loaded scene stays the single owner of its geometry and of its source materials. A view
 // borrows that geometry and gets its own material copies, because the crystal emissive is
 // per-tower presentation state: on a shared material one tower firing would flash every tower
-// of that type at the same time. No skin, no morph and no clip, so a structural clone is the
-// whole of what instantiating a model needs.
+// of that type at the same time. `SkeletonUtils.clone` is what makes a skinned model clonable at
+// all — it rebuilds the skeleton and rebinds the copy to its own bones — and it hands geometry and
+// materials back by reference, so the material copies are made here, after the clone.
 const cloneModelNode = (source: THREE.Object3D, owned: THREE.Material[]): THREE.Object3D => {
-  if (source instanceof THREE.Mesh) {
-    const material = (source.material as THREE.Material).clone();
+  const clone = SkeletonUtils.clone(source);
+  clone.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) {
+      return;
+    }
+    // `Material.copy` carries the probe across: `envMap`, `envMapIntensity` and the `userData`
+    // stamp are all part of what a copy is, so a per-view material must not arrive with a
+    // declared weight of 1 and no probe of its own.
+    const material = (child.material as THREE.Material).clone();
     owned.push(material);
-    const mesh = new THREE.Mesh(source.geometry, material);
-    mesh.name = source.name;
-    mesh.position.copy(source.position);
-    mesh.quaternion.copy(source.quaternion);
-    mesh.scale.copy(source.scale);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    return mesh;
-  }
-  const group = new THREE.Group();
-  group.name = source.name;
-  group.position.copy(source.position);
-  group.quaternion.copy(source.quaternion);
-  group.scale.copy(source.scale);
-  for (const child of source.children) {
-    group.add(cloneModelNode(child, owned));
-  }
-  return group;
+    child.material = material;
+    child.castShadow = true;
+    child.receiveShadow = true;
+  });
+  return clone;
 };
 
-const createModelTowerView = (towerId: string, model: LoadedModel): TowerView => {
+// One clip per view, started at a slot-derived offset instead of at a random moment. The offset
+// comes from the order the towers were built in, which the replay reproduces, so two spires never
+// stand in the same pose and a restart still lands on the same one.
+const TOWER_CLIP_PHASE_SECONDS = 0.37;
+
+const startTowerClip = (root: THREE.Object3D, clip: THREE.AnimationClip, phase: number): TowerClip | null => {
+  if (clip.tracks.length === 0) {
+    return null;
+  }
+  // Every channel of the clip has to land on a bone of this copy, not just the first one: the mixer
+  // resolves a track by name inside the root it was given, and a name it cannot find is a channel
+  // that silently does nothing.
+  const bones: THREE.Bone[] = [];
+  for (const track of clip.tracks) {
+    const name = track.name.split('.')[0] ?? '';
+    const bone = root.getObjectByName(name) as THREE.Bone | undefined;
+    if (bone?.isBone !== true) {
+      throw new AssetContractError(`clip ${clip.name} drives ${name}, which is not a bone of the model`);
+    }
+    bones.push(bone);
+  }
+  const mixer = new THREE.AnimationMixer(root);
+  const action = mixer.clipAction(clip);
+  action.setLoop(THREE.LoopRepeat, Infinity);
+  // Reduced motion does not slow the clip down, it stops it: without a play call the bones stay in
+  // the rest pose the model was authored in.
+  if (!reducedMotion) {
+    action.play();
+  }
+  action.time = phase % clip.duration;
+  return { mixer, action, clipName: clip.name, duration: clip.duration, phase, bone: bones[0] as THREE.Bone, applied: presentationTime() };
+};
+
+const readTowerClip = (clip: TowerClip): TowerClipReading => ({
+  clipName: clip.clipName,
+  duration: clip.duration,
+  phase: clip.phase,
+  time: clip.action.time,
+  playing: clip.action.isRunning(),
+  boneName: clip.bone.name,
+  pose: [clip.bone.quaternion.x, clip.bone.quaternion.y, clip.bone.quaternion.z, clip.bone.quaternion.w],
+});
+
+const createModelTowerView = (towerId: string, model: LoadedModel, slot: number): TowerView => {
   const visual = towerVisuals[towerId] ?? unknownTowerVisual;
   const owned: THREE.Material[] = [];
   const root = cloneModelNode(model.scene, owned) as THREE.Group;
@@ -488,6 +560,7 @@ const createModelTowerView = (towerId: string, model: LoadedModel): TowerView =>
   }
   const crystalMaterial = emissive.material;
   crystalMaterial.emissiveIntensity = towerCrystalIdleIntensity;
+  const clip = model.clips[0] === undefined ? null : startTowerClip(root, model.clips[0], slot * TOWER_CLIP_PHASE_SECONDS);
   return {
     towerId,
     group,
@@ -496,9 +569,17 @@ const createModelTowerView = (towerId: string, model: LoadedModel): TowerView =>
     crystalBaseY: emissive.position.y,
     source: 'model',
     modelId: model.entry.id,
+    clip,
     firedUntil: 0,
     aimAngle: 0,
     release: () => {
+      // A mixer keeps its bindings and its actions alive on its own, so a tower that is removed
+      // has to give them back: thirty removed towers would otherwise leave thirty mixers running
+      // against a skeleton nothing renders any more.
+      if (clip !== null) {
+        clip.mixer.stopAllAction();
+        clip.mixer.uncacheRoot(root);
+      }
       for (const material of owned) {
         material.dispose();
       }
@@ -578,15 +659,17 @@ const createProceduralTowerView = (towerId: string): TowerView => {
     crystalBaseY: crystal.position.y,
     source: 'procedural',
     modelId: null,
+    // The placeholder has no rig, so there is no clip and nothing to stop when the view is released.
+    clip: null,
     firedUntil: 0,
     aimAngle: 0,
     release: () => disposeInstance(group),
   };
 };
 
-const createTowerView = (towerId: string): TowerView => {
+const createTowerView = (towerId: string, slot: number): TowerView => {
   const model = modelStore.get(towerId);
-  return model ? createModelTowerView(towerId, model) : createProceduralTowerView(towerId);
+  return model ? createModelTowerView(towerId, model, slot) : createProceduralTowerView(towerId);
 };
 
 const enemyVisuals: Record<string, { color: number; scale: number }> = {
@@ -793,6 +876,64 @@ const declareModelProbe = (root: THREE.Object3D) => {
   });
 };
 
+// What the loaded tree says about its own skeleton, measured rather than declared: the joints the
+// skin names, the influence count of the heaviest vertex, and the clips that came with the file.
+// The budget lives in the shared module, so the same limits the build enforced apply here.
+const readSkeleton = (scene: THREE.Object3D, clips: readonly THREE.AnimationClip[]) => {
+  let bones = 0;
+  let skins = 0;
+  let weightSlots = 0;
+  let boneInfluences = 0;
+  scene.traverse((child) => {
+    if (child instanceof THREE.Bone) {
+      bones += 1;
+    }
+    if (!(child instanceof THREE.SkinnedMesh)) {
+      return;
+    }
+    skins += 1;
+    const indices = child.geometry.getAttribute('skinIndex');
+    const weights = child.geometry.getAttribute('skinWeight');
+    if (indices === undefined || weights === undefined) {
+      return;
+    }
+    weightSlots = Math.max(weightSlots, weights.itemSize);
+    for (let vertex = 0; vertex < weights.count; vertex += 1) {
+      let influences = 0;
+      for (let slot = 0; slot < weights.itemSize; slot += 1) {
+        if (weights.getComponent(vertex, slot) > 0) {
+          influences += 1;
+        }
+      }
+      boneInfluences = Math.max(boneInfluences, influences);
+    }
+  });
+  const targets: ClipTargetReading[] = clips.flatMap((clip) =>
+    clip.tracks.map((track) => ({
+      clip: clip.name,
+      node: track.name.split('.')[0] ?? track.name,
+      // A track names the property the mixer writes, so it has to be read as the glTF channel the
+      // contract talks about before anything can be compared with the replayable list.
+      path: gltfPathForTrack(track.name),
+    })),
+  );
+  const clipSeconds = clips.reduce((longest, clip) => Math.max(longest, clip.duration), 0);
+  return {
+    targets,
+    reading: {
+      skins,
+      bones,
+      animationClips: clips.length,
+      weightSlots,
+      boneInfluences,
+      clipSeconds,
+      clipNames: clips.map((clip) => clip.name),
+      clipTargets: targets,
+    },
+    measurement: { skins, bones, animationClips: clips.length, weightSlots, boneInfluences, clipSeconds },
+  };
+};
+
 const loadModel = async (entry: ModelManifestEntry): Promise<LoadedModel> => {
   const response = await fetch(resolveModelUrl(entry));
   if (!response.ok) {
@@ -810,6 +951,7 @@ const loadModel = async (entry: ModelManifestEntry): Promise<LoadedModel> => {
     actualBytes: buffer.byteLength,
     triangles: entry.triangles,
     nodeTypes: [],
+    skeleton: null,
     contentHash,
   };
   assetRegistry.markCheckPerformed('bytes');
@@ -834,9 +976,12 @@ const loadModel = async (entry: ModelManifestEntry): Promise<LoadedModel> => {
   const nodes = readNodeTypes(gltf.scene);
   reading.nodeTypes = [...new Set(nodes.map((node) => node.type))].sort();
   assetRegistry.markCheckPerformed('nodeTypes');
+  const skeleton = readSkeleton(gltf.scene, gltf.animations);
+  reading.skeleton = skeleton.reading;
   const failures = [
-    ...checkModelContract({ id: entry.id, bytes: entry.bytes, triangles: entry.triangles }),
+    ...checkModelContract({ id: entry.id, bytes: entry.bytes, triangles: entry.triangles, ...skeleton.measurement }),
     ...checkNodeTypes(entry.id, nodes),
+    ...checkClipTargets(entry.id, skeleton.targets),
   ];
   assetRegistry.markCheckPerformed('modelBudget');
   if (failures.length > 0) {
@@ -847,7 +992,7 @@ const loadModel = async (entry: ModelManifestEntry): Promise<LoadedModel> => {
   }
   declareModelProbe(gltf.scene);
   assetRegistry.recordModelCheck({ modelId: entry.id, accepted: true, ...reading, failures: [] });
-  return { entry, scene: gltf.scene, emissiveNode: entry.emissiveNode };
+  return { entry, scene: gltf.scene, emissiveNode: entry.emissiveNode, clips: gltf.animations };
 };
 
 // The status line is a single line of viewport chrome, and two whole digests are exactly what
@@ -884,7 +1029,10 @@ const upgradeTowerViews = () => {
     if (view.source === 'model' || !modelStore.has(view.towerId)) {
       continue;
     }
-    const next = createTowerView(view.towerId);
+    // The slot is the order the towers were built in, so a tower that is upgraded in place keeps
+    // the clip phase it would have had if the model had arrived on time.
+    const slot = [...towerViews.keys()].indexOf(entityId);
+    const next = createTowerView(view.towerId, slot);
     next.group.position.copy(view.group.position);
     next.group.rotation.y = view.group.rotation.y;
     next.firedUntil = view.firedUntil;
@@ -1092,6 +1240,12 @@ const MAX_COMBAT_BURSTS = 14;
 
 let elapsed = 0;
 let enemyBobOffset = 0;
+// Presentation time is the time the match clock has been stepped for, which is the tick the
+// projection is at times one tick. It is not wall time: `elapsed` above is, and it keeps running
+// while the match is paused, which is what the ambient bob wants. A skeleton follows the match
+// instead, so a paused snapshot and a paused screenshot show the same pose, and a restarted match
+// puts every tower back into the pose its tick implies.
+const presentationTime = (): number => snapshot.tick * STEP_SECONDS;
 
 const refreshPadStyle = (padView: PadView) => {
   const flashing = elapsed < padView.errorUntil;
@@ -1226,7 +1380,7 @@ const applySnapshot = (next: MatchSnapshot) => {
       if (!pad) {
         continue;
       }
-      view = createTowerView(tower.towerId);
+      view = createTowerView(tower.towerId, towerViews.size);
       view.group.position.set(pad.position.x, 0.14, pad.position.z);
       scene.add(view.group);
       towerViews.set(tower.entityId, view);
@@ -1629,6 +1783,19 @@ pauseToggle.addEventListener('click', () => {
 restartButton.addEventListener('click', restartMatch);
 reducedMotionQuery.addEventListener('change', (event) => {
   reducedMotion = event.matches;
+  if (!reducedMotion) {
+    return;
+  }
+  // Turning reduced motion on mid-match has to do the same thing it does from the start: the clip
+  // stops, and the bones go back to the rest pose instead of freezing wherever the last frame left
+  // them. Reading the pose from `setTime(0)` before the action stops is what applies it.
+  for (const view of towerViews.values()) {
+    if (view.clip === null) {
+      continue;
+    }
+    view.clip.mixer.setTime(0);
+    view.clip.action.stop();
+  }
 });
 
 syncSelection();
@@ -1753,7 +1920,16 @@ window.__ECHOES_DEBUG__ = {
     return matchReports.map((report) => ({ ...report, eventCounts: { ...report.eventCounts } }));
   },
   get motion() {
-    return { reducedMotion, combatBursts: combatBursts.length, enemyBob: enemyBobOffset };
+    const clips = Array.from(towerViews.values(), (view) => view.clip);
+    return {
+      reducedMotion,
+      combatBursts: combatBursts.length,
+      enemyBob: enemyBobOffset,
+      // One mixer per animated view and no more: a tower that was removed or upgraded in place must
+      // not leave a second animation running against the same skeleton.
+      clips: clips.filter((clip) => clip !== null).length,
+      clipsPlaying: clips.filter((clip) => clip?.action.isRunning() === true).length,
+    };
   },
   get assets() {
     return { status: assetRegistry.status, models: assetRegistry.modelIds, error: assetRegistry.error };
@@ -1790,6 +1966,7 @@ window.__ECHOES_DEBUG__ = {
       crystalY: view.crystal.position.y,
       crystalScale: view.crystal.scale.x,
       crystalEmissive: view.crystalMaterial.emissiveIntensity,
+      clip: view.clip === null ? null : readTowerClip(view.clip),
     }));
   },
   // The QA seam goes through the logging path as well, so the command log always stays
@@ -1840,6 +2017,17 @@ const renderFrame = (timestamp: number) => {
       view.crystalMaterial.emissiveIntensity = towerCrystalIdleIntensity;
     }
     view.crystal.position.y = view.crystalBaseY + (reducedMotion ? 0 : Math.sin(elapsed * 2.1 + towerSlot) * 0.07);
+    // The clip and the bob share one reduced-motion guard and two clocks. The skeleton is brought
+    // up to the match clock rather than advanced by the frame, so the pose of a tick is a function
+    // of that tick: a tower built by a pad click and the same tower rebuilt by a replay both start
+    // at zero on the tick they were placed, and the terminal tick holds its pose in both runs.
+    if (view.clip !== null && !reducedMotion) {
+      const due = presentationTime() - view.clip.applied;
+      if (due > 0) {
+        view.clip.mixer.update(due);
+        view.clip.applied = presentationTime();
+      }
+    }
     towerSlot += 1;
   }
   let enemySlot = 0;
