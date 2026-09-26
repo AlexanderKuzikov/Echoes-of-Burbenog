@@ -1,6 +1,6 @@
 # Echoes of Burbenog — CONTEXT
 
-> Последнее обновление: 2026-09-26 09:05
+> Последнее обновление: 2026-09-26 09:40
 
 ## Статус
 
@@ -21,7 +21,7 @@
 | Preparation display | Правдивый | При `preparationTicksLeft === 0` phase clock показывает `Awaiting start`, а не замороженный `T-00:00`; решение по `EOB-013` принято в пользу display |
 | Reduced motion | Проверен | `prefers-reduced-motion: reduce` гасит burst-ring, наведение и вспышку башни, scale-пульс core и ambient-анимацию; позиции, health bars, материалы, combat log и HUD остаются читаемыми |
 | Multiplayer | Отложен | Solo-first; session и protocol seams сохраняются |
-| Asset pipeline | Не начат | Первые assets — собственные схематичные placeholder-модели |
+| Asset pipeline | В работе | Задача `0009` выдана: собственная генерация GLB вместо DCC, реестр моделей как data-контракт, первая модель заменяет placeholder. Решение по инструменту принято — `EOB-006` закрыт |
 | Desktop packaging | Отложен | Wails/Go после стабилизации browser client |
 | QA/agent harness | Проверен | 9 Playwright-сценариев, включая regression на QA-инъекцию во время replay: log не растёт, два terminal-отчёта совпадают; красный прогон без guard подтверждён |
 
@@ -47,7 +47,6 @@
 | EOB-003 | P1 | Выбрать приоритетный subset механик из research brief для первого прототипа |
 | EOB-004 | P1 | Multiplayer отложен; позже определить co-op/PvP и общую или раздельную экономику |
 | EOB-005 | P1 | Art direction и сеттинг отложены; первый прототип использует собственные схематичные assets и visual language |
-| EOB-006 | P1 | Выбрать инструмент подготовки собственных 3D-моделей и анимаций |
 | EOB-007 | P1 | Вернуться к accounts, matchmaking, editor и mods после solo-версии |
 | EOB-008 | P1 | Зафиксировать лицензию и правила использования внешних ассетов |
 | EOB-009 | P1 | Решить, остаётся ли Go/Wails только упаковкой или также используется для dedicated server |
@@ -55,6 +54,7 @@
 | EOB-011 | P2 | `favicon.ico` даёт 404 в browser console; отдельная задача на favicon или inline data-URL icon |
 | EOB-012 | P2 | Усилить E2E: content-bound selectors, entityId-сопоставление позиций, реальные route-счётчики, typed event и console assertions |
 | EOB-014 | P2 | Разнести монолитный `src/main.ts` на presentation/input/HUD модули после приёмки vertical slice |
+| EOB-016 | P2 | Asset contract валидирует только модели, собранные генератором; модели из внешнего редактора потребуют отдельного контура проверки и provenance |
 
 ## Журнал работ
 
@@ -84,6 +84,9 @@
 | 2026-09-26 | Кодовая сессия сдала `0008`: Pause как control часов без fast-forward и drift, Restart с replay tick-упорядоченного command log по тому же seed, terminal feedback с приоритетом над command feedback, `Awaiting start` вместо `T-00:00`, `prefers-reduced-motion` без transient-эффектов; typecheck, build, test:core и 8 Playwright прошли, два terminal-отчёта прогона и replay совпали (victory, tick 304, gold 229); screenshots paused/replay/reduced-motion прочитаны; core без изменений; задача на проверке штаба |
 | 2026-09-26 | Штаб вернул `0008` на точечный fix: replay-инвариант через QA seam и paused+replay presentation; `0009` не выдаётся |
 | 2026-09-26 | Кодовая сессия закрыла точечный fix `0008`: guard `replaying` перенесён в `dispatchPlayerCommand` (pad-клик, Start Wave и QA seam отклоняются одной причиной `replay-in-progress`, log и core не трогаются), replay/restart copy заменён на правдивый, badge получил состояние `paused-replay`; добавлен regression-тест на QA-инъекцию во время replay — с временно убранным guard он красный; typecheck, build, test:core и 9 Playwright (41 s) зелёные, `repeat-each=2` по replay — 4/4; core без изменений; `0008` принята |
+| 2026-09-26 | Продолжение сессии независимо перепроверило закрытый `0008`: typecheck, build, test:core (tick 323, gold 229) и 9/9 Playwright зелёные, guard подтверждён в `dispatchPlayerCommand`; `HANDOFF.md` удалён отдельным commit, документация признана актуальной |
+| 2026-09-26 | Штаб принял решение по инструменту подготовки моделей: собственная генерация GLB вместо DCC, модели как текст в репозитории, артефакты генерируются и не коммитятся, реестр моделей — data-контракт; `EOB-006` закрыт, `0021` добавлена в фазу 4 под skeletal animation |
+| 2026-09-26 | Выдано задание `0009` кодовой сессии: asset pipeline с первой GLB-моделью вместо placeholder |
 
 ## Структура проекта
 
@@ -99,15 +102,18 @@
 - `src/main.ts` — browser bootstrap, presentation entry point, snapshot projection, build palette, pad picking, запуск волны, combat presentation, pause/resume, replay по command log с guard в `dispatchPlayerCommand` и reduced-motion guard.
 - `src/game-core/` — pure deterministic simulation, content validation и training scenario.
 - `scripts/check-simulation.ts` — один runnable core check.
+- `scripts/build-assets.ts` — генератор собственных GLB и реестр моделей (задача `0009`, в работе).
 - `tests/smoke.spec.ts` — browser E2E: bootstrap smoke, snapshot binding contract, placement contract, полный цикл до victory и defeat, pause/resume без drift, replay determinism, отклонение команд во время replay, prefers-reduced-motion.
 - `docs/tasks/0005-client-snapshot-binding.md` — принятое задание.
 - `docs/tasks/0006-build-pad-placement.md` — принятое задание.
 - `docs/tasks/0007-wave-combat-presentation.md` — принятое задание.
 - `docs/tasks/0008-vertical-slice-acceptance.md` — принятое задание (включая точечный fix).
+- `docs/tasks/0009-asset-pipeline.md` — выданное задание.
 
 Планируемая:
 
 - `src/client/` — выделенный Three.js client, input и presentation.
+- `src/asset-registry.ts` — data-слой реестра моделей: типы, fail-fast валидация manifest, resolve по content id, кэш загруженных GLTF (`0009`).
 - `src/server/` — sessions и transport.
 - `src/protocol/` — versioned network contract.
 - `content/` — карты, башни, враги и волны.

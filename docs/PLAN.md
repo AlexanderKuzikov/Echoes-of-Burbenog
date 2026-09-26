@@ -2,7 +2,7 @@
 
 > Веду я (штаб). Каждый пункт — одно будущее задание кодовой сессии: отдельно сдаётся, отдельно тестируется и отдельно откатывается.
 > Статусы: `[ ]` — не начато или сдано и ждёт приёмки, `[x]` — принято штабом после проверки. Номера заданий сквозные.
-> Следующая задача: `0009` — не выдана, ждёт решения штаба. Текущий этап: фаза 3 закрыта, фаза 4 (asset pipeline) не начата.
+> Следующая задача: `0009` — выдана кодовой сессии. Текущий этап: фаза 3 закрыта, фаза 4 (asset pipeline) начата.
 
 ## Принципы
 
@@ -21,7 +21,7 @@
 | 1. Browser bootstrap | Принята | 0003 — Three.js scene и QA |
 | 2. Pure simulation core | Принята | 0004 — deterministic core |
 | 3. Первый визуальный vertical slice | Принята | 0008 — pause/replay и приёмка slice; принят после точечного fix |
-| 4. Asset pipeline и 3D polish | Ожидает | — |
+| 4. Asset pipeline и 3D polish | В работе | 0009 — выдана |
 | 5. Offline singleplayer | Ожидает | — |
 | 6. Local cooperative mode | Ожидает | — |
 | 7. PvP и mode-specific rules | Ожидает | — |
@@ -51,9 +51,13 @@
   - Штаб вернул задачу на точечный fix: `dispatchPlayerCommand` должен блокировать QA-инъекции во время replay, а misleading replay/restart text и paused+replay badge должны быть исправлены. `0009` не выдаётся.
   - Точечный fix сдан: `replaying`-guard живёт в `dispatchPlayerCommand` и закрывает pad-клик, Start Wave и QA seam одним кодом с client-причиной `replay-in-progress`; blocked и terminal copy больше не обещают другой исход; badge получил состояние `paused-replay` с текстом `Replay paused · n / m`. Новый Playwright-сценарий инъекции на tick 0 и в середине replay держит `commandCount` = 4 и два идентичных `matchReports`; с временно убранным guard тест красный. `typecheck`, `build`, `test:core` (tick 323, gold 229) и 9 Playwright (41 s) зелёные, `repeat-each=2` по replay — 4/4; screenshots replay-reset и defeat перечитаны. Core без изменений.
 
-## Фаза 4 — Asset pipeline и 3D polish — ожидает
+## Фаза 4 — Asset pipeline и 3D polish — в работе
 
-- [ ] 0009 — Подключить GLB/glTF, PBR-материалы, освещение и skeletal animation (критерий: placeholder заменяется моделью без изменения gameplay)
+- [ ] 0009 — Собственный asset pipeline: генерация GLB, первая модель вместо placeholder (критерий: placeholder заменён моделью без изменения gameplay; `test:core` даёт те же tick 323 и gold 229)
+  - Выдана кодовой сессии. Решения штаба: модели производит zero-dep генератор `scripts/build-assets.ts`, а не DCC — `EOB-006` закрывается этим выбором; артефакты `public/models` генерируются и не коммитятся, `npm test` содержит шаг `test:assets`; реестр моделей — data-контракт `manifest.json`, не путь в коде; только несжатый GLB без текстур; skeletal animation вынесена в `0021`; PBR доводится IBL через `RoomEnvironment`.
+  - PBR, тени, свет и tone mapping уже реализованы с `0003`, поэтому в задании только IBL и GLB-часть, а не переработка освещения.
+  - Реестр номеров сквозной, но не монотонно-по-этапам: новые задачи получают следующий свободный номер и вставляются в нужную фазу, поэтому `0021` стоит в фазе 4.
+- [ ] 0021 — Skeletal animation и animation states: `SkeletonUtils.clone` при restart/replay, `AnimationMixer`, reduced-motion для клипов (критерий: рестарт с анимированной башней не ломает скелет и не двоит анимацию)
 - [ ] 0010 — Добавить asset validator и performance budgets для минимального Windows 10/11 железа (критерий: несовместимый asset отклоняется)
 
 ## Фаза 5 — Offline singleplayer — ожидает
