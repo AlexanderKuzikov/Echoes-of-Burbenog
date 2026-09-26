@@ -4,7 +4,19 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { TICK_RATE, createSimulation, createTrainingScenario } from './game-core/index.ts';
 import type { Command, CommandResult, MatchSnapshot, MatchStatus, SimulationEvent } from './game-core/index.ts';
 import { ASSET_MANIFEST_URL, AssetContractError, createAssetRegistry, parseAssetManifest, resolveModelUrl } from './asset-registry.ts';
-import type { AssetRegistry, AssetStatus, ModelManifestEntry } from './asset-registry.ts';
+import type { AssetChecks, AssetRegistry, AssetStatus, ModelCheck, ModelManifestEntry } from './asset-registry.ts';
+import {
+  MODEL_BUDGET,
+  REGISTRY_BUDGET,
+  SCENE_BUDGET,
+  checkModelContract,
+  checkNodeTypes,
+  checkRegistryBudgets,
+  checkSceneBudget,
+  describeFailures,
+  sumRegistry,
+} from './asset-budgets.ts';
+import type { AssetFailure, NodeReading, SceneReading } from './asset-budgets.ts';
 import './styles.css';
 
 type RenderCounters = {
@@ -58,6 +70,14 @@ type DebugState = {
   readonly matchReports: MatchReport[];
   readonly motion: { reducedMotion: boolean; combatBursts: number; enemyBob: number };
   readonly assets: { status: AssetStatus; models: string[]; error: string | null };
+  // Budgets, what was measured, and which checks actually ran. `renderer.info` and the load
+  // time are the only non-deterministic numbers here, so a test may only check that they land
+  // inside the budget, never their exact value.
+  readonly assetBudgets: {
+    budgets: { model: typeof MODEL_BUDGET; registry: typeof REGISTRY_BUDGET; scene: typeof SCENE_BUDGET };
+    checks: AssetChecks;
+    failures: string[];
+  };
   readonly towerModels: TowerModelReading[];
 };
 
@@ -606,15 +626,104 @@ for (const tower of config.towers) {
 const assetRegistry: AssetRegistry = createAssetRegistry();
 const gltfLoader = new GLTFLoader();
 
+// Budget failures that are not attached to a single model. Model failures live on their own
+// check, so the seam can report every reason without this list having to mirror them.
+let registryBudgetFailures: AssetFailure[] = [];
+let sceneBudgetFailures: AssetFailure[] = [];
+
+// The path is what makes an unsupported node readable in the viewport: a type name on its own
+// does not say which part of the model has to change.
+const readNodeTypes = (root: THREE.Object3D): NodeReading[] => {
+  const readings: NodeReading[] = [];
+  const walk = (node: THREE.Object3D, path: string) => {
+    readings.push({ type: node.type, path });
+    for (const child of node.children) {
+      walk(child, `${path}/${child.name || child.type}`);
+    }
+  };
+  walk(root, root.name || root.type);
+  return readings;
+};
+
+// `crypto.subtle` needs a secure context, so a bare http dev setup on the LAN legitimately has
+// none. Reporting that as a fact is the whole point: a hash check that silently did not run
+// would look exactly like a hash check that passed.
+const hashArtifact = async (bytes: ArrayBuffer): Promise<{ hash: string | null; skippedReason: string | null }> => {
+  const subtle = typeof crypto === 'undefined' ? undefined : crypto.subtle;
+  if (!subtle) {
+    return { hash: null, skippedReason: 'crypto.subtle needs a secure context (https or localhost)' };
+  }
+  try {
+    const digest = await subtle.digest('SHA-256', bytes);
+    const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+    return { hash: `sha256:${hex}`, skippedReason: null };
+  } catch (error) {
+    return { hash: null, skippedReason: `crypto.subtle.digest failed: ${error instanceof Error ? error.message : String(error)}` };
+  }
+};
+
+type ModelReading = Omit<ModelCheck, 'modelId' | 'accepted' | 'failures'>;
+
+// The one place a model is accepted. Every refusal is recorded first and then thrown, so the
+// seam can name the model that was refused instead of reporting a registry that is simply broken.
+const refuseModel = (entry: ModelManifestEntry, reading: ModelReading, reason: string): never => {
+  assetRegistry.recordModelCheck({ modelId: entry.id, accepted: false, ...reading, failures: [reason] });
+  throw new AssetContractError(reason);
+};
+
 const loadModel = async (entry: ModelManifestEntry): Promise<LoadedModel> => {
   const response = await fetch(resolveModelUrl(entry));
   if (!response.ok) {
     throw new AssetContractError(`model ${entry.id} responded ${response.status}`);
   }
-  const gltf = await gltfLoader.parseAsync(await response.arrayBuffer(), '');
-  if (!gltf.scene.getObjectByName(entry.emissiveNode)) {
-    throw new AssetContractError(`model ${entry.id} has no ${entry.emissiveNode} node to animate`);
+  const buffer = await response.arrayBuffer();
+  const digest = await hashArtifact(buffer);
+  const contentHash = {
+    performed: digest.hash !== null,
+    matches: digest.hash === entry.contentHash,
+    skippedReason: digest.skippedReason,
+  };
+  const reading: ModelReading = {
+    expectedBytes: entry.bytes,
+    actualBytes: buffer.byteLength,
+    triangles: entry.triangles,
+    nodeTypes: [],
+    contentHash,
+  };
+  assetRegistry.markCheckPerformed('bytes');
+  if (contentHash.performed) {
+    assetRegistry.markCheckPerformed('contentHash');
   }
+  if (reading.actualBytes !== entry.bytes) {
+    return refuseModel(
+      entry,
+      reading,
+      `model ${entry.id} arrived with ${reading.actualBytes} bytes but the manifest claims ${entry.bytes}`,
+    );
+  }
+  if (contentHash.performed && !contentHash.matches) {
+    return refuseModel(
+      entry,
+      reading,
+      `model ${entry.id} content hash ${digest.hash} does not match the manifest claim ${entry.contentHash}`,
+    );
+  }
+  const gltf = await gltfLoader.parseAsync(buffer, '');
+  const nodes = readNodeTypes(gltf.scene);
+  reading.nodeTypes = [...new Set(nodes.map((node) => node.type))].sort();
+  assetRegistry.markCheckPerformed('nodeTypes');
+  const failures = [
+    ...checkModelContract({ id: entry.id, bytes: entry.bytes, triangles: entry.triangles }),
+    ...checkNodeTypes(entry.id, nodes),
+  ];
+  assetRegistry.markCheckPerformed('modelBudget');
+  if (failures.length > 0) {
+    return refuseModel(entry, reading, describeFailures(failures));
+  }
+  if (!gltf.scene.getObjectByName(entry.emissiveNode)) {
+    return refuseModel(entry, reading, `model ${entry.id} has no ${entry.emissiveNode} node to animate`);
+  }
+  assetRegistry.recordModelCheck({ modelId: entry.id, accepted: true, ...reading, failures: [] });
   return { entry, scene: gltf.scene, emissiveNode: entry.emissiveNode };
 };
 
@@ -622,7 +731,13 @@ const applyAssetStatus = () => {
   const status = assetRegistry.status;
   viewportShell.dataset.assets = status;
   if (status === 'ready') {
-    statusLabel.textContent = `Scene online · models ready (${assetRegistry.modelIds.join(', ')})`;
+    // Which checks ran is part of the message, not a detail of the debug seam: without it a
+    // skipped hash verification is indistinguishable from a passed one.
+    const integrity = assetRegistry.checks.performed.contentHash
+      ? 'integrity checked'
+      : `content hash not checked (${assetRegistry.modelChecks.find((check) => check.contentHash.skippedReason)?.contentHash.skippedReason ?? 'no reason given'})`;
+    const overBudget = sceneBudgetFailures.length > 0 ? ` · scene over budget: ${describeFailures(sceneBudgetFailures)}` : '';
+    statusLabel.textContent = `Scene online · models ready (${assetRegistry.modelIds.join(', ')}) · ${integrity}${overBudget}`;
     return;
   }
   if (status === 'error') {
@@ -664,23 +779,56 @@ const countMeshes = (object: THREE.Object3D): number => {
 
 const bootAssets = async () => {
   applyAssetStatus();
+  const startedAt = performance.now();
+  const accepted: string[] = [];
+  let refusal: string | null = null;
   try {
     const response = await fetch(ASSET_MANIFEST_URL);
     if (!response.ok) {
       throw new AssetContractError(`model registry responded ${response.status}`);
     }
-    assetRegistry.setManifest(parseAssetManifest(await response.json()));
-    const loaded = await Promise.all(
-      assetRegistry.entries().map((entry) => assetRegistry.load<LoadedModel>(entry, () => loadModel(entry))),
-    );
-    for (const model of loaded) {
-      modelStore.set(model.entry.id, model);
+    const manifest = parseAssetManifest(await response.json());
+    assetRegistry.setManifest(manifest);
+    assetRegistry.recordRegistryReading(sumRegistry(manifest.models));
+    assetRegistry.markCheckPerformed('registryBudget');
+    // The registry totals are a property of the manifest, so they are checked before a single
+    // byte of a model is fetched: a registry that cannot fit is refused instead of downloaded.
+    registryBudgetFailures = checkRegistryBudgets(manifest.models);
+    if (registryBudgetFailures.length > 0) {
+      throw new AssetContractError(describeFailures(registryBudgetFailures));
     }
-    assetRegistry.markReady(loaded.map((model) => model.entry.id));
+    // One refused model must not take the rest of the registry down with it: the refusal names
+    // the model, the accepted ones are still swapped in, and the scene keeps its placeholders.
+    const settled = await Promise.all(
+      manifest.models.map((entry) =>
+        assetRegistry
+          .load<LoadedModel>(entry, () => loadModel(entry))
+          .then((model) => ({ model }))
+          .catch((error: unknown) => ({ error })),
+      ),
+    );
+    const refusals: string[] = [];
+    for (const outcome of settled) {
+      if ('model' in outcome) {
+        modelStore.set(outcome.model.entry.id, outcome.model);
+        accepted.push(outcome.model.entry.id);
+        continue;
+      }
+      refusals.push(outcome.error instanceof Error ? outcome.error.message : String(outcome.error));
+    }
+    if (refusals.length > 0) {
+      refusal = refusals.join(' | ');
+    }
   } catch (error) {
     // A broken contract is stated in the viewport instead of degrading silently, and the scene
     // keeps rendering procedural placeholders so the match stays playable.
-    assetRegistry.markFailed(error instanceof Error ? error.message : String(error));
+    refusal = error instanceof Error ? error.message : String(error);
+  }
+  assetRegistry.recordAssetLoadMs(performance.now() - startedAt);
+  if (refusal === null) {
+    assetRegistry.markReady(accepted);
+  } else {
+    assetRegistry.markFailed(refusal, accepted);
   }
   applyAssetStatus();
   upgradeTowerViews();
@@ -1323,6 +1471,47 @@ void bootAssets();
 let accumulator = 0;
 let previousTimestamp = performance.now();
 
+// Draw calls, drawn triangles and compiled programs are read straight after `render()`, because
+// `renderer.info` is reset by every render call: read anywhere else it would report the previous
+// frame. The reading is only re-checked when a number actually moves, so the scene budget costs
+// nothing per frame and the status line is not rewritten on every tick.
+let lastSceneCounters: SceneReading | null = null;
+
+const sampleSceneBudget = () => {
+  const counters = {
+    drawCalls: renderer.info.render.calls,
+    renderedTriangles: renderer.info.render.triangles,
+    shaderPrograms: renderer.info.programs?.length ?? 0,
+    assetLoadMs: 0,
+  };
+  const previous = lastSceneCounters;
+  if (
+    previous &&
+    previous.drawCalls === counters.drawCalls &&
+    previous.renderedTriangles === counters.renderedTriangles &&
+    previous.shaderPrograms === counters.shaderPrograms
+  ) {
+    return;
+  }
+  lastSceneCounters = counters;
+  assetRegistry.recordSceneCounters(counters);
+  const reading = assetRegistry.sceneReading;
+  if (!reading) {
+    // The registry is still loading, so the load time is unknown and the budget would pass on a
+    // half-measured load. It is checked again as soon as the load finishes.
+    return;
+  }
+  const failures = checkSceneBudget(reading);
+  assetRegistry.markCheckPerformed('sceneBudget');
+  const changed =
+    failures.length !== sceneBudgetFailures.length ||
+    failures.some((failure, index) => failure.reason !== sceneBudgetFailures[index]?.reason);
+  sceneBudgetFailures = failures;
+  if (changed) {
+    applyAssetStatus();
+  }
+};
+
 window.__ECHOES_DEBUG__ = {
   ready: true,
   renderer: 'Three.js WebGL',
@@ -1400,6 +1589,16 @@ window.__ECHOES_DEBUG__ = {
   },
   get assets() {
     return { status: assetRegistry.status, models: assetRegistry.modelIds, error: assetRegistry.error };
+  },
+  get assetBudgets() {
+    return {
+      budgets: { model: MODEL_BUDGET, registry: REGISTRY_BUDGET, scene: SCENE_BUDGET },
+      checks: assetRegistry.checks,
+      failures: [
+        ...assetRegistry.modelChecks.flatMap((check) => check.failures),
+        ...[...registryBudgetFailures, ...sceneBudgetFailures].map((failure) => failure.reason),
+      ],
+    };
   },
   get towerModels(): TowerModelReading[] {
     return Array.from(towerViews, ([entityId, view]) => ({
@@ -1499,6 +1698,7 @@ const renderFrame = (timestamp: number) => {
   coreRing.rotation.z += ambientDelta * 0.25;
   particles.rotation.y += ambientDelta * 0.08;
   renderer.render(scene, camera);
+  sampleSceneBudget();
   requestAnimationFrame(renderFrame);
 };
 

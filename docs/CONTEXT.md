@@ -22,8 +22,9 @@
 | Reduced motion | Проверен | `prefers-reduced-motion: reduce` гасит burst-ring, наведение и вспышку башни, scale-пульс core и ambient-анимацию; позиции, health bars, материалы, combat log и HUD остаются читаемыми |
 | Multiplayer | Отложен | Solo-first; session и protocol seams сохраняются |
 | Asset pipeline | Проверен | Zero-dep генератор GLB с самопроверкой и детерминизмом, `manifest.json` как data-контракт, `pulse-spire` заменяет placeholder через two-phase подмену, IBL через `RoomEnvironment`; артефакты `public/models` генерируются и не коммитятся. Решение по инструменту принято — `EOB-006` закрыт |
+| Asset validator и budgets | На проверке | Бюджеты в одном модуле `src/asset-budgets.ts` (без Three.js, DOM и Node API), который импортируют и генератор, и клиент: ни в `build-assets.ts`, ни в `main.ts` нет числовых лимитов. Генератор меряет модель и отказывается писать артефакт и манифест при нарушении контракта или бюджета; клиент сверяет `bytes` всегда и `contentHash` при наличии `crypto.subtle`, отклоняет несовместимые типы узлов до инстанцирования и отказывает локально, по одной модели. Debug seam публикует бюджеты, измеренные величины (`renderer.info`, время загрузки, суммы по реестру) и флаги выполненных проверок. Задача `0010` сдана, штаб ещё не принял |
 | Desktop packaging | Отложен | Wails/Go после стабилизации browser client |
-| QA/agent harness | Проверен | 11 Playwright-сценариев, включая two-phase подмену модели (gated на маршруте GLB) и fail-fast при недоступном манифесте; красные проги обоих подтверждены |
+| QA/agent harness | Проверен | 13 Playwright-сценариев, включая two-phase подмену модели (gated на маршруте GLB), fail-fast при недоступном манифесте, сцену в бюджетах и отказ по подмене манифеста (gated на `page.route`); красные проги всех трёх механик подтверждены |
 
 ## Глоссарий
 
@@ -54,7 +55,7 @@
 | EOB-011 | P2 | `favicon.ico` даёт 404 в browser console; отдельная задача на favicon или inline data-URL icon |
 | EOB-012 | P2 | Усилить E2E: content-bound selectors, entityId-сопоставление позиций, реальные route-счётчики, typed event и console assertions |
 | EOB-014 | P2 | Разнести монолитный `src/main.ts` на presentation/input/HUD модули после приёмки vertical slice |
-| EOB-016 | P2 | Asset contract валидирует только модели, собранные генератором; модели из внешнего редактора потребуют отдельного контура проверки и provenance |
+| EOB-016 | P2 | Asset contract валидирует только модели, собранные генератором, и проверяет структуру, а не источник; модели из внешнего редактора потребуют отдельного контура проверки и provenance |
 | EOB-017 | P2 | Замер fixed-step clock в E2E идёт сразу за fullPage screenshot: stall >500 ms даёт ложный fast-forward. Наблюдалось один раз на холодном прогоне; нужно унести замер от скриншота или считать по page-time |
 
 ## Журнал работ
@@ -92,6 +93,7 @@
 | 2026-09-26 | Штаб принял `0009` (`518d480`) после независимой проверки: `typecheck`, `build`, `test:core` (tick 323, gold 229), `test:assets` (5 красных проверок) и 11 Playwright зелёные, 22/22 в нагрузочном прогоне, screenshots перечитаны, A/B против pre-0009 подтвердил довод о `environmentIntensity`; оба self-decision сессии (глобальный `environmentIntensity = 0.5` и per-view копии материалов) приняты — первое с пересмотром в `0011`, второе следует из решения клиента анимировать `crystal`; blockers — 0. Заведено: `EOB-017` (замер clock сразу за screenshot даёт ложный fast-forward, воспроизвелось один раз на холодном прогоне) и три неблокирующих пункта в `0010` — сверка `bytes`/`contentHash`, отклонение несовместимых типов узлов, измерение бюджетов |
 | 2026-09-26 | Невыданный хвост roadmap перенумерован монотонно 0010–0022 после приёмки `0009`: `0021` (skeletal) стал `0012`, IBL-вопрос вынесен в `0011`, validator с бюджетами остался `0010`; правило в PLAN: номер совпадает с порядком выдачи |
 | 2026-09-26 | Выдано задание `0010` кодовой сессии: budgets в одном общем модуле `src/asset-budgets.ts`, проверка в сборке и на клиенте, сверка `bytes`/`contentHash`, отказ на несовместимых типах узлов, измерение сцены в debug seam |
+| 2026-09-26 | Кодовая сессия сдала `0010`: единый модуль `src/asset-budgets.ts` (лимиты на модель, реестр и сцену + предикаты `checkModelContract`, `checkNodeTypes`, `checkRegistryBudgets`, `checkSceneBudget`) без Three.js, DOM и Node API; генератор меряет модель по тем же округлённым массивам, что попадают в accessors, и отказывается писать артефакт и манифест при нарушении; клиент сверяет `bytes` всегда и `contentHash` при наличии `crypto.subtle`, обходит дерево до инстанцирования и отказывает локально по одной модели; `renderer.info` и время загрузки публикуются в seam вместе с бюджетами и флагами выполненных проверок. Красные проги: превышение бюджета в генераторе (exit 1, артефакт не записан), снятая проверка бюджета в `assemble` (красный `test:assets`), снятая сверка `contentHash` (красный негативный E2E, `data-assets` = `ready`). `typecheck`, `build`, `test:core` (tick 323, gold 229), `test:assets` (8 красных проверок) и 13 Playwright (45 s) зелёные, `git status` после `npm test` чистый, артефакт побайтово тот же (`sha256:25b4af43…`), core и content без изменений; визуал не тронут. Измеренная сцена: 70/400 draw calls, 3 794/250 000 треугольников, 7/32 программы, 418 мс/1 500 мс загрузки, реестр 1/64 модели, 17 996/8 388 608 байт, 580/150 000 треугольников. Задача на проверке штаба |
 
 ## Структура проекта
 
@@ -104,13 +106,13 @@
 - `docs/ARCHITECTURE.md` — архитектура и границы модулей.
 - `docs/PLAN.md` — этапы разработки и критерии готовности.
 - `Old-Burbenog/BURBENOG-TD-RESEARCH.md` — исследовательский brief по оригинальной карте и рекомендации для ремейка.
-- `src/main.ts` — browser bootstrap, presentation entry point, snapshot projection, build palette, pad picking, запуск волны, combat presentation, pause/resume, replay по command log с guard в `dispatchPlayerCommand`, reduced-motion guard, IBL и two-phase подмена tower view на загруженную модель.
+- `src/main.ts` — browser bootstrap, presentation entry point, snapshot projection, build palette, pad picking, запуск волны, combat presentation, pause/resume, replay по command log с guard в `dispatchPlayerCommand`, reduced-motion guard, IBL и two-phase подмена tower view на загруженную модель, сверка `bytes`/`contentHash`, отказ на несовместимых типах узлов и измерение бюджетов сцены.
 - `src/game-core/` — pure deterministic simulation, content validation и training scenario.
-- `src/asset-registry.ts` — data-слой реестра моделей: типы, fail-fast валидация manifest, resolve по towerId, кэш загрузок, `assetStatus`; без Three.js и DOM.
-- `src/asset-budgets.ts` — бюджеты ассетов и предикаты контракта как общий источник для генератора и клиента (задача `0010`, выдана).
+- `src/asset-registry.ts` — data-слой реестра моделей: типы, fail-fast валидация manifest, resolve по towerId, кэш загрузок, `assetStatus`, измеренные величины и факт выполнения каждой проверки; без Three.js и DOM.
+- `src/asset-budgets.ts` — единственный источник бюджетов и предикатов asset contract: лимиты на модель, реестр и сцену, тексты причин отказа; общий модуль для генератора и клиента, без Three.js, DOM и Node API.
 - `scripts/check-simulation.ts` — один runnable core check.
 - `scripts/build-assets.ts` — генератор собственных GLB, реестр моделей и самопроверка артефактов (задача `0009`).
-- `tests/smoke.spec.ts` — browser E2E: bootstrap smoke, snapshot binding contract, placement contract, полный цикл до victory и defeat, pause/resume без drift, replay determinism, отклонение команд во время replay, prefers-reduced-motion, two-phase подмена GLB, fail-fast при недоступном реестре моделей.
+- `tests/smoke.spec.ts` — browser E2E: bootstrap smoke, snapshot binding contract, placement contract, полный цикл до victory и defeat, pause/resume без drift, replay determinism, отклонение команд во время replay, prefers-reduced-motion, two-phase подмена GLB, fail-fast при недоступном реестре моделей, сцена в бюджетах и отказ по подмене манифеста.
 - `docs/tasks/0005-client-snapshot-binding.md` — принятое задание.
 - `docs/tasks/0006-build-pad-placement.md` — принятое задание.
 - `docs/tasks/0007-wave-combat-presentation.md` — принятое задание.

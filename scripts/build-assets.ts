@@ -3,10 +3,21 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  MODEL_BUDGET,
+  REGISTRY_BUDGET,
+  checkModelContract,
+  checkNodeTypes,
+  checkRegistryBudgets,
+  describeFailures,
+  sumRegistry,
+} from '../src/asset-budgets.ts';
+import type { ModelMeasurement, NodeReading, RegistryModelReading } from '../src/asset-budgets.ts';
 
 // Own zero-dependency glTF 2.0 binary generator. Models live in this file as text,
 // artifacts are written to public/models and are not committed, so a diff of the model
-// shape is a diff of this source instead of an unreadable binary blob.
+// shape is a diff of this source instead of an unreadable binary blob. The limits it has to
+// respect are not written here: they live in src/asset-budgets.ts, which the client imports too.
 
 const PROJECT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const OUTPUT_DIR = join(PROJECT_ROOT, 'public', 'models');
@@ -61,6 +72,13 @@ type ManifestEntry = {
   contentHash: string;
   triangles: number;
   emissiveNode: string;
+};
+
+type ModelBuild = {
+  bytes: Buffer;
+  triangles: number;
+  measurement: ModelMeasurement;
+  nodeTypes: NodeReading[];
 };
 
 // Annotated as a never-returning function so the compiler treats every call as a narrowing
@@ -287,6 +305,28 @@ const pulseSpire = (): ModelDefinition => ({
 
 const MODELS: ModelDefinition[] = [pulseSpire()];
 
+// A model built only to be refused: one tiny part per material the budget allows, plus one over.
+// Every part sits on the ground plane, so the probe breaks exactly one budget and the check
+// cannot pass for a reason the geometry caused by accident. It is a real model rather than a
+// hand-made measurement, so the self-test proves the gate is reachable from the write path.
+const overBudgetModel = (parts: number): ModelDefinition => ({
+  id: 'budget-probe',
+  emissiveNode: 'part-0',
+  parts: Array.from({ length: parts }, (_, index) => ({
+    name: `part-${index}`,
+    translation: [0, 0.05, 0],
+    geometry: octahedronGeometry(0.05),
+    material: {
+      baseColorHex: 0x6ee2cf,
+      // The contract check in front of the gate needs an emissive node, otherwise the probe
+      // would be refused for the wrong reason and would prove nothing about the budget.
+      ...(index === 0 ? { emissiveHex: 0x6ee2cf } : {}),
+      metallicFactor: 0,
+      roughnessFactor: 0.5,
+    },
+  })),
+});
+
 type Json = Record<string, unknown>;
 
 type AccessorDefinition = {
@@ -310,7 +350,81 @@ const vectorBounds = (values: number[], components: number): { min: number[]; ma
   return { min: min.map(round), max: max.map(round) };
 };
 
-const buildGlb = (model: ModelDefinition): { bytes: Buffer; triangles: number } => {
+// A node that carries a mesh arrives at the client as a Mesh, a node without one as a Group, and
+// a node with neither cannot be instantiated at all. The generator reports the same three.js
+// types the loader will produce, so one contract check covers both sides of the pipeline.
+const gltfNodeType = (node: Json): string => {
+  if (node.mesh !== undefined) {
+    return 'Mesh';
+  }
+  return Array.isArray(node.children) && node.children.length > 0 ? 'Group' : 'Object3D';
+};
+
+const TEXTURE_SLOTS: readonly string[] = [
+  'normalTexture',
+  'occlusionTexture',
+  'emissiveTexture',
+];
+
+const countsTexture = (material: Json): boolean => {
+  const pbr = (material.pbrMetallicRoughness ?? {}) as Json;
+  if (pbr.baseColorTexture !== undefined || pbr.metallicRoughnessTexture !== undefined) {
+    return true;
+  }
+  return TEXTURE_SLOTS.some((slot) => material[slot] !== undefined);
+};
+
+// Everything the budget check needs, measured off the same arrays that go into the file: the
+// positions below are the rounded values the accessors carry, so the height, the footprint and
+// the pivot the gate sees are the ones a player will actually see in the scene.
+const measureModel = (model: ModelDefinition, gltf: Json, bytes: number, triangles: number): ModelMeasurement => {
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  let footprint = 0;
+  for (const part of model.parts) {
+    const [offsetX, offsetY, offsetZ] = part.translation;
+    const positions = part.geometry.positions;
+    for (let index = 0; index + 2 < positions.length; index += 3) {
+      const x = (positions[index] as number) + offsetX;
+      const y = (positions[index + 1] as number) + offsetY;
+      const z = (positions[index + 2] as number) + offsetZ;
+      minX = Math.min(minX, x);
+      maxX = Math.max(maxX, x);
+      minY = Math.min(minY, y);
+      maxY = Math.max(maxY, y);
+      footprint = Math.max(footprint, Math.hypot(x, z));
+    }
+  }
+  const nodes = asArray(gltf.nodes, `model ${model.id} nodes`);
+  const meshes = asArray(gltf.meshes, `model ${model.id} meshes`);
+  const materials = asArray(gltf.materials, `model ${model.id} materials`);
+  let morphTargets = 0;
+  for (const [meshIndex, mesh] of meshes.entries()) {
+    const primitives = asArray(mesh.primitives, `model ${model.id} mesh ${meshIndex} primitives`);
+    for (const primitive of primitives) {
+      morphTargets += ((primitive.targets ?? []) as Json[]).length;
+    }
+  }
+  return {
+    id: model.id,
+    bytes,
+    triangles,
+    nodes: nodes.length,
+    meshes: meshes.length,
+    materials: materials.length,
+    textures: materials.filter(countsTexture).length,
+    skins: ((gltf.skins ?? []) as Json[]).length,
+    morphTargets,
+    animationClips: ((gltf.animations ?? []) as Json[]).length,
+    height: round(maxY - minY),
+    footprintRadius: round(footprint),
+    pivotY: round(minY),
+  };
+};
+
+const buildGlb = (model: ModelDefinition): ModelBuild => {
   const binParts: Buffer[] = [];
   const bufferViews: Json[] = [];
   const accessors: AccessorDefinition[] = [];
@@ -450,7 +564,12 @@ const buildGlb = (model: ModelDefinition): { bytes: Buffer; triangles: number } 
   glb.writeUInt32LE(binChunk.length, binHeader);
   glb.writeUInt32LE(CHUNK_BIN, binHeader + 4);
   binChunk.copy(glb, binHeader + 8);
-  return { bytes: glb, triangles };
+  // The scene root becomes the group the client walks, so it is reported next to the node parts.
+  const nodeTypes: NodeReading[] = [
+    { type: 'Group', path: model.id },
+    ...nodes.map((node) => ({ type: gltfNodeType(node), path: `${model.id}/${String(node.name)}` })),
+  ];
+  return { bytes: glb, triangles, measurement: measureModel(model, gltf, glb.length, triangles), nodeTypes };
 };
 
 const sha256 = (bytes: Buffer): string => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
@@ -785,15 +904,15 @@ const verifyGlb = (bytes: Buffer, entry: ManifestEntry): void => {
   }
 };
 
-const expectRejection = (bytes: Buffer, entry: ManifestEntry, pattern: RegExp, label: string): void => {
+const expectFailure = (action: () => void, pattern: RegExp, label: string): void => {
   let message: string | null = null;
   try {
-    verifyGlb(bytes, entry);
+    action();
   } catch (error) {
     message = error instanceof Error ? error.message : String(error);
   }
   if (message === null) {
-    fail(`self-test: a corrupted file (${label}) was accepted, so the check proves nothing`);
+    fail(`self-test: ${label} was accepted, so the check proves nothing`);
   }
   if (!pattern.test(message)) {
     fail(`self-test: ${label} failed with an unexpected message: ${message}`);
@@ -801,7 +920,34 @@ const expectRejection = (bytes: Buffer, entry: ManifestEntry, pattern: RegExp, l
   console.log(`  red check ok: ${label} -> ${message}`);
 };
 
-const runSelfTest = (model: ModelDefinition, entry: ManifestEntry, bytes: Buffer): void => {
+const expectRejection = (bytes: Buffer, entry: ManifestEntry, pattern: RegExp, label: string): void =>
+  expectFailure(() => verifyGlb(bytes, entry), pattern, label);
+
+// The gate every write goes through. Nothing reaches the disk before it: a refused model must
+// leave no artifact and no manifest entry behind, or a broken model would ship next to a
+// healthy one and the registry would stop being a description of what is actually there.
+const gateModel = (
+  measurement: ModelMeasurement,
+  nodeTypes: NodeReading[],
+  totals: readonly RegistryModelReading[],
+): void => {
+  const failures = [
+    ...checkModelContract(measurement),
+    ...checkNodeTypes(measurement.id, nodeTypes),
+    ...checkRegistryBudgets(totals),
+  ];
+  if (failures.length > 0) {
+    fail(`budget check refused: ${describeFailures(failures)}`);
+  }
+};
+
+const runSelfTest = (
+  model: ModelDefinition,
+  entry: ManifestEntry,
+  build: ModelBuild,
+  totals: readonly RegistryModelReading[],
+): void => {
+  const bytes = build.bytes;
   // Determinism first: the same description has to produce the same bytes, otherwise the
   // manifest hash is meaningless and a rebuild looks like a change of the model.
   const rebuilt = buildGlb(model);
@@ -856,6 +1002,46 @@ const runSelfTest = (model: ModelDefinition, entry: ManifestEntry, bytes: Buffer
   const badLength = Buffer.from(bytes);
   badLength.writeUInt32LE(bytes.length + 4, 8);
   expectRejection(badLength, rehash(badLength), /does not match the .* bytes on disk/, 'header length mismatch');
+
+  // The budget gate has to refuse an over-budget model through the very function a real write
+  // goes through, otherwise a gate that was never wired in would still look tested. The probe is
+  // a real model with one part per material the budget allows plus one, so the refusal has to
+  // come from the measured geometry and not from a hand-made measurement.
+  const materialLimit = MODEL_BUDGET.materials;
+  expectFailure(
+    () => assemble([overBudgetModel(materialLimit + 1)]),
+    new RegExp(`materials is ${materialLimit + 1}, budget allows ${materialLimit}`),
+    'model over the material budget, refused before any write',
+  );
+
+  // The registry total and the node type are separate gates, so they are probed through the gate
+  // itself. The probe values are derived from the budget, so these checks follow the limit
+  // instead of freezing a copy of it.
+  const triangleLimit = MODEL_BUDGET.triangles;
+  expectFailure(
+    () => gateModel({ ...build.measurement, triangles: triangleLimit + 1 }, build.nodeTypes, totals),
+    new RegExp(`triangles is ${triangleLimit + 1}, budget allows ${triangleLimit}`),
+    'model over the triangle budget',
+  );
+  const registryLimit = REGISTRY_BUDGET.bytes;
+  const probeBytes = registryLimit + 1;
+  const probeTotal = totals.reduce((total, model) => total + model.bytes, 0) + probeBytes;
+  expectFailure(
+    () =>
+      gateModel(build.measurement, build.nodeTypes, [
+        ...totals,
+        { id: 'registry-probe', bytes: probeBytes, triangles: 0 },
+      ]),
+    new RegExp(`registry-probe: registry bytes is ${probeTotal}, budget allows ${registryLimit}`),
+    'registry over the byte budget',
+  );
+  // A node type the client cannot instantiate is refused here as well, so a model that would
+  // render broken in the browser never gets written in the first place.
+  expectFailure(
+    () => gateModel(build.measurement, [{ type: 'SkinnedMesh', path: 'pulse-spire/crystal' }], totals),
+    /node pulse-spire\/crystal is a SkinnedMesh; only Mesh and Group can be instantiated/,
+    'node type the client cannot instantiate',
+  );
 };
 
 const parseManifest = (raw: string): { version: number; models: ManifestEntry[] } => {
@@ -879,10 +1065,14 @@ const parseManifest = (raw: string): { version: number; models: ManifestEntry[] 
   return { version, models: models as unknown as ManifestEntry[] };
 };
 
-const build = (): { entries: ManifestEntry[]; built: Map<string, Buffer> } => {
+// Everything that has to be true before a byte reaches the disk, in one place: build, verify and
+// gate every model, and only then let the caller write. The self-test drives this same function,
+// so a gate that is not wired in here cannot stay invisible.
+const assemble = (models: readonly ModelDefinition[]): { entries: ManifestEntry[]; built: Map<string, ModelBuild> } => {
   const entries: ManifestEntry[] = [];
-  const built = new Map<string, Buffer>();
-  for (const model of MODELS) {
+  const built = new Map<string, ModelBuild>();
+  const totals: RegistryModelReading[] = [];
+  for (const model of models) {
     const result = buildGlb(model);
     const entry: ManifestEntry = {
       id: model.id,
@@ -893,9 +1083,19 @@ const build = (): { entries: ManifestEntry[]; built: Map<string, Buffer> } => {
       emissiveNode: model.emissiveNode,
     };
     verifyGlb(result.bytes, entry);
-    writeFileSync(join(OUTPUT_DIR, entry.file), result.bytes);
-    built.set(model.id, result.bytes);
+    totals.push(entry);
+    gateModel(result.measurement, result.nodeTypes, totals);
+    built.set(model.id, result);
     entries.push(entry);
+  }
+  return { entries, built };
+};
+
+const build = (): { entries: ManifestEntry[]; built: Map<string, ModelBuild> } => {
+  const { entries, built } = assemble(MODELS);
+  // Every model passed, so the registry can be written as a description of what is on disk.
+  for (const entry of entries) {
+    writeFileSync(join(OUTPUT_DIR, entry.file), (built.get(entry.id) as ModelBuild).bytes);
   }
   writeFileSync(MANIFEST_PATH, `${JSON.stringify({ version: 1, models: entries }, null, 2)}\n`);
   return { entries, built };
@@ -924,11 +1124,16 @@ const main = (): void => {
   check();
   if (mode === '--test') {
     const first = entries[0];
-    runSelfTest(MODELS[0], first, built.get(first.id) as Buffer);
+    runSelfTest(MODELS[0], first, built.get(first.id) as ModelBuild, entries);
   }
   for (const entry of entries) {
     console.log(`${entry.id}: ${entry.file} ${entry.bytes} bytes, ${entry.triangles} triangles, ${entry.contentHash}`);
   }
+  const reading = sumRegistry(entries);
+  console.log(
+    `registry: ${reading.models} model(s), ${reading.bytes} bytes, ${reading.triangles} triangles · ` +
+      `budget ${REGISTRY_BUDGET.models} / ${REGISTRY_BUDGET.bytes} / ${REGISTRY_BUDGET.triangles}`,
+  );
   console.log(`assets: ok (${mode})`);
 };
 

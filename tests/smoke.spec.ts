@@ -26,6 +26,8 @@ const costOf = (towerId: string) => scenario.towers.find((tower) => tower.id ===
 
 type MatchReport = NonNullable<typeof window.__ECHOES_DEBUG__>['matchReports'][number];
 
+type AssetBudgetsReading = NonNullable<typeof window.__ECHOES_DEBUG__>['assetBudgets'];
+
 type DebugReading = {
   ready: boolean;
   objectCount: number;
@@ -52,6 +54,7 @@ type DebugReading = {
   matchReports: MatchReport[];
   motion: { reducedMotion: boolean; combatBursts: number; enemyBob: number };
   assets: { status: string; models: string[]; error: string | null };
+  assetBudgets: AssetBudgetsReading;
   towerModels: Array<{
     entityId: number;
     towerId: string;
@@ -128,6 +131,7 @@ const readDebug = (page: Page) =>
       matchReports: debug.matchReports,
       motion: debug.motion,
       assets: debug.assets,
+      assetBudgets: debug.assetBudgets,
       towerModels: debug.towerModels,
       snapshot: debug.snapshot,
     };
@@ -1159,5 +1163,140 @@ test('keeps the match playable and names the failure when the model registry is 
   expect(started.eventCounts.waveStarted).toBe(1);
   await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'error');
   // A contract failure must not surface as an unhandled rejection either.
+  expect(pageErrors).toEqual([]);
+});
+
+test('keeps the current scene inside the model, registry and scene budgets', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto('/');
+  await armDefendedWave(page);
+  await waitForAssetsReady(page);
+  await page.getByTestId('start-wave').click();
+  await page.waitForFunction(() => window.__ECHOES_DEBUG__?.snapshot.status === 'victory', undefined, {
+    timeout: 60_000,
+  });
+
+  // Read before any screenshot: a fullPage shot stalls the frame loop, and a stalled frame is a
+  // measurement artefact rather than a property of the scene (`EOB-017`).
+  const finished = await readDebugOrThrow(page);
+  const { budgets, checks, failures } = finished.assetBudgets;
+  const scene = checks.scene;
+  if (!scene) {
+    throw new Error('scene budget reading missing');
+  }
+
+  // Every declared check has to have run. A hash verification that silently did not happen would
+  // make the negative scenario below pass for the wrong reason, so the seam has to prove it ran.
+  expect(checks.performed).toEqual({
+    bytes: true,
+    contentHash: true,
+    nodeTypes: true,
+    modelBudget: true,
+    registryBudget: true,
+    sceneBudget: true,
+  });
+  expect(failures).toEqual([]);
+
+  expect(checks.models).toHaveLength(1);
+  const spire = checks.models[0];
+  expect(spire?.modelId).toBe('pulse-spire');
+  expect(spire?.accepted).toBe(true);
+  expect(spire?.actualBytes).toBe(spire?.expectedBytes);
+  expect(spire?.contentHash).toEqual({ performed: true, matches: true, skippedReason: null });
+  // The scene root and the five part meshes, and nothing the clone could not reproduce.
+  expect(spire?.nodeTypes).toEqual(['Group', 'Mesh']);
+  expect(spire?.triangles).toBeLessThanOrEqual(budgets.model.triangles);
+  expect(spire?.expectedBytes).toBeLessThanOrEqual(budgets.model.bytes);
+
+  expect(checks.registry).not.toBeNull();
+  expect(checks.registry?.models).toBeLessThanOrEqual(budgets.registry.models);
+  expect(checks.registry?.bytes).toBeLessThanOrEqual(budgets.registry.bytes);
+  expect(checks.registry?.triangles).toBeLessThanOrEqual(budgets.registry.triangles);
+  expect(checks.registry?.bytes).toBe(spire?.expectedBytes);
+  expect(checks.registry?.triangles).toBe(spire?.triangles);
+
+  // The scene budget is the only non-deterministic measurement, so it is asserted as a bound and
+  // never as a value. The floors keep an all-zero reading from passing the bounds above.
+  expect(scene.drawCalls).toBeLessThanOrEqual(budgets.scene.drawCalls);
+  expect(scene.renderedTriangles).toBeLessThanOrEqual(budgets.scene.renderedTriangles);
+  expect(scene.shaderPrograms).toBeLessThanOrEqual(budgets.scene.shaderPrograms);
+  expect(scene.assetLoadMs).toBeLessThanOrEqual(budgets.scene.assetLoadMs);
+  expect(scene.drawCalls).toBeGreaterThan(0);
+  expect(scene.renderedTriangles).toBeGreaterThan(0);
+  expect(scene.shaderPrograms).toBeGreaterThan(0);
+  expect(scene.assetLoadMs).toBeGreaterThan(0);
+
+  console.log(
+    `scene budgets: calls ${scene.drawCalls}/${budgets.scene.drawCalls}, ` +
+      `triangles ${scene.renderedTriangles}/${budgets.scene.renderedTriangles}, ` +
+      `programs ${scene.shaderPrograms}/${budgets.scene.shaderPrograms}, ` +
+      `load ${Math.round(scene.assetLoadMs)}ms/${budgets.scene.assetLoadMs}ms, ` +
+      `registry ${checks.registry?.models}/${budgets.registry.models} models, ` +
+      `${checks.registry?.bytes}/${budgets.registry.bytes} bytes, ` +
+      `${checks.registry?.triangles}/${budgets.registry.triangles} triangles`,
+  );
+
+  await page.screenshot({ path: 'test-results/asset-budgets-scene.png', fullPage: true });
+});
+
+test('refuses a model whose content hash the manifest does not match', async ({ page }) => {
+  test.setTimeout(60_000);
+  // The manifest is corrupted on the way out and never on disk: a test may not damage the
+  // artifact pipeline it is supposed to check.
+  await page.route('**/models/manifest.json', async (route) => {
+    const response = await route.fetch();
+    const manifest = (await response.json()) as { models: Array<{ contentHash: string }> };
+    for (const model of manifest.models) {
+      model.contentHash = `sha256:${'0'.repeat(64)}`;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(manifest),
+    });
+  });
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+
+  await page.goto('/');
+  await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'error');
+
+  // The refusal is loud and it names the model and the reason: a tampered distribution is
+  // something an operator has to be able to read, not a warning in a console nobody opens.
+  const status = page.getByTestId('scene-status');
+  await expect(status).toContainText('model registry failed');
+  await expect(status).toContainText('pulse-spire');
+  await expect(status).toContainText('content hash');
+
+  const failed = await readDebugOrThrow(page);
+  expect(failed.assets.status).toBe('error');
+  expect(failed.assets.models).toEqual([]);
+  expect(failed.assets.error).toContain('pulse-spire');
+  expect(failed.assets.error).toContain('content hash');
+  // The seam separates "checked and mismatched" from "not checked at all", so a green runtime
+  // can never be produced by skipping the comparison.
+  const refused = failed.assetBudgets.checks.models[0];
+  expect(refused?.modelId).toBe('pulse-spire');
+  expect(refused?.accepted).toBe(false);
+  expect(refused?.contentHash.performed).toBe(true);
+  expect(refused?.contentHash.matches).toBe(false);
+  expect(refused?.failures.join(' ')).toContain('content hash');
+  expect(failed.assetBudgets.failures.join(' ')).toContain('content hash');
+  // The artifact itself was intact, so the byte check passed and the hash check is the one that
+  // refused: that ordering is what makes this the right negative scenario.
+  expect(refused?.actualBytes).toBe(refused?.expectedBytes);
+  expect(failed.assetBudgets.checks.performed.bytes).toBe(true);
+  expect(failed.assetBudgets.checks.performed.nodeTypes).toBe(false);
+
+  // The match stays playable on procedural placeholders.
+  await page.getByRole('button', { name: 'Pulse Spire' }).click();
+  await clickPad(page, 'pad-east');
+  await page.getByTestId('start-wave').click();
+  const started = await readDebugOrThrow(page);
+  expect(started.snapshot.pads['pad-east']).toBe('pulse-spire');
+  expect(started.towerModels[0]?.source).toBe('procedural');
+  expect(started.snapshot.status).toBe('wave');
+  await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'error');
+  await page.screenshot({ path: 'test-results/asset-refused-content-hash.png', fullPage: true });
   expect(pageErrors).toEqual([]);
 });

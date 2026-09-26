@@ -1,6 +1,12 @@
 // Data layer of the asset pipeline. It knows the model registry contract and nothing else:
 // no Three.js, no DOM, no scene. A tower id without a manifest entry is normal and stays
 // procedural, while a broken contract is an error the client has to show instead of hiding.
+//
+// The measured values and the record of which checks actually ran live here as well, because
+// both are facts about a load and not about the scene: the QA seam reads them, and the client
+// decides what to refuse.
+
+import type { RegistryReading, SceneReading } from './asset-budgets.ts';
 
 const ASSET_BASE_URL = '/models/';
 export const ASSET_MANIFEST_URL = `${ASSET_BASE_URL}manifest.json`;
@@ -23,6 +29,43 @@ export type AssetManifest = {
 };
 
 export class AssetContractError extends Error {}
+
+// Every check the client can report as having run. `contentHash` is separate from `bytes` on
+// purpose: it needs a secure context, so a legal http dev setup legitimately performs it not at
+// all, and a seam that could not tell those two cases apart would be lying about the load.
+export type AssetCheckName = 'bytes' | 'contentHash' | 'nodeTypes' | 'modelBudget' | 'registryBudget' | 'sceneBudget';
+
+export type ModelCheck = {
+  modelId: string;
+  accepted: boolean;
+  expectedBytes: number;
+  actualBytes: number;
+  triangles: number;
+  nodeTypes: string[];
+  contentHash: { performed: boolean; matches: boolean; skippedReason: string | null };
+  failures: string[];
+};
+
+export type AssetChecks = {
+  performed: Record<AssetCheckName, boolean>;
+  models: ModelCheck[];
+  registry: RegistryReading | null;
+  scene: SceneReading | null;
+};
+
+const emptyChecks = (): AssetChecks => ({
+  performed: {
+    bytes: false,
+    contentHash: false,
+    nodeTypes: false,
+    modelBudget: false,
+    registryBudget: false,
+    sceneBudget: false,
+  },
+  models: [],
+  registry: null,
+  scene: null,
+});
 
 const contractFail = (message: string): never => {
   throw new AssetContractError(message);
@@ -89,6 +132,9 @@ export const createAssetRegistry = () => {
   let manifest: AssetManifest | null = null;
   let loadedModelIds: string[] = [];
   const inFlight = new Map<string, Promise<unknown>>();
+  let checks = emptyChecks();
+  let assetLoadMs: number | null = null;
+  let sceneCounters: Omit<SceneReading, 'assetLoadMs'> | null = null;
 
   const requireManifest = (): AssetManifest => {
     if (!manifest) {
@@ -107,6 +153,25 @@ export const createAssetRegistry = () => {
     get modelIds(): string[] {
       return [...loadedModelIds];
     },
+    get modelChecks(): ModelCheck[] {
+      return checks.models.map((check) => ({ ...check, nodeTypes: [...check.nodeTypes], contentHash: { ...check.contentHash }, failures: [...check.failures] }));
+    },
+    // The scene reading is only complete once the load finished: a frame counter without the
+    // load time would let the scene budget pass on a half-measured load.
+    get sceneReading(): SceneReading | null {
+      if (!sceneCounters || assetLoadMs === null) {
+        return null;
+      }
+      return { ...sceneCounters, assetLoadMs };
+    },
+    get checks(): AssetChecks {
+      return {
+        performed: { ...checks.performed },
+        models: this.modelChecks,
+        registry: checks.registry ? { ...checks.registry } : null,
+        scene: this.sceneReading,
+      };
+    },
     setManifest(next: AssetManifest): void {
       manifest = next;
     },
@@ -122,7 +187,10 @@ export const createAssetRegistry = () => {
       status = 'ready';
       error = null;
     },
-    markFailed(reason: string): void {
+    // A refusal is local, so the models that did pass still have to be listed: they are swapped
+    // in while the named one stays procedural.
+    markFailed(reason: string, modelIds: string[] = []): void {
+      loadedModelIds = [...modelIds];
       status = 'error';
       error = reason;
     },
@@ -136,6 +204,21 @@ export const createAssetRegistry = () => {
       const pending = loader();
       inFlight.set(entry.file, pending);
       return pending;
+    },
+    markCheckPerformed(name: AssetCheckName): void {
+      checks = { ...checks, performed: { ...checks.performed, [name]: true } };
+    },
+    recordModelCheck(check: ModelCheck): void {
+      checks = { ...checks, models: [...checks.models, check] };
+    },
+    recordRegistryReading(reading: RegistryReading): void {
+      checks = { ...checks, registry: reading };
+    },
+    recordAssetLoadMs(milliseconds: number): void {
+      assetLoadMs = milliseconds;
+    },
+    recordSceneCounters(counters: Omit<SceneReading, 'assetLoadMs'>): void {
+      sceneCounters = counters;
     },
   };
 };
