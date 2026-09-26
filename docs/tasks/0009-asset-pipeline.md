@@ -3,7 +3,7 @@
 > Статус: принята
 > Приоритет: P0
 > Фаза: 4 — Asset pipeline и 3D polish
-> Следующая приёмка: `0010`; skeletal animation вынесена в `0021`
+> Следующая приёмка: `0010`; skeletal animation вынесена в `0012`
 
 ## Контекст
 
@@ -21,7 +21,7 @@
 2. **Артефакты не коммитятся.** `public/models/*.glb` и `public/models/manifest.json` — под `.gitignore`, в git живёт генератор. Сборка идёт через `predev` и `prebuild`, а в `npm test` добавляется шаг `test:assets`, поэтому Playwright физически не может увидеть устаревшие модели. Причина: параметры модели меняются часто, а бинарный дифф в git нечитаем и не несёт смысла.
 3. **Реестр моделей — data-контракт**, а не путь в коде: `manifest.json` описывает `id`, `file`, `bytes`, `contentHash`, `triangles`, `emissiveNode`. Hardcoded путь в `main.ts` запрещён — это тот же class of debt, что и display-name строки вместо content id в `0006`.
 4. **Только несжатый GLB**: геометрия, PBR factors, без текстур, без Draco/meshopt/KTX2. Декодеры лежат в `three/examples/jsm/libs`, но требуют копирования wasm в `public` и ломают zero-dependency до появления измеримой потребности. Сжатие — follow-up, не эта задача.
-5. **Skeletal animation вынесена в `0021`.** `SkeletonUtils.clone` при restart/replay, `AnimationMixer` в reduced-motion и отсутствие состояния анимации в snapshot — это отдельная сложность, не связанная с критерием приёмки 0009. В моделях запрещены `SkinnedMesh`, morph targets и любые animation clips.
+5. **Skeletal animation вынесена в `0012`.** `SkeletonUtils.clone` при restart/replay, `AnimationMixer` в reduced-motion и отсутствие состояния анимации в snapshot — это отдельная сложность, не связанная с критерием приёмки 0009. В моделях запрещены `SkinnedMesh`, morph targets и любые animation clips.
 6. **PBR доводится IBL.** `MeshStandardMaterial` без environment даёт плоский `metalness`; добавляется `RoomEnvironment` + PMREM из `three/examples/jsm` (новая зависимость не требуется). Световая схема и exposure не перенастраиваются.
 7. **Fallback против fail-fast.** Tower id без записи в манифесте остаётся процедурным — это норма. Ошибка контракта (нет манифеста, нет файла, битый GLB, нет обязательного emissive-узла) — fail-fast с видимым состоянием в UI, а не тихая деградация до placeholder.
 
@@ -89,7 +89,7 @@
 
 ## Не входит
 
-- Skeletal animation, morph targets, animation states — `0021`.
+- Skeletal animation, morph targets, animation states — `0012`.
 - Asset validator и performance budgets — `0010`.
 - Сжатие (Draco, meshopt, KTX2, basis), текстуры, LOD, `KTX2Loader` — follow-up.
 - Модели enemies, core, build pads и декора — только `pulse-spire`.
@@ -125,7 +125,7 @@ E2E обязателен реальными canvas-кликами по pad и St
 
 ## За пределами 0009
 
-- `0021` — skeletal animation и animation states: `SkeletonUtils.clone` при restart/replay, `AnimationMixer`, reduced-motion для клипов.
+- `0012` — skeletal animation и animation states: `SkeletonUtils.clone` при restart/replay, `AnimationMixer`, reduced-motion для клипов.
 - `0010` — asset validator и performance budgets: минимальное Windows 10/11 (`EOB-002`), отклонение несовместимого ассета, проверка manifest и geometry.
 - сжатие и текстуры — отдельная задача фазы 4.
 - `EOB-014` — разбивка монолитного `src/main.ts`; новая точка входа asset-загрузки должна проектироваться с учётом будущего `src/client/`, но сам split не делается.
@@ -141,15 +141,15 @@ E2E обязателен реальными canvas-кликами по pad и St
 - `npx playwright test` — 11/11 зелёные, 44 s; нагрузочный прогон `--repeat-each=2` — 22/22. `git status` после прогонов чистый, `package-lock.json` в diff пуст.
 - Скриншоты прочитаны: `vertical-slice-asset-swap.png` показывает GLB-башню на pad и статус `SCENE ONLINE · MODELS READY (PULSE-SPIRE)`; `wave-combat-victory.png`, `wave-combat-defeat.png`, `vertical-slice-paused.png`, `vertical-slice-replay-reset.png` и `build-pad-placement.png` — композиция, маршруты и HUD целы.
 - A/B против pre-0009 на одном сценарии: IBL высветлил ground (тёмный slate → средний серо-teal), маршруты, башни и HUD остались читаемыми. Это подтверждает довод сессии о `environmentIntensity`, но показывает и другое: проба гасится глобально, поэтому материалы, не authored под IBL, получают свет без задуманной роли.
-- Решения сессии приняты: `environmentIntensity = 0.5` — с пересмотром в `0010`; per-view копии материалов при общей геометрии — прямое следствие решения штаба «клиент анимирует `emissiveIntensity` узла `crystal`», иначе вспышка одной башни зажигала бы все башни типа.
+- Решения сессии приняты: `environmentIntensity = 0.5` — с пересмотром в `0011`; per-view копии материалов при общей геометрии — прямое следствие решения штаба «клиент анимирует `emissiveIntensity` узла `crystal`», иначе вспышка одной башни зажигала бы все башни типа.
 - Code review: blockers — 0, task verdict — принята.
 
 ### Найдено на приёмке, не блокеры
 
 - `EOB-017` — замер fixed-step clock в сценарии pause/resume идёт сразу за fullPage screenshot. На холодном прогоне (`0009`-ветка, первый запуск после компиляции `GLTFLoader` и PMREM-шейдера) замер дал более 30 тиков за секунду, то есть ложный fast-forward; тот же тест зелёный в семи следующих прогонах и в нагрузочном, pre-0009 под тем же прогоном тоже зелёный. Причина — stall >500 ms, а не дрейф часов.
 - `0010` — сверять `bytes` и `contentHash` из манифеста при загрузке: сейчас клиент их читает, но не проверяет, и поле остаётся входом только для валидатора.
-- `0010` — отклонять `SkinnedMesh` и прочие узлы, которые `cloneModelNode` не умеет воспроизвести, вместо тихой деградации в `Group`; контракт запрещает скелет до `0021`, а модель из внешнего редактора (`EOB-016`) сейчас отрендерилась бы сломанной без ошибки.
-- `0010` — пересмотреть область действия IBL: глобальное гашение или per-material `envMapIntensity`, чтобы probe доставал только материалам, ради которых введён.
+- `0010` — отклонять `SkinnedMesh` и прочие узлы, которые `cloneModelNode` не умеет воспроизвести, вместо тихой деградации в `Group`; контракт запрещает скелет до `0012`, а модель из внешнего редактора (`EOB-016`) сейчас отрендерилась бы сломанной без ошибки.
+- `0011` — пересмотреть область действия IBL: глобальное гашение или per-material `envMapIntensity`, чтобы probe доставал только материалам, ради которых введён.
 
 ### Статус
 
@@ -241,7 +241,7 @@ Screenshots: `test-results/vertical-slice-asset-swap.png` (GLB-башня на p
 ### Остаток проблем
 
 - `0010` — asset validator и performance budgets: минимальное железо (`EOB-002`), отклонение несовместимого ассета, проверка manifest и geometry; там же пересмотр `environmentIntensity`.
-- `0021` — skeletal animation и animation states.
+- `0012` — skeletal animation и animation states.
 - `EOB-016` — provenance моделей из внешнего редактора: контракт валидирует только то, что собрал генератор.
 - Сжатие и текстуры — отдельная задача фазы 4.
 

@@ -43,7 +43,7 @@
 
 | # | Priority | Описание |
 |---|----------|----------|
-| EOB-002 | P1 | Уточнить performance budgets для Windows 10/11 после выбора минимального тестового железа |
+| EOB-002 | P1 | Performance budgets заданы предварительно под класс GT 1030 / UHD 620 и проверяются в сборке и на клиенте; осталось выбрать и зафиксировать минимальное тестовое железо, на котором они замеряются |
 | EOB-003 | P1 | Выбрать приоритетный subset механик из research brief для первого прототипа |
 | EOB-004 | P1 | Multiplayer отложен; позже определить co-op/PvP и общую или раздельную экономику |
 | EOB-005 | P1 | Art direction и сеттинг отложены; первый прототип использует собственные схематичные assets и visual language |
@@ -86,10 +86,12 @@
 | 2026-09-26 | Штаб вернул `0008` на точечный fix: replay-инвариант через QA seam и paused+replay presentation; `0009` не выдаётся |
 | 2026-09-26 | Кодовая сессия закрыла точечный fix `0008`: guard `replaying` перенесён в `dispatchPlayerCommand` (pad-клик, Start Wave и QA seam отклоняются одной причиной `replay-in-progress`, log и core не трогаются), replay/restart copy заменён на правдивый, badge получил состояние `paused-replay`; добавлен regression-тест на QA-инъекцию во время replay — с временно убранным guard он красный; typecheck, build, test:core и 9 Playwright (41 s) зелёные, `repeat-each=2` по replay — 4/4; core без изменений; `0008` принята |
 | 2026-09-26 | Продолжение сессии независимо перепроверило закрытый `0008`: typecheck, build, test:core (tick 323, gold 229) и 9/9 Playwright зелёные, guard подтверждён в `dispatchPlayerCommand`; `HANDOFF.md` удалён отдельным commit, документация признана актуальной |
-| 2026-09-26 | Штаб принял решение по инструменту подготовки моделей: собственная генерация GLB вместо DCC, модели как текст в репозитории, артефакты генерируются и не коммитятся, реестр моделей — data-контракт; `EOB-006` закрыт, `0021` добавлена в фазу 4 под skeletal animation |
+| 2026-09-26 | Штаб принял решение по инструменту подготовки моделей: собственная генерация GLB вместо DCC, модели как текст в репозитории, артефакты генерируются и не коммитятся, реестр моделей — data-контракт; `EOB-006` закрыт, `0012` добавлена в фазу 4 под skeletal animation |
 | 2026-09-26 | Выдано задание `0009` кодовой сессии: asset pipeline с первой GLB-моделью вместо placeholder |
 | 2026-09-26 | Кодовая сессия сдала `0009`: генератор glTF 2.0 binary на голом Node с примитивами, структурной самопроверкой (magic, chunks, accessor↔bufferView, диапазон индексов, winding против нормалей, emissive-узел, `bytes`/`contentHash`) и красными прогонами на битом файле; `manifest.json` как data-контракт и `src/asset-registry.ts` без Three.js и DOM; two-phase подмена `pulse-spire` на месте с сохранением entity, позиции и idle bob от базовой Y crystal; per-view копии материалов при общей геометрии реестра; fail-fast `data-assets="error"` с читаемой причиной и процедурным продолжением; IBL через `RoomEnvironment` с `environmentIntensity = 0.5`; typecheck, build, test:core (tick 323, gold 229) и 11 Playwright (46 s) зелёные, два прогона генератора побайтово идентичны, `git status` после `npm test` чистый; core и content без изменений; задача на проверке штаба |
-| 2026-09-26 | Штаб принял `0009` после независимой проверки: `typecheck`, `build`, `test:core` (tick 323, gold 229), `test:assets` (5 красных проверок) и 11 Playwright зелёные, 22/22 в нагрузочном прогоне; оба self-decision сессии (глобальный `environmentIntensity = 0.5` и per-view копии материалов) приняты — первое с пересмотром в `0010`, второе следует из решения клиента анимировать `crystal`; blockers — 0. Найдено и заведено: `EOB-017` (замер clock сразу за screenshot даёт ложный fast-forward, воспроизвелось один раз на холодном прогоне), в scope `0010` перенесены сверка `bytes`/`contentHash`, отклонение `SkinnedMesh` и пересмотр области действия IBL |
+| 2026-09-26 | Штаб принял `0009` (`518d480`) после независимой проверки: `typecheck`, `build`, `test:core` (tick 323, gold 229), `test:assets` (5 красных проверок) и 11 Playwright зелёные, 22/22 в нагрузочном прогоне, screenshots перечитаны, A/B против pre-0009 подтвердил довод о `environmentIntensity`; оба self-decision сессии (глобальный `environmentIntensity = 0.5` и per-view копии материалов) приняты — первое с пересмотром в `0011`, второе следует из решения клиента анимировать `crystal`; blockers — 0. Заведено: `EOB-017` (замер clock сразу за screenshot даёт ложный fast-forward, воспроизвелось один раз на холодном прогоне) и три неблокирующих пункта в `0010` — сверка `bytes`/`contentHash`, отклонение несовместимых типов узлов, измерение бюджетов |
+| 2026-09-26 | Невыданный хвост roadmap перенумерован монотонно 0010–0022 после приёмки `0009`: `0021` (skeletal) стал `0012`, IBL-вопрос вынесен в `0011`, validator с бюджетами остался `0010`; правило в PLAN: номер совпадает с порядком выдачи |
+| 2026-09-26 | Выдано задание `0010` кодовой сессии: budgets в одном общем модуле `src/asset-budgets.ts`, проверка в сборке и на клиенте, сверка `bytes`/`contentHash`, отказ на несовместимых типах узлов, измерение сцены в debug seam |
 
 ## Структура проекта
 
@@ -105,6 +107,7 @@
 - `src/main.ts` — browser bootstrap, presentation entry point, snapshot projection, build palette, pad picking, запуск волны, combat presentation, pause/resume, replay по command log с guard в `dispatchPlayerCommand`, reduced-motion guard, IBL и two-phase подмена tower view на загруженную модель.
 - `src/game-core/` — pure deterministic simulation, content validation и training scenario.
 - `src/asset-registry.ts` — data-слой реестра моделей: типы, fail-fast валидация manifest, resolve по towerId, кэш загрузок, `assetStatus`; без Three.js и DOM.
+- `src/asset-budgets.ts` — бюджеты ассетов и предикаты контракта как общий источник для генератора и клиента (задача `0010`, выдана).
 - `scripts/check-simulation.ts` — один runnable core check.
 - `scripts/build-assets.ts` — генератор собственных GLB, реестр моделей и самопроверка артефактов (задача `0009`).
 - `tests/smoke.spec.ts` — browser E2E: bootstrap smoke, snapshot binding contract, placement contract, полный цикл до victory и defeat, pause/resume без drift, replay determinism, отклонение команд во время replay, prefers-reduced-motion, two-phase подмена GLB, fail-fast при недоступном реестре моделей.
@@ -112,7 +115,8 @@
 - `docs/tasks/0006-build-pad-placement.md` — принятое задание.
 - `docs/tasks/0007-wave-combat-presentation.md` — принятое задание.
 - `docs/tasks/0008-vertical-slice-acceptance.md` — принятое задание (включая точечный fix).
-- `docs/tasks/0009-asset-pipeline.md` — сданное задание (на проверке).
+- `docs/tasks/0009-asset-pipeline.md` — принятое задание.
+- `docs/tasks/0010-asset-validator-budgets.md` — выданное задание.
 
 Планируемая:
 

@@ -127,7 +127,7 @@ Asset contract, как реализовано в `0009`:
 - запрещены сжатие, внешние URI, `extensions`, `SkinnedMesh`, morph targets и animation clips;
 - `manifest.json` — единственный источник ожиданий: `id`, `file`, `bytes`, `contentHash`, `triangles`, `emissiveNode`; `file` — имя файла без пути.
 
-Performance budgets и отклонение несовместимого ассета остаются за `0010`.
+Performance budgets и отклонение несовместимого ассета — задача `0010`: лимиты живут в одном модуле `src/asset-budgets.ts`, который проверяется и в сборке, и на клиенте, а числа предварительные до фиксации минимального тестового железа (`EOB-002`).
 
 ### Asset Registry
 

@@ -1,8 +1,8 @@
 # Echoes of Burbenog — Plan (штаб)
 
 > Веду я (штаб). Каждый пункт — одно будущее задание кодовой сессии: отдельно сдаётся, отдельно тестируется и отдельно откатывается.
-> Статусы: `[ ]` — не начато или сдано и ждёт приёмки, `[x]` — принято штабом после проверки. Номера заданий сквозные.
-> Следующая задача: `0010` — не выдана, ждёт решения штаба. Текущий этап: фаза 4 в работе, `0009` принята.
+> Статусы: `[ ]` — не начато или сдано и ждёт приёмки, `[x]` — принято штабом после проверки. Номера заданий сквозные и монотонные: номер совпадает с порядком выдачи, поэтому список внутри фазы читается как порядок работы.
+> Следующая задача: `0010` — выдана кодовой сессии. Текущий этап: фаза 4 в работе, `0009` принята.
 
 ## Принципы
 
@@ -21,7 +21,7 @@
 | 1. Browser bootstrap | Принята | 0003 — Three.js scene и QA |
 | 2. Pure simulation core | Принята | 0004 — deterministic core |
 | 3. Первый визуальный vertical slice | Принята | 0008 — pause/replay и приёмка slice; принят после точечного fix |
-| 4. Asset pipeline и 3D polish | В работе | 0009 — asset pipeline и первая GLB-модель |
+| 4. Asset pipeline и 3D polish | В работе | 0009 — asset pipeline и первая GLB-модель; `0010` выдана |
 | 5. Offline singleplayer | Ожидает | — |
 | 6. Local cooperative mode | Ожидает | — |
 | 7. PvP и mode-specific rules | Ожидает | — |
@@ -54,38 +54,41 @@
 ## Фаза 4 — Asset pipeline и 3D polish — в работе
 
 - [x] 0009 — Собственный asset pipeline: генерация GLB, первая модель вместо placeholder (критерий: placeholder заменён моделью без изменения gameplay; `test:core` даёт те же tick 323 и gold 229)
-  - Выдана кодовой сессии. Решения штаба: модели производит zero-dep генератор `scripts/build-assets.ts`, а не DCC — `EOB-006` закрывается этим выбором; артефакты `public/models` генерируются и не коммитятся, `npm test` содержит шаг `test:assets`; реестр моделей — data-контракт `manifest.json`, не путь в коде; только несжатый GLB без текстур; skeletal animation вынесена в `0021`; PBR доводится IBL через `RoomEnvironment`.
+  - Выдана кодовой сессии. Решения штаба: модели производит zero-dep генератор `scripts/build-assets.ts`, а не DCC — `EOB-006` закрывается этим выбором; артефакты `public/models` генерируются и не коммитятся, `npm test` содержит шаг `test:assets`; реестр моделей — data-контракт `manifest.json`, не путь в коде; только несжатый GLB без текстур; skeletal animation вынесена в `0012`; PBR доводится IBL через `RoomEnvironment`.
   - PBR, тени, свет и tone mapping уже реализованы с `0003`, поэтому в задании только IBL и GLB-часть, а не переработка освещения.
-  - Реестр номеров сквозной, но не монотонно-по-этапам: новые задачи получают следующий свободный номер и вставляются в нужную фазу, поэтому `0021` стоит в фазе 4.
+  - Реестр номеров приведён в порядок после приёмки `0009`: невыданный хвост перенумерован монотонно, `0021` стал `0012`, а IBL-вопрос вынесен в отдельную `0011`, потому что у него другой критерий и другая проверка.
   - Сдано кодовой сессией: `scripts/build-assets.ts` (генератор glTF 2.0 binary на голом Node, примитивы cylinder/cone/octahedron/torus, узлы `base`/`stem`/`roof`/`crystal`/`aura`, структурная самопроверка артефакта и детерминизм), `manifest.json` как data-контракт, `src/asset-registry.ts` без Three.js и DOM, two-phase подмена `pulse-spire` на месте, IBL через `RoomEnvironment` с `environmentIntensity = 0.5`, hooks `predev`/`prebuild` и шаг `test:assets` в `npm test`. Evidence: `typecheck` и `build` зелёные, `test:core` — те же `status victory, tick 323, gold 229`, 11 Playwright (46 s), два прогона `build:assets` побайтово идентичны, `git status` после `npm test` чистый, красные проги: сломанный magic, обрезанный chunk, индекс вне accessor, неверная версия контейнера, несовпадение длины — и красный E2E-прогон с отключённым asset status и с отключённой two-phase подменой. Core и content без изменений. Screenshots: `vertical-slice-asset-swap.png` плюс перечитанные `wave-combat-midwave/victory/defeat`, `vertical-slice-paused`, `vertical-slice-replay-reset`, `build-pad-placement`.
-- [ ] 0021 — Skeletal animation и animation states: `SkeletonUtils.clone` при restart/replay, `AnimationMixer`, reduced-motion для клипов (критерий: рестарт с анимированной башней не ломает скелет и не двоит анимацию)
-- [ ] 0010 — Asset validator и performance budgets для минимального Windows 10/11 железа: отклонять несовместимый ассет на клиенте и в сборке (критерий: несовместимый asset отклоняется)
-  - Обязательный scope из приёмки `0009`: сверять `bytes` и `contentHash` из манифеста при загрузке, отклонять `SkinnedMesh` и прочие узлы, которые `cloneModelNode` не умеет воспроизвести, вместо тихой деградации, и пересмотреть `scene.environmentIntensity = 0.5` — проба сейчас гасится глобально, а материалы, не authored под IBL, получают highlight без задуманной роли.
+  - Штаб принял `0009` (`518d480`): 11/11 Playwright и нагрузочные 22/22, оба self-decision сессии приняты, blockers — 0. Неблокирующие находки: `EOB-017` (замер clock сразу за screenshot), а в `0010` — сверка `bytes`/`contentHash`, отклонение `SkinnedMesh` и измерение бюджетов, в `0011` — область действия IBL.
+- [ ] 0010 — Asset validator и performance budgets: несовместимый ассет отклоняется в сборке и на клиенте (критерий: превышение бюджета или нарушение контракта даёт внятный отказ, а не тихую деградацию)
+  - Выдана кодовой сессии. Обязательный scope из приёмки `0009`: сверка `bytes` и `contentHash` при загрузке, отклонение `SkinnedMesh` и прочих узлов, которые `cloneModelNode` не умеет воспроизвести, и измерение draw calls, треугольников, shader-программ и времени загрузки в debug seam.
+  - Бюджеты живут в одном общем модуле `src/asset-budgets.ts`, который импортируют и генератор, и клиент: одна правка бюджета обязана ломать и сборку, и рантайм-проверку. Числа предварительные, рассчитаны на класс GT 1030 / UHD 620, и остаются предметом пересмотра, пока владелец не зафиксирует минимальное тестовое железо (`EOB-002`).
+- [ ] 0011 — Область действия IBL и material pass: per-material `envMapIntensity` вместо глобального `environmentIntensity = 0.5` (критерий: ground возвращается к pre-IBL тону, а GLB-материалы читаются как металл)
+- [ ] 0012 — Skeletal animation и animation states: `SkeletonUtils.clone` при restart/replay, `AnimationMixer`, reduced-motion для клипов (критерий: рестарт с анимированной башней не ломает скелет и не двоит анимацию)
 
 ## Фаза 5 — Offline singleplayer — ожидает
 
-- [ ] 0011 — Добавить сохранение и восстановление match state/progress (критерий: restart не теряет состояние)
-- [ ] 0012 — Провести полный E2E от меню до victory/defeat (критерий: сценарий проходит без ручных шагов)
+- [ ] 0013 — Добавить сохранение и восстановление match state/progress (критерий: restart не теряет состояние)
+- [ ] 0014 — Провести полный E2E от меню до victory/defeat (критерий: сценарий проходит без ручных шагов)
 
 ## Фаза 6 — Local cooperative mode — ожидает
 
-- [ ] 0013 — Добавить server session и private rooms для двух client context (критерий: оба клиента видят одно состояние)
-- [ ] 0014 — Проверить permissions, reconnect и late join (критерий: описаны и проверены правила)
+- [ ] 0015 — Добавить server session и private rooms для двух client context (критерий: оба клиента видят одно состояние)
+- [ ] 0016 — Проверить permissions, reconnect и late join (критерий: описаны и проверены правила)
 
 ## Фаза 7 — PvP и mode-specific rules — ожидает
 
-- [ ] 0015 — Разделить co-op и PvP victory/economy rules без дублирования transport (критерий: один session layer, разные match rules)
-- [ ] 0016 — Проверить versioned handshake, replay и anti-cheat boundary (критерий: client не меняет server-owned результат)
+- [ ] 0017 — Разделить co-op и PvP victory/economy rules без дублирования transport (критерий: один session layer, разные match rules)
+- [ ] 0018 — Проверить versioned handshake, replay и anti-cheat boundary (критерий: client не меняет server-owned результат)
 
 ## Фаза 8 — Internet services — ожидает
 
-- [ ] 0017 — Добавить identity, rooms, matchmaking и persistence (критерий: threat model и reconnect определены)
-- [ ] 0018 — Проверить content/version mismatch и rate limits (критерий: некорректная версия отклоняется понятной ошибкой)
+- [ ] 0019 — Добавить identity, rooms, matchmaking и persistence (критерий: threat model и reconnect определены)
+- [ ] 0020 — Проверить content/version mismatch и rate limits (критерий: некорректная версия отклоняется понятной ошибкой)
 
 ## Фаза 9 — Desktop release — ожидает
 
-- [ ] 0019 — Собрать Wails/Go shell с embedded frontend и native settings/saves (критерий: browser smoke повторяется в WebView2)
-- [ ] 0020 — Подготовить release pipeline и desktop regression (критерий: сборка воспроизводима и документирована)
+- [ ] 0021 — Собрать Wails/Go shell с embedded frontend и native settings/saves (критерий: browser smoke повторяется в WebView2)
+- [ ] 0022 — Подготовить release pipeline и desktop regression (критерий: сборка воспроизводима и документирована)
 
 ## Заморожено / не делаем сейчас
 
