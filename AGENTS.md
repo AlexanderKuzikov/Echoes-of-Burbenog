@@ -2,7 +2,7 @@
 
 ## Project
 
-Проект — оригинальная 3D Tower Defense игра с LLM-first рабочим процессом. Browser bootstrap и pure simulation core уже существуют; следующий шаг — подключить core к Three.js client. Текущий product scope — solo; multiplayer пока только учитывать в архитектурных seams.
+Проект — оригинальная 3D Tower Defense игра с LLM-first рабочим процессом. Browser bootstrap, pure simulation core и placement приняты; следующий шаг — подключить запуск волны и combat presentation. Текущий product scope — solo; multiplayer пока только учитывать в архитектурных seams.
 
 ## Commands
 

@@ -61,7 +61,7 @@ npm test
 
 ## Статус
 
-**v0.1.0-alpha** — browser bootstrap и pure deterministic simulation core проверены через typecheck, production build, core scenario, Playwright E2E и screenshot review; client integration — следующий этап.
+**v0.1.0-alpha** — browser bootstrap, pure deterministic core, snapshot projection и placement приняты; следующий этап — запуск волны и combat presentation.
 
 ## Лицензия
 

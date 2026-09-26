@@ -1,9 +1,9 @@
 # 0006 — Сделать placement по build pads
 
-> Статус: на проверке
+> Статус: принята
 > Приоритет: P0
 > Фаза: 3 — Первый визуальный vertical slice
-> Следующая приёмка: 0007
+> Следующая приёмка: закрыта; следующая задача `0007`
 
 ## Контекст
 
@@ -115,7 +115,17 @@ Console: только `[vite] connecting/connected` и известный favico
 
 ### Screenshot
 
-`test-results/build-pad-placement.png` — три башни на `pad-east`/`pad-north`/`pad-south`, свободный `pad-core` подсвечен ошибкой, Aether 40, `Grove Lens ready` + `NOT ENOUGH AETHER`, выбранный card `Range 2.4 · Damage 10` из content.
+`test-results/build-pad-placement.png` — три башни на `pad-east`/`pad-north`/`pad-south`, свободный `pad-core` после 900 мс вернулся в free-state; Aether 40, `Grove Lens ready` + `NOT ENOUGH AETHER`, выбранный card `Range 2.4 · Damage 10` из content. Rejection flash проверен отдельно вручную; в screenshot не попал из-за задержки.
+
+## Независимая приёмка штабом
+
+- Проверен commit `caba41c` и чистое рабочее дерево.
+- `npm run typecheck` — зелёный.
+- `npm run build` — зелёный; остаётся только известное предупреждение Vite о chunk > 500 kB из-за Three.js.
+- `npm test` — `npm run test:core` и 3 Playwright-теста зелёные.
+- Screenshots `test-results/build-pad-placement.png` и предыдущие snapshot screenshots проверены визуально: placement, HUD и rejection feedback читаются.
+- Code review: blockers — 0; task verdict — принята.
+- Follow-up качества тестов вынесен в `EOB-012`: content-bound selectors, typed event assertions, console assertions и entityId-сопоставление позиций.
 
 ### За пределами 0006
 
@@ -129,4 +139,4 @@ Console: только `[vite] connecting/connected` и известный favico
 
 ### Статус
 
-`на проверке`. `docs/PLAN.md` держит `[ ]` до приёмки штабом.
+`принята`. `docs/PLAN.md` переведён на следующую задачу `0007`.

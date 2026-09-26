@@ -2,7 +2,7 @@
 
 > Веду я (штаб). Каждый пункт — одно будущее задание кодовой сессии: отдельно сдаётся, отдельно тестируется и отдельно откатывается.
 > Статусы: `[ ]` — не начато, `[x]` — принято штабом после проверки. Номера заданий сквозные.
-> Следующая задача: `0006`. Текущий этап: первый визуальный vertical slice.
+> Следующая задача: `0007`. Текущий этап: первый визуальный vertical slice.
 
 ## Принципы
 
@@ -20,7 +20,7 @@
 | 0. Repository и contracts | Принята | 0002 — visual identity и scope |
 | 1. Browser bootstrap | Принята | 0003 — Three.js scene и QA |
 | 2. Pure simulation core | Принята | 0004 — deterministic core |
-| 3. Первый визуальный vertical slice | В работе | 0005 — snapshot binding; следующая: 0006 |
+| 3. Первый визуальный vertical slice | В работе | 0006 — placement; следующая: 0007 |
 | 4. Asset pipeline и 3D polish | Ожидает | — |
 | 5. Offline singleplayer | Ожидает | — |
 | 6. Local cooperative mode | Ожидает | — |
@@ -44,8 +44,8 @@
 ## Фаза 3 — Первый визуальный vertical slice — следующая
 
 - [x] 0005 — Связать `MatchSnapshot` с Three.js objects: синхронизировать core, build pads, towers и enemies (принято штабом: typecheck, build, core check, Playwright snapshot contract до victory, screenshots и независимый review; blockers — 0)
-- [ ] 0006 — Сделать placement по build pads: выбор tower, command в core, стоимость и занятость pad (кодовая сессия сдала: content-bound build palette, canvas picking по pad, единственный `dispatchCommand`, reason feedback; evidence: typecheck, build, test:core, 3 Playwright passed, screenshot `test-results/build-pad-placement.png`, console чистый; статус — на проверке, ждёт приёмки штаба)
-- [ ] 0007 — Подключить запуск волны, движение enemies, targeting, damage и win/lose к HUD (критерий: полный игровой цикл воспроизводится в браузере)
+- [x] 0006 — Сделать placement по build pads: выбор tower, command в core, стоимость и занятость pad (принято штабом: typecheck, build, test:core, 3 Playwright, реальные canvas-клики, screenshot и независимый review; blockers — 0; follow-up тестов — `EOB-012`)
+- [ ] 0007 — Подключить запуск волны, движение enemies, targeting, damage и win/lose к HUD (выдана кодовой сессии; критерий: полный игровой цикл воспроизводится в браузере)
 - [ ] 0008 — Принять vertical slice: pause/resume, seed replay, core check, Playwright E2E и screenshot review (критерий: все проверки зелёные, визуальная композиция читаема)
 
 ## Фаза 4 — Asset pipeline и 3D polish — ожидает

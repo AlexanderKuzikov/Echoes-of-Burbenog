@@ -1,6 +1,6 @@
 # Echoes of Burbenog — CONTEXT
 
-> Последнее обновление: 2026-09-26
+> Последнее обновление: 2026-09-26 07:30
 
 ## Статус
 
@@ -47,7 +47,7 @@
 | EOB-009 | P1 | Решить, остаётся ли Go/Wails только упаковкой или также используется для dedicated server |
 | EOB-010 | P1 | Перед session layer выбрать replay strategy: command log + seed или restore из snapshot |
 | EOB-011 | P2 | `favicon.ico` даёт 404 в browser console; отдельная задача на favicon или inline data-URL icon |
-| EOB-012 | P2 | Усилить projection E2E: сопоставлять позиции по `entityId`, считать реальные route objects, проверять typed events и console |
+| EOB-012 | P2 | Усилить E2E: content-bound selectors, entityId-сопоставление позиций, реальные route-счётчики, typed event и console assertions |
 
 ## Журнал работ
 
@@ -69,6 +69,8 @@
 | 2026-09-26 | Штаб независимо проверил `0005`, screenshots и regression suite; blockers не найдены, follow-up тестов вынесен в `EOB-012` |
 | 2026-09-26 | Выдано задание `0006` кодовой сессии: placement по build pads через commands и snapshot |
 | 2026-09-26 | Кодовая сессия сдала `0006`: build palette привязан к content `towerId`, canvas picking по pad, единственный command path, feedback accepted/rejected с reason; typecheck, build, test:core и 3 Playwright прошли, screenshot `test-results/build-pad-placement.png`; задача на проверке штаба |
+| 2026-09-26 | Штаб принял `0006` после независимой проверки; blockers — 0, screenshot-evidence уточнён, follow-up тестов оставлен в `EOB-012` |
+| 2026-09-26 | Выдано задание `0007` кодовой сессии: запуск волны и combat presentation |
 
 ## Структура проекта
 
@@ -86,7 +88,8 @@
 - `scripts/check-simulation.ts` — один runnable core check.
 - `tests/smoke.spec.ts` — browser E2E: bootstrap smoke, snapshot binding contract и placement contract.
 - `docs/tasks/0005-client-snapshot-binding.md` — принятое задание.
-- `docs/tasks/0006-build-pad-placement.md` — задание со статусом «на проверке».
+- `docs/tasks/0006-build-pad-placement.md` — принятое задание.
+- `docs/tasks/0007-wave-combat-presentation.md` — выданное задание для следующей кодовой сессии.
 
 Планируемая:
 
