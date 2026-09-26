@@ -75,8 +75,11 @@ Snapshot restore и command-log replay сознательно отложены �
 
 - Client держит один локальный `Simulation` и тикает его fixed-step accumulator, который накапливает реальное время в `requestAnimationFrame`; core получает только целые тики.
 - `MatchSnapshot` — единственный источник presentation state. Towers и enemies — presentation-объекты, адресуемые по `entityId`; они создаются, обновляются и удаляются вместе с snapshot.
-- Позднее источник snapshots заменяется на session, а projection остаётся прежним.
-- `window.__ECHOES_DEBUG__` — QA seam для browser E2E: snapshot, rendered-счётчики, позиции, screen-координаты build pads, выбранный tower, feedback и dispatch. Это не gameplay API.
+- HUD (phase, phase clock, enemy count, objective, result) — проекция snapshot. DOM не считает значения сам и дублирует счётчики; `data-phase` и `data-kind` зеркалят `snapshot.status` как проверяемый contract.
+- Events из `drainEvents` — только transient presentation: typed-счётчики, bounded combat log, вспышка и наведение башни, burst-ring убийства, flash core. События не меняют state и не используются как источник значений.
+- Command events потребляются в той же task, что и сам command, поэтому feedback и счётчики не отстают от ввода на кадр.
+- Позднее источник snapshots заменяется на session, а projection остаётся прежней.
+- `window.__ECHOES_DEBUG__` — QA seam для browser E2E: snapshot, rendered-счётчики, позиции, screen-координаты build pads, выбранный tower, feedback, `eventCounts` по типам, `recentEvents` и dispatch. Это не gameplay API.
 
 ### Server и Session
 

@@ -2,7 +2,7 @@
 
 > Веду я (штаб). Каждый пункт — одно будущее задание кодовой сессии: отдельно сдаётся, отдельно тестируется и отдельно откатывается.
 > Статусы: `[ ]` — не начато, `[x]` — принято штабом после проверки. Номера заданий сквозные.
-> Следующая задача: `0007`. Текущий этап: первый визуальный vertical slice.
+> Следующая задача: `0007` — сдана кодовой сессией, ждёт приёмки. Текущий этап: первый визуальный vertical slice.
 
 ## Принципы
 
@@ -45,7 +45,7 @@
 
 - [x] 0005 — Связать `MatchSnapshot` с Three.js objects: синхронизировать core, build pads, towers и enemies (принято штабом: typecheck, build, core check, Playwright snapshot contract до victory, screenshots и независимый review; blockers — 0)
 - [x] 0006 — Сделать placement по build pads: выбор tower, command в core, стоимость и занятость pad (принято штабом: typecheck, build, test:core, 3 Playwright, реальные canvas-клики, screenshot и независимый review; blockers — 0; follow-up тестов — `EOB-012`)
-- [ ] 0007 — Подключить запуск волны, движение enemies, targeting, damage и win/lose к HUD (выдана кодовой сессии; критерий: полный игровой цикл воспроизводится в браузере)
+- [ ] 0007 — Подключить запуск волны, движение enemies, targeting, damage и win/lose к HUD (сдана кодовой сессией, на проверке: typecheck, build, test:core, 5 Playwright, victory и defeat реальными кликами, typed event counts, 3 screenshot; blockers не сообщены)
 - [ ] 0008 — Принять vertical slice: pause/resume, seed replay, core check, Playwright E2E и screenshot review (критерий: все проверки зелёные, визуальная композиция читаема)
 
 ## Фаза 4 — Asset pipeline и 3D polish — ожидает

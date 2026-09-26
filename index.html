@@ -33,7 +33,7 @@
           </div>
         </header>
 
-        <section class="viewport-shell" aria-label="Tactical viewport">
+        <section class="viewport-shell" aria-label="Tactical viewport" data-testid="viewport" data-phase="preparation">
           <div id="scene"></div>
           <div class="viewport-vignette" aria-hidden="true"></div>
           <div class="scene-caption">
@@ -45,6 +45,8 @@
             <span class="pulse-dot"></span>
             <span data-testid="scene-status">Scene online</span>
           </div>
+          <div class="result-banner" data-testid="match-result" data-result="none" role="status" hidden>Sector secured</div>
+          <ul class="combat-log" data-testid="event-feed" aria-label="Combat log"></ul>
           <div class="map-legend" aria-label="Map legend">
             <span><i class="legend-mark legend-mark--path"></i>Route</span>
             <span><i class="legend-mark legend-mark--build"></i>Build pad</span>
@@ -86,7 +88,18 @@
           <section class="dock-section objective-section">
             <span class="status-kicker">Current objective</span>
             <strong>Hold the eastern gate</strong>
-            <span class="status-detail">Next contact in 00:18</span>
+            <span class="status-detail" data-testid="objective-detail">Awaiting start command</span>
+          </section>
+          <section class="dock-section wave-section">
+            <div class="wave-heading">
+              <span class="status-kicker">Match phase</span>
+              <strong data-testid="match-phase" data-phase="preparation">Preparation</strong>
+            </div>
+            <div class="wave-metrics">
+              <span class="wave-clock" data-testid="phase-timer" data-kind="preparation">T-00:00</span>
+              <span class="wave-threat">Hostiles <b data-testid="enemy-count">0</b></span>
+            </div>
+            <button class="wave-button" type="button" data-testid="start-wave">Start Wave</button>
           </section>
         </footer>
       </main>

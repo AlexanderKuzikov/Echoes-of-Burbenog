@@ -1,6 +1,6 @@
 # Echoes of Burbenog — CONTEXT
 
-> Последнее обновление: 2026-09-26 07:30
+> Последнее обновление: 2026-09-26 09:20
 
 ## Статус
 
@@ -10,14 +10,15 @@
 | Репозиторий | Создан | Приватный GitHub remote, ветка `main` синхронизирована; visibility не является требованием |
 | Документация | Базовая завершена | Созданы README, инструкции, архитектура, решения и план |
 | Целевая платформа | Зафиксирована | Windows 10/11; performance budgets уточняются |
-| Gameplay prototype | Bootstrap + core проверены | 3D-ready сцена, pure simulation, schematic build pads, placement по pads и базовый HUD |
-| Client | Привязан к core | Один `Simulation` из training scenario; сцена, pads, path, core, towers и enemies строятся из `MatchSnapshot`; ручных tower/enemy массивов нет |
-| Simulation | Проверен | Pure core: commands, state, events, fixed tick, seeded RNG, wave transitions; reason-коды `placeTower` закреплены pure check |
+| Gameplay prototype | Полный цикл в браузере | Bootstrap, pure simulation, placement по pads и combat presentation: запуск волны, движение, targeting, damage, victory/defeat в одном сценарии |
+| Client | Привязан к core | Один `Simulation` из training scenario; сцена, pads, path, core, towers и enemies строятся из `MatchSnapshot`; HUD (phase, timer, hostiles, objective, result) — проекция snapshot; ручных tower/enemy массивов нет |
+| Simulation | Проверен | Pure core: commands, state, events, fixed tick, seeded RNG, wave transitions; reason-коды `placeTower` и `startWave` закреплены pure check; значения victory не менялись (tick 323, gold 229) |
 | Build palette | Content-bound | Кнопки хранят `data-tower-id`, selection идёт через `aria-pressed`; canvas-клик по pad шлёт `placeTower` тем же `dispatchCommand`, что и debug |
+| Combat presentation | Событийная | `drainEvents` даёт typed-счётчики, bounded combat log и transient 3D feedback: наведение и вспышка башни (`towerFired`), burst-ring (`enemyKilled`), flash core (`coreDamaged`); события не меняют state |
 | Multiplayer | Отложен | Solo-first; session и protocol seams сохраняются |
 | Asset pipeline | Не начат | Первые assets — собственные схематичные placeholder-модели |
 | Desktop packaging | Отложен | Wails/Go после стабилизации browser client |
-| QA/agent harness | Проверен | Core scenario, typecheck, build, Playwright E2E из трёх сценариев, snapshot contract, placement contract и screenshot review прошли |
+| QA/agent harness | Проверен | Core scenario, typecheck, build, Playwright E2E из пяти сценариев, snapshot contract, placement contract, victory/defeat contract с typed events и screenshot review прошли |
 
 ## Глоссарий
 
@@ -71,6 +72,7 @@
 | 2026-09-26 | Кодовая сессия сдала `0006`: build palette привязан к content `towerId`, canvas picking по pad, единственный command path, feedback accepted/rejected с reason; typecheck, build, test:core и 3 Playwright прошли, screenshot `test-results/build-pad-placement.png`; задача на проверке штаба |
 | 2026-09-26 | Штаб принял `0006` после независимой проверки; blockers — 0, screenshot-evidence уточнён, follow-up тестов оставлен в `EOB-012` |
 | 2026-09-26 | Выдано задание `0007` кодовой сессии: запуск волны и combat presentation |
+| 2026-09-26 | Кодовая сессия сдала `0007`: Start Wave через общий `dispatchCommand`, HUD phase/timer/hostiles/objective/result как проекция snapshot, combat log и transient feedback из `drainEvents`, typed `eventCounts` в debug seam; typecheck, build, test:core и 5 Playwright прошли, screenshots mid-wave/victory/defeat; задача на проверке штаба |
 
 ## Структура проекта
 
@@ -83,13 +85,13 @@
 - `docs/ARCHITECTURE.md` — архитектура и границы модулей.
 - `docs/PLAN.md` — этапы разработки и критерии готовности.
 - `Old-Burbenog/BURBENOG-TD-RESEARCH.md` — исследовательский brief по оригинальной карте и рекомендации для ремейка.
-- `src/main.ts` — browser bootstrap, presentation entry point, snapshot projection, build palette и pad picking.
+- `src/main.ts` — browser bootstrap, presentation entry point, snapshot projection, build palette, pad picking, запуск волны и combat presentation.
 - `src/game-core/` — pure deterministic simulation, content validation и training scenario.
 - `scripts/check-simulation.ts` — один runnable core check.
-- `tests/smoke.spec.ts` — browser E2E: bootstrap smoke, snapshot binding contract и placement contract.
+- `tests/smoke.spec.ts` — browser E2E: bootstrap smoke, snapshot binding contract, placement contract, полный цикл до victory и defeat.
 - `docs/tasks/0005-client-snapshot-binding.md` — принятое задание.
 - `docs/tasks/0006-build-pad-placement.md` — принятое задание.
-- `docs/tasks/0007-wave-combat-presentation.md` — выданное задание для следующей кодовой сессии.
+- `docs/tasks/0007-wave-combat-presentation.md` — сданное задание, ждёт приёмки штабом.
 
 Планируемая:
 

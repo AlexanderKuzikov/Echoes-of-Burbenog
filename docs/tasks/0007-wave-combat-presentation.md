@@ -1,6 +1,6 @@
 # 0007 — Подключить запуск волны и combat presentation
 
-> Статус: выдана
+> Статус: на проверке
 > Приоритет: P0
 > Фаза: 3 — Первый визуальный vertical slice
 > Следующая приёмка: 0008
@@ -75,3 +75,100 @@ E2E должен использовать реальные click по pad и Sta
 - статус задачи: `на проверке` или `принята`.
 
 До приёмки задача остаётся `[ ]` в `docs/PLAN.md`.
+
+## Отчёт сессии
+
+### Изменённые файлы
+
+- `index.html` — Start Wave button в dock, `data-phase` у viewport, блок Match phase
+  (`match-phase`, `phase-timer`, `enemy-count`), result banner, combat log, `objective-detail`.
+- `src/main.ts` — `attemptWaveStart` через общий `dispatchCommand`, HUD-проекция phase/timer/
+  enemy count/result, `consumeEvents` с typed-счётчиками, transient feedback (наведение и вспышка
+  башни по `towerFired`, burst-ring по `enemyKilled`, flash core по `coreDamaged`), debug seam
+  `eventCounts` и `recentEvents`.
+- `src/styles.css` — состояния viewport `data-phase="wave|victory|defeat"`, Start Wave button,
+  блок Match phase, combat log, result banner, `prefers-reduced-motion` guard.
+- `tests/smoke.spec.ts` — атомарный `readHud` (DOM + snapshot в одной task), E2E полного цикла
+  реальными кликами и E2E defeat.
+- `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/PLAN.md`, `docs/CONTEXT.md`, этот файл —
+  контракт seam, решение, статус и evidence.
+
+`src/game-core/*` и `scripts/check-simulation.ts` не менялись: клиент использует существующие
+`startWave`, `drainEvents` и reason-коды. Значения pure check не изменились: victory tick 323, gold 229.
+
+### Scenario и значения
+
+Training scenario, seed 1337, viewport 1280×720. Размещение — реальными canvas-кликами:
+`pulse-spire` → `pad-east`, `grove-lens` → `pad-north`, `frost-relay` → `pad-south`
+(cost 50 + 70 + 60 = 180, gold 220 → 40). Старт волны — реальный click по Start Wave.
+
+E2E victory (3 теста, реальные клики, без ручного изменения DOM):
+
+| Шаг | Действие | Ожидается | Получено |
+|-----|----------|-----------|----------|
+| 1 | три canvas-клика по pads | accept, 3 towers | `towerPlaced` × 3, gold 40, 3 tower-объекта на pads |
+| 2 | HUD до старта | preparation | `data-phase="preparation"`, `T-00:xx`, `Hostiles 0`, banner скрыт, button enabled |
+| 3 | click Start Wave | `status = 'wave'` | `waveStarted` × 1, `W+00:00`, button disabled, feedback `Wave 1 started` |
+| 4 | первый spawn | enemies > 0, позиция растёт | `enemySpawned` × 5+, `snapshot.enemies[0].distance` и `x` меняются, projection == snapshot |
+| 5 | первая атака | `towerFired` > 0, health падает | у отслеживаемого врага `distance` вырос, `x` уменьшился, есть враг с `health < maxHealth` |
+| 6 | итог | victory | `enemySpawned` 16, `enemyKilled` 16, `waveCleared` 1, `victory` 1, `coreDamaged` 0, gold 229, integrity 100%, towers 3, enemies 0, banner `Sector secured` |
+
+Волна детерминирована относительно момента `startWave`: победа наступает через 293 wave-тик
+(absolute tick зависит от момента клика), это тот же исход, что и в pure check на tick 323
+(`startWave` там на tick 30). Награды и bounty считаются из content: 7×10 + 6×8 + 3×12 = 154,
+bounty 35, итог 40 + 154 + 35 = 229.
+
+E2E defeat (тот же content, ноль башен — детерминированный эквивалент, без правки DOM):
+
+| Шаг | Действие | Ожидается | Получено |
+|-----|----------|-----------|----------|
+| 1 | click Start Wave без башен | `status = 'wave'`, `towerFired` 0 | `waveStarted` × 1, 0 towers |
+| 2 | ждать терминальный статус | defeat | `coreDamaged` × 10 (`coreHealth` 10), `leaksThisWave` 10, `enemyKilled` 0, `waveCleared` 0, `defeat` 1, `victory` 0 |
+| 3 | HUD | defeat | `data-phase="defeat"`, `Breached`, integrity `0%`, `Core lost on wave 1`, banner `Core breached` |
+
+Debug seam отдаёт `eventCounts` (по типам, не суммарно) и `recentEvents`; E2E проверяет
+конкретные типы (`waveStarted`, `enemySpawned`, `towerFired`, `enemyKilled`, `waveCleared`,
+`victory`, `coreDamaged`, `defeat`) и сверяет HUD со snapshot в одной task, чтобы не ловить гонку
+с fixed-step циклом.
+
+### Команды и результат
+
+```text
+npm run typecheck   ok
+npm run build       ok (11 modules, 571 kB js; warning о chunk size — pre-existing от three)
+npm run test:core   ok (victory tick 323, gold 229 — значения не изменились)
+npm test            5 passed: bootstrap smoke, placement contract, snapshot binding до victory,
+                    полный цикл до victory реальными кликами, defeat без башен
+```
+
+Playwright запускался с локальным Chromium через `PLAYWRIGHT_EXECUTABLE_PATH`
+(managed-сборка 1243 не установлена); путь в проекте не сохранён.
+
+Console: только `[vite] connecting/connected` и известный favicon 404 (`EOB-011`); новых
+warnings и errors нет. Проверено временным прогоном console-проверки, файл удалён.
+
+### Screenshot
+
+- `test-results/wave-combat-midwave.png` — активная волна: три башни, пять врагов на маршрутах,
+  combat log (`Husk/Runner inbound`), `Wave active`, `W+00:01`, `Hostiles 5`, Start Wave disabled.
+- `test-results/wave-combat-victory.png` — `Sector secured`, teal-рамка viewport, лог
+  `Sector secured` / `Wave 1 cleared · leaks 0 · bounty 35`, `Victory`, `Cleared`, `Hostiles 0`,
+  Aether 229, `Objective complete`; башни остались на pads, burst-ring от последнего убийства виден.
+- `test-results/wave-combat-defeat.png` — `Core breached`, красная рамка и красные core-кольцо и
+  кристалл, лог `Core hit · -1 integrity`, `Defeat`, `Breached`, integrity `0%`, Aether 220.
+
+### За пределами 0007
+
+- Pause/resume, seed replay и reset — 0008.
+- Selling, upgrade, repair, transfer; новые tower/enemy types, waves, economy, assets.
+- Multiplayer, sessions, persistence, Wails; hover-камера, zoom, drag-rotate, keyboard controls.
+- `towerFired` намеренно не попадает в combat log: вспышка и наведение башни показывают выстрел
+  в сцене, иначе лог состоит только из повторных выстрелов. Событие полностью видно в
+  `eventCounts`/`recentEvents`.
+- Tower разворачивается к цели мгновенно на время вспышки, без интерполяции — кандидат на
+  polish вместе с asset pipeline.
+- Console-assertions остаются в `EOB-012`.
+
+### Статус
+
+`на проверке`. `docs/PLAN.md` оставляет `0007` в `[ ]` до приёмки штабом; `0008` не выдаётся.

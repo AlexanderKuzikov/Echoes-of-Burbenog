@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { TICK_RATE, createSimulation, createTrainingScenario } from './game-core/index.ts';
-import type { Command, CommandResult, MatchSnapshot } from './game-core/index.ts';
+import type { Command, CommandResult, MatchSnapshot, MatchStatus, SimulationEvent } from './game-core/index.ts';
 import './styles.css';
 
 type RenderCounters = {
@@ -30,9 +30,22 @@ type DebugState = {
   readonly towerPositions: Array<{ x: number; z: number }>;
   readonly enemyPositions: Array<{ x: number; z: number }>;
   readonly padScreenPositions: Array<{ padId: string; x: number; y: number }>;
+  readonly eventCounts: Record<SimulationEvent['type'], number>;
+  readonly recentEvents: SimulationEvent[];
 };
 
 type FeedbackState = 'idle' | 'accepted' | 'rejected';
+
+type CombatBurst = {
+  mesh: THREE.Mesh;
+  started: number;
+  duration: number;
+};
+
+type EventFeedEntry = {
+  type: SimulationEvent['type'];
+  text: string;
+};
 
 type BuildOption = {
   button: HTMLButtonElement;
@@ -51,6 +64,9 @@ type PadView = {
 type TowerView = {
   group: THREE.Group;
   crystal: THREE.Mesh;
+  crystalMaterial: THREE.MeshStandardMaterial;
+  firedUntil: number;
+  aimAngle: number;
 };
 
 type EnemyView = {
@@ -74,6 +90,14 @@ const selectionCardDetail = document.querySelector<HTMLElement>('[data-testid="s
 const goldValue = document.querySelector<HTMLElement>('[data-testid="gold-value"]');
 const integrityValue = document.querySelector<HTMLElement>('[data-testid="core-integrity"]');
 const waveValue = document.querySelector<HTMLElement>('[data-testid="wave-status"]');
+const viewportShell = document.querySelector<HTMLElement>('[data-testid="viewport"]');
+const matchPhase = document.querySelector<HTMLElement>('[data-testid="match-phase"]');
+const phaseTimer = document.querySelector<HTMLElement>('[data-testid="phase-timer"]');
+const enemyCount = document.querySelector<HTMLElement>('[data-testid="enemy-count"]');
+const objectiveDetail = document.querySelector<HTMLElement>('[data-testid="objective-detail"]');
+const eventFeed = document.querySelector<HTMLUListElement>('[data-testid="event-feed"]');
+const resultBanner = document.querySelector<HTMLElement>('[data-testid="match-result"]');
+const startWaveButton = document.querySelector<HTMLButtonElement>('[data-testid="start-wave"]');
 
 if (
   !sceneMount ||
@@ -84,7 +108,15 @@ if (
   !selectionCardDetail ||
   !goldValue ||
   !integrityValue ||
-  !waveValue
+  !waveValue ||
+  !viewportShell ||
+  !matchPhase ||
+  !phaseTimer ||
+  !enemyCount ||
+  !objectiveDetail ||
+  !eventFeed ||
+  !resultBanner ||
+  !startWaveButton
 ) {
   throw new Error('Bootstrap DOM is incomplete');
 }
@@ -93,6 +125,7 @@ const config = createTrainingScenario();
 const simulation = createSimulation(config);
 const padDefinitions = new Map(config.map.buildPads.map((pad) => [pad.id, pad]));
 const towerDefinitions = new Map(config.towers.map((tower) => [tower.id, tower]));
+const enemyDefinitions = new Map(config.enemies.map((enemy) => [enemy.id, enemy]));
 const waveCount = config.waves.length;
 const STEP_SECONDS = 1 / TICK_RATE;
 
@@ -261,7 +294,7 @@ const createTowerView = (towerId: string): TowerView => {
     new THREE.MeshStandardMaterial({
       color: visual.accent,
       emissive: visual.accent,
-      emissiveIntensity: 2.4,
+      emissiveIntensity: towerCrystalIdleIntensity,
       roughness: 0.18,
       metalness: 0.15,
     }),
@@ -277,7 +310,7 @@ const createTowerView = (towerId: string): TowerView => {
   aura.position.y = 0.18;
   group.add(aura);
 
-  return { group, crystal };
+  return { group, crystal, crystalMaterial: crystal.material as THREE.MeshStandardMaterial, firedUntil: 0, aimAngle: 0 };
 };
 
 const enemyVisuals: Record<string, { color: number; scale: number }> = {
@@ -339,6 +372,15 @@ const disposeInstance = (object: THREE.Object3D) => {
       material?.dispose();
     }
   });
+};
+
+const combatBursts: CombatBurst[] = [];
+const combatBurstGeometry = new THREE.RingGeometry(0.22, 0.34, 18);
+const combatBurstColor = new THREE.Color(0x9ff0c9);
+
+const removeCombatBurst = (burst: CombatBurst) => {
+  scene.remove(burst.mesh);
+  (burst.mesh.material as THREE.Material).dispose();
 };
 
 const core = new THREE.Group();
@@ -406,6 +448,7 @@ const rejectionMessages: Record<string, string> = {
   'unknown-pad': 'Unknown build pad',
   'unknown-tower': 'Unknown module',
   'match-finished': 'Match already finished',
+  'wave-already-active': 'Wave already active',
 };
 
 let selectedTowerId = buildOptions[0]?.towerId ?? '';
@@ -471,11 +514,21 @@ const padOccupiedRing = new THREE.Color(0xffc56b);
 const padErrorEmissive = new THREE.Color(0x5a1410);
 const padErrorRing = new THREE.Color(0xff6f61);
 const coreHealthy = new THREE.Color(0x2ac7b5);
+const coreHealthyRing = new THREE.Color(0x6ee2cf);
 const coreFailing = new THREE.Color(0xe46c62);
+const coreWarningRing = new THREE.Color(0xffc56b);
 const baseBodyEmissive = 0.45;
 const slowedBodyEmissive = 1.15;
 const enemyBaseY = 0.28;
 const padErrorFlashSeconds = 0.7;
+const towerCrystalIdleIntensity = 2.4;
+const towerCrystalFireIntensity = 5.2;
+const towerFireFlashSeconds = 0.22;
+const coreDamageFlashSeconds = 0.6;
+const combatBurstSeconds = 0.55;
+const EVENT_FEED_LIMIT = 5;
+const RECENT_EVENT_LIMIT = 16;
+const MAX_COMBAT_BURSTS = 14;
 
 let elapsed = 0;
 
@@ -490,7 +543,50 @@ const refreshPadStyle = (padView: PadView) => {
   ringMaterial.opacity = flashing ? 0.95 : padView.occupied ? 0.72 : 0.48;
 };
 
+const phaseLabels: Record<MatchStatus, string> = {
+  preparation: 'Preparation',
+  wave: 'Wave active',
+  victory: 'Victory',
+  defeat: 'Defeat',
+};
+
+const resultLabels: Record<'victory' | 'defeat', string> = {
+  victory: 'Sector secured',
+  defeat: 'Core breached',
+};
+
+const formatClock = (ticks: number): string => {
+  const totalSeconds = Math.max(0, Math.floor(ticks * STEP_SECONDS));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+};
+
+const phaseTimerText = (state: MatchSnapshot): string => {
+  if (state.status === 'preparation') {
+    return `T-${formatClock(state.preparationTicksLeft)}`;
+  }
+  if (state.status === 'wave') {
+    return `W+${formatClock(state.waveTick)}`;
+  }
+  return state.status === 'victory' ? 'Cleared' : 'Breached';
+};
+
+const objectiveSummary = (state: MatchSnapshot): string => {
+  if (state.status === 'preparation') {
+    return 'Awaiting start command';
+  }
+  if (state.status === 'wave') {
+    return `Leaks ${state.leaksThisWave}`;
+  }
+  if (state.status === 'victory') {
+    return 'Objective complete';
+  }
+  return `Core lost on wave ${state.waveIndex + 1}`;
+};
+
 let coreDefeated = false;
+let coreDamagedUntil = 0;
 let snapshot = simulation.getSnapshot();
 
 const syncHud = () => {
@@ -498,6 +594,22 @@ const syncHud = () => {
   const integrity = snapshot.maxCoreHealth > 0 ? snapshot.coreHealth / snapshot.maxCoreHealth : 0;
   integrityValue.textContent = `${Math.round(integrity * 100)}%`;
   waveValue.textContent = `${String(snapshot.waveIndex + 1).padStart(2, '0')} / ${String(waveCount).padStart(2, '0')}`;
+  matchPhase.textContent = phaseLabels[snapshot.status];
+  matchPhase.dataset.phase = snapshot.status;
+  viewportShell.dataset.phase = snapshot.status;
+  phaseTimer.dataset.kind = snapshot.status;
+  phaseTimer.textContent = phaseTimerText(snapshot);
+  enemyCount.textContent = String(snapshot.enemies.length);
+  objectiveDetail.textContent = objectiveSummary(snapshot);
+  startWaveButton.disabled = snapshot.status !== 'preparation';
+  if (snapshot.status === 'victory' || snapshot.status === 'defeat') {
+    resultBanner.hidden = false;
+    resultBanner.dataset.result = snapshot.status;
+    resultBanner.textContent = resultLabels[snapshot.status];
+  } else {
+    resultBanner.hidden = true;
+    resultBanner.dataset.result = 'none';
+  }
 };
 
 const applySnapshot = (next: MatchSnapshot) => {
@@ -568,7 +680,6 @@ const applySnapshot = (next: MatchSnapshot) => {
   if (defeated !== coreDefeated) {
     coreDefeated = defeated;
     coreCrystal.material.emissive.copy(defeated ? coreFailing : coreHealthy);
-    coreRing.material.color.copy(defeated ? coreFailing : padFreeRing);
   }
 
   syncHud();
@@ -584,8 +695,150 @@ const syncFromCore = () => {
 
 const dispatchCommand = (command: Command): CommandResult => {
   const result = simulation.dispatch(command);
+  // Command events are consumed in the same task as the input so feedback, event
+  // counts and the snapshot never lag the click by a frame.
+  eventsDrained += consumeEvents();
   applySnapshot(simulation.getSnapshot());
   return result;
+};
+
+let eventsDrained = 0;
+
+const eventCounts: Record<SimulationEvent['type'], number> = {
+  towerPlaced: 0,
+  preparationEnded: 0,
+  waveStarted: 0,
+  enemySpawned: 0,
+  towerFired: 0,
+  enemyKilled: 0,
+  coreDamaged: 0,
+  waveCleared: 0,
+  victory: 0,
+  defeat: 0,
+};
+const recentEvents: SimulationEvent[] = [];
+const eventFeedEntries: EventFeedEntry[] = [];
+
+const towerName = (towerId: string) => towerDefinitions.get(towerId)?.name ?? towerId;
+const enemyName = (enemyId: string) => enemyDefinitions.get(enemyId)?.name ?? enemyId;
+
+// `towerFired` is represented in the scene by the tower aim-and-flash instead of a log
+// line, otherwise the feed would only ever show repeated shots.
+const describeEvent = (event: SimulationEvent): string | null => {
+  switch (event.type) {
+    case 'towerPlaced':
+      return `${towerName(event.towerId)} built on ${event.padId}`;
+    case 'preparationEnded':
+      return 'Prep window elapsed · start the wave';
+    case 'waveStarted':
+      return `Wave ${event.waveIndex + 1} engaged · roll ${event.roll.toFixed(2)}`;
+    case 'enemySpawned':
+      return `${enemyName(event.enemyId)} inbound`;
+    case 'towerFired':
+      return null;
+    case 'enemyKilled':
+      return `Target down · +${event.reward} aether`;
+    case 'coreDamaged':
+      return `Core hit · -${event.amount} integrity`;
+    case 'waveCleared':
+      return `Wave ${event.waveIndex + 1} cleared · leaks ${event.leaks} · bounty ${event.bounty}`;
+    case 'victory':
+      return 'Sector secured';
+    case 'defeat':
+      return 'Core breached';
+  }
+};
+
+const renderEventFeed = () => {
+  eventFeed.replaceChildren(
+    ...eventFeedEntries.map((entry) => {
+      const item = document.createElement('li');
+      item.dataset.eventType = entry.type;
+      item.textContent = entry.text;
+      return item;
+    }),
+  );
+};
+
+const spawnCombatBurst = (position: THREE.Vector3) => {
+  const mesh = new THREE.Mesh(
+    combatBurstGeometry,
+    new THREE.MeshBasicMaterial({
+      color: combatBurstColor,
+      transparent: true,
+      opacity: 0.85,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    }),
+  );
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.position.set(position.x, enemyBaseY + 0.08, position.z);
+  scene.add(mesh);
+  combatBursts.push({ mesh, started: elapsed, duration: combatBurstSeconds });
+  while (combatBursts.length > MAX_COMBAT_BURSTS) {
+    const stale = combatBursts.shift();
+    if (stale) {
+      removeCombatBurst(stale);
+    }
+  }
+};
+
+const applyEventPresentation = (event: SimulationEvent) => {
+  if (event.type === 'towerFired') {
+    const view = towerViews.get(event.entityId);
+    if (!view) {
+      return;
+    }
+    view.firedUntil = elapsed + towerFireFlashSeconds;
+    const target = enemyViews.get(event.targetId);
+    if (target) {
+      // Three.js rotates local +X toward -Z, so the Y angle is negated.
+      view.aimAngle = Math.atan2(
+        -(target.group.position.z - view.group.position.z),
+        target.group.position.x - view.group.position.x,
+      );
+    }
+    return;
+  }
+  if (event.type === 'enemyKilled') {
+    const view = enemyViews.get(event.entityId);
+    if (view) {
+      spawnCombatBurst(view.group.position);
+    }
+    return;
+  }
+  if (event.type === 'coreDamaged') {
+    coreDamagedUntil = elapsed + coreDamageFlashSeconds;
+  }
+};
+
+const consumeEvents = (): number => {
+  const drained = simulation.drainEvents();
+  if (drained.length === 0) {
+    return 0;
+  }
+  let feedDirty = false;
+  for (const event of drained) {
+    eventCounts[event.type] += 1;
+    recentEvents.push(event);
+    applyEventPresentation(event);
+    const text = describeEvent(event);
+    if (text === null) {
+      continue;
+    }
+    eventFeedEntries.unshift({ type: event.type, text });
+    feedDirty = true;
+  }
+  if (recentEvents.length > RECENT_EVENT_LIMIT) {
+    recentEvents.splice(0, recentEvents.length - RECENT_EVENT_LIMIT);
+  }
+  if (eventFeedEntries.length > EVENT_FEED_LIMIT) {
+    eventFeedEntries.length = EVENT_FEED_LIMIT;
+  }
+  if (feedDirty) {
+    renderEventFeed();
+  }
+  return drained.length;
 };
 
 const PAD_PICK_HEIGHT = 0.19;
@@ -671,11 +924,22 @@ renderer.domElement.addEventListener('click', (event) => {
   }
 });
 
+const attemptWaveStart = () => {
+  const result = dispatchCommand({ type: 'startWave' });
+  if (result.accepted) {
+    setFeedback('accepted', `Wave ${snapshot.waveIndex + 1} started`);
+    return;
+  }
+  const reason = result.reason ?? 'rejected';
+  setFeedback('rejected', rejectionMessages[reason] ?? `Rejected: ${reason}`, reason);
+};
+
+startWaveButton.addEventListener('click', attemptWaveStart);
+
 syncSelection();
 setFeedback('idle', 'Left click a build pad to place');
 applySnapshot(snapshot);
 
-let eventsDrained = 0;
 let accumulator = 0;
 let previousTimestamp = performance.now();
 
@@ -728,6 +992,12 @@ window.__ECHOES_DEBUG__ = {
       .map((pad) => projectPadToCanvas(pad.id))
       .filter((point): point is { padId: string; x: number; y: number } => point !== null);
   },
+  get eventCounts() {
+    return { ...eventCounts };
+  },
+  get recentEvents() {
+    return [...recentEvents];
+  },
   dispatch: dispatchCommand,
 };
 
@@ -742,7 +1012,7 @@ const renderFrame = (timestamp: number) => {
     stepped = true;
   }
   if (stepped) {
-    eventsDrained += simulation.drainEvents().length;
+    eventsDrained += consumeEvents();
     syncFromCore();
   }
 
@@ -755,7 +1025,15 @@ const renderFrame = (timestamp: number) => {
   }
   let towerSlot = 0;
   for (const view of towerViews.values()) {
-    view.group.rotation.y += frameDelta * (0.34 + towerSlot * 0.08);
+    if (elapsed < view.firedUntil) {
+      view.group.rotation.y = view.aimAngle;
+      view.crystal.scale.setScalar(1.55);
+      view.crystalMaterial.emissiveIntensity = towerCrystalFireIntensity;
+    } else {
+      view.group.rotation.y += frameDelta * (0.34 + towerSlot * 0.08);
+      view.crystal.scale.setScalar(1);
+      view.crystalMaterial.emissiveIntensity = towerCrystalIdleIntensity;
+    }
     view.crystal.position.y = 1.43 + Math.sin(elapsed * 2.1 + towerSlot) * 0.07;
     towerSlot += 1;
   }
@@ -765,6 +1043,24 @@ const renderFrame = (timestamp: number) => {
     view.group.position.y = enemyBaseY + Math.sin(elapsed * 2.8 + enemySlot * 0.7) * 0.045;
     enemySlot += 1;
   }
+  for (let index = combatBursts.length - 1; index >= 0; index -= 1) {
+    const burst = combatBursts[index];
+    if (!burst) {
+      continue;
+    }
+    const progress = (elapsed - burst.started) / burst.duration;
+    if (progress >= 1) {
+      removeCombatBurst(burst);
+      combatBursts.splice(index, 1);
+      continue;
+    }
+    (burst.mesh.material as THREE.MeshBasicMaterial).opacity = 0.85 * (1 - progress);
+    burst.mesh.scale.setScalar(1 + progress * 1.9);
+  }
+  // The terminal state wins over the transient damage pulse.
+  const coreFlashing = elapsed < coreDamagedUntil && !coreDefeated;
+  coreRing.material.color.copy(coreFlashing ? coreWarningRing : coreDefeated ? coreFailing : coreHealthyRing);
+  coreRing.scale.setScalar(coreFlashing ? 1 + 0.18 * (1 - (coreDamagedUntil - elapsed) / coreDamageFlashSeconds) : 1);
   coreCrystal.rotation.y += frameDelta * 0.6;
   coreRing.rotation.z += frameDelta * 0.25;
   particles.rotation.y += frameDelta * 0.08;
