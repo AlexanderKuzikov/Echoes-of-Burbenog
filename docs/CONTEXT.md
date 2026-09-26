@@ -16,14 +16,14 @@
 | Build palette | Content-bound | Кнопки хранят `data-tower-id`, selection идёт через `aria-pressed`; canvas-клик по pad шлёт `placeTower` тем же `dispatchCommand`, что и debug |
 | Combat presentation | Событийная | `drainEvents` даёт typed-счётчики, bounded combat log и transient 3D feedback: наведение и вспышка башни (`towerFired`), burst-ring (`enemyKilled`), flash core (`coreDamaged`); события не меняют state |
 | Pause/resume | Проверен | Pause — только control часов: `step()` не вызывается, accumulator хранит дробную часть, поэтому tick и позиции замерли, а resume продолжил с того же тика без fast-forward; команды при паузе доходят до core |
-| Replay | Client-side QA | Restart пересоздаёт core из того же seed и проигрывает tick-упорядоченный `commandLog` тем же `dispatchCommand`; player-команды на время replay заблокированы; persistence и network replay не входят |
-| Terminal feedback | Приоритет у результата | После victory/defeat строка статуса показывает результат и подсказку про restart, а не устаревший `Wave 1 started` |
+| Replay | Требует fix | Pause/resume проверены; replay-инвариант нарушается только через QA dispatch во время replay |
+| Terminal feedback | Требует polish | После victory/defeat приоритет результата работает; misleading replay/restart copy остаётся на исправление |
 | Preparation display | Правдивый | При `preparationTicksLeft === 0` phase clock показывает `Awaiting start`, а не замороженный `T-00:00`; решение по `EOB-013` принято в пользу display |
 | Reduced motion | Проверен | `prefers-reduced-motion: reduce` гасит burst-ring, наведение и вспышку башни, scale-пульс core и ambient-анимацию; позиции, health bars, материалы, combat log и HUD остаются читаемыми |
 | Multiplayer | Отложен | Solo-first; session и protocol seams сохраняются |
 | Asset pipeline | Не начат | Первые assets — собственные схематичные placeholder-модели |
 | Desktop packaging | Отложен | Wails/Go после стабилизации browser client |
-| QA/agent harness | Проверен | Core scenario, typecheck, build, Playwright E2E из восьми сценариев (bootstrap, snapshot, placement, victory, defeat, pause/resume, replay determinism, reduced motion), snapshot/placement/pause/replay contracts и screenshot review прошли |
+| QA/agent harness | На исправлении | 0008 вернулся на replay-инвариант и terminal/restart polish |
 
 ## Глоссарий
 
@@ -55,6 +55,7 @@
 | EOB-011 | P2 | `favicon.ico` даёт 404 в browser console; отдельная задача на favicon или inline data-URL icon |
 | EOB-012 | P2 | Усилить E2E: content-bound selectors, entityId-сопоставление позиций, реальные route-счётчики, typed event и console assertions |
 | EOB-014 | P2 | Разнести монолитный `src/main.ts` на presentation/input/HUD модули после приёмки vertical slice |
+| EOB-015 | P1 | Централизовать `replaying` guard в `dispatchPlayerCommand`, запретить QA-инъекции во время replay и явно показывать paused+replay state |
 
 ## Журнал работ
 
@@ -82,6 +83,7 @@
 | 2026-09-26 | Штаб принял `0007` после независимой проверки; blockers — 0, countdown evidence уточнён, follow-ups `EOB-012` и `EOB-013` |
 | 2026-09-26 | Выдано задание `0008` кодовой сессии: pause/resume, replay и приёмка vertical slice |
 | 2026-09-26 | Кодовая сессия сдала `0008`: Pause как control часов без fast-forward и drift, Restart с replay tick-упорядоченного command log по тому же seed, terminal feedback с приоритетом над command feedback, `Awaiting start` вместо `T-00:00`, `prefers-reduced-motion` без transient-эффектов; typecheck, build, test:core и 8 Playwright прошли, два terminal-отчёта прогона и replay совпали (victory, tick 304, gold 229); screenshots paused/replay/reduced-motion прочитаны; core без изменений; задача на проверке штаба |
+| 2026-09-26 | Штаб вернул `0008` на точечный fix: replay-инвариант через QA seam и paused+replay presentation; `0009` не выдаётся |
 
 ## Структура проекта
 
@@ -101,7 +103,7 @@
 - `docs/tasks/0005-client-snapshot-binding.md` — принятое задание.
 - `docs/tasks/0006-build-pad-placement.md` — принятое задание.
 - `docs/tasks/0007-wave-combat-presentation.md` — принятое задание.
-- `docs/tasks/0008-vertical-slice-acceptance.md` — сданное задание, ждёт приёмки штаба.
+- `docs/tasks/0008-vertical-slice-acceptance.md` — задание на точечный fix перед приёмкой.
 
 Планируемая:
 

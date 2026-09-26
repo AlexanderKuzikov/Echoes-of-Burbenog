@@ -1,9 +1,9 @@
 # 0008 — Принять vertical slice: pause/resume, seed replay и regression
 
-> Статус: на проверке
+> Статус: на исправлении
 > Приоритет: P0
 > Фаза: 3 — Первый визуальный vertical slice
-> Следующая приёмка: после приёмки vertical slice
+> Следующая приёмка: после replay-инварианта и terminal/restart polish
 
 ## Контекст
 
@@ -127,3 +127,11 @@ eventCounts: towerPlaced 3, waveStarted 1, enemySpawned 16,
 - Session-level replay и transport (`EOB-010`), save/restore, accounts, multiplayer, Wails.
 - Изменение content: длина `prepTicks` остаётся балансным решением, display-семантика закрыта в `0008`.
 - Favicon (`EOB-011`).
+
+## Решение штаба
+
+- Task verdict: **на исправлении**, blockers — 0, но replay-инвариант пока не закрыт.
+- Root cause: `dispatchPlayerCommand` логирует команды без проверки `replaying`; QA seam может добавить команду вне tick-order и тихо изменить следующий replay.
+- Required fix: перенести guard в `dispatchPlayerCommand`, покрыть его тестом инъекции во время replay и проверить неизменность command log/match report.
+- Required polish: исправить misleading text про «restart again to change the run» и сделать состояние `replaying + paused` явным в badge/status.
+- После fix повторно прогнать `typecheck`, `build`, `npm test` и 0008 screenshots; `0009` до этого не выдаётся.
