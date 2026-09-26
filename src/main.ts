@@ -31,7 +31,20 @@ type RenderCounters = {
 
 type CommandLogEntry = {
   tick: number;
+  // The tick the core was actually on when this entry reached it. In the run that recorded it
+  // that is the tick it was issued on, so a replay that applies it anywhere else is visible here
+  // per command instead of only as a different terminal tick at the end of the match.
+  appliedTick: number | null;
   command: Command;
+};
+
+type ClockMark = {
+  label: string;
+  tick: number;
+  waveTick: number;
+  at: number;
+  accumulator: number;
+  paused: boolean;
 };
 
 type MatchReport = {
@@ -71,6 +84,17 @@ type DebugState = {
   readonly replayIndex: number;
   readonly commandCount: number;
   readonly matchReports: MatchReport[];
+  // The frame clock, and the seam that puts a fat frame on purpose. `null` is the product's only
+  // mode: measure the real frame. An armed value goes through the same clamp a real frame does, so
+  // a test cannot ask for a frame the product would never produce.
+  readonly frameDelta: number | null;
+  forceFrameDelta: (seconds: number | null) => void;
+  // Every recorded command with the tick it was issued on and the tick it was applied on.
+  readonly commandPlan: CommandLogEntry[];
+  // Clock readings taken inside the page at the moment something happened there, so a test measures
+  // the match clock instead of the round-trip between the test process and the page.
+  readonly clockMarks: ClockMark[];
+  markClock: (label: string) => void;
   readonly motion: { reducedMotion: boolean; combatBursts: number; enemyBob: number; clips: number; clipsPlaying: number };
   readonly assets: { status: AssetStatus; models: string[]; error: string | null };
   // The environment probe sits on the scene at full strength, so what dims it is a property of
@@ -1563,7 +1587,7 @@ const dispatchPlayerCommand = (command: Command): CommandResult => {
     setFeedback('rejected', replayBlockedFeedback, replayBlockedReason);
     return { accepted: false, reason: replayBlockedReason };
   }
-  commandLog.push({ tick: snapshot.tick, command });
+  commandLog.push({ tick: snapshot.tick, appliedTick: snapshot.tick, command });
   return dispatchCommand(command);
 };
 
@@ -1606,6 +1630,7 @@ const restartMatch = () => {
 const applyReplayPlan = () => {
   while (replayIndex < commandLog.length && snapshot.tick >= commandLog[replayIndex].tick) {
     const entry = commandLog[replayIndex];
+    entry.appliedTick = snapshot.tick;
     replayIndex += 1;
     dispatchCommand(entry.command);
   }
@@ -1859,9 +1884,12 @@ const attemptWaveStart = () => {
 startWaveButton.addEventListener('click', attemptWaveStart);
 
 // Pause is a clock control only: commands still reach the core, but `step()` does not
-// run, so the snapshot, the projection and the rendered positions stay frozen.
+// run, so the snapshot, the projection and the rendered positions stay frozen. The clock is
+// marked here, inside the click, because the tick a resume starts from is a property of the page
+// and not of when the test process is told the click happened.
 const setPaused = (next: boolean) => {
   paused = next;
+  markClock(next ? 'pause' : 'resume');
   syncHud();
 };
 
@@ -1893,6 +1921,40 @@ void bootAssets();
 
 let accumulator = 0;
 let previousTimestamp = performance.now();
+
+// The frame clock. `MAX_FRAME_SECONDS` is the product's clamp: a stall longer than this is dropped
+// rather than fast-forwarded, and it is also the largest number of ticks one frame may ever step.
+const MAX_FRAME_SECONDS = 0.25;
+
+// QA clock seam. While a delta is armed every frame is charged exactly that many seconds instead of
+// its own, and it goes through the same clamp a real frame does, so a test can only ask for a frame
+// the product would really produce. Because the armed value divides the tick exactly, the ticks of
+// the run are a function of the armed delta and not of when the browser got around to drawing: that
+// is what lets a test place a multi-tick frame across a recorded command's tick on purpose instead
+// of waiting for machine load to produce one by luck.
+let forcedFrameDelta: number | null = null;
+
+const readFrameDelta = (timestamp: number): number => {
+  const measured = (timestamp - previousTimestamp) / 1000;
+  previousTimestamp = timestamp;
+  return Math.min(forcedFrameDelta ?? measured, MAX_FRAME_SECONDS);
+};
+
+// Clock readings are taken where the thing happened, not where a test happens to look. `tick` is the
+// match tick and `at` is the page's own clock, so a duration measured from two marks contains no
+// round-trip between the test process and the page.
+const clockMarks: ClockMark[] = [];
+
+const markClock = (label: string) => {
+  clockMarks.push({
+    label,
+    tick: snapshot.tick,
+    waveTick: snapshot.waveTick,
+    at: performance.now(),
+    accumulator,
+    paused,
+  });
+};
 
 // Draw calls, drawn triangles and compiled programs are read straight after `render()`, because
 // `renderer.info` is reset by every render call: read anywhere else it would report the previous
@@ -2008,6 +2070,19 @@ window.__ECHOES_DEBUG__ = {
   get commandCount() {
     return commandLog.length;
   },
+  get frameDelta() {
+    return forcedFrameDelta;
+  },
+  forceFrameDelta(seconds: number | null) {
+    forcedFrameDelta = seconds === null ? null : Math.max(0, seconds);
+  },
+  get commandPlan() {
+    return commandLog.map((entry) => ({ ...entry }));
+  },
+  get clockMarks() {
+    return clockMarks.map((mark) => ({ ...mark }));
+  },
+  markClock,
   get matchReports() {
     return matchReports.map((report) => ({ ...report, eventCounts: { ...report.eventCounts } }));
   },
@@ -2066,18 +2141,34 @@ window.__ECHOES_DEBUG__ = {
   dispatch: dispatchPlayerCommand,
 };
 
+// The tick the next recorded command is due on, or `null` when nothing is pending. This is the only
+// thing the frame loop is allowed to consult about the replay before it steps: a command that has
+// not been applied yet owns the tick it was recorded on.
+const pendingCommandTick = (): number | null =>
+  replaying && replayIndex < commandLog.length ? commandLog[replayIndex].tick : null;
+
 const renderFrame = (timestamp: number) => {
-  const frameDelta = Math.min((timestamp - previousTimestamp) / 1000, 0.25);
-  previousTimestamp = timestamp;
+  const frameDelta = readFrameDelta(timestamp);
   if (!paused) {
     accumulator += frameDelta;
-    let stepped = false;
-    while (accumulator >= STEP_SECONDS) {
+    // A frame may spend whole ticks only up to the tick of the next recorded command. Without this
+    // ceiling a frame that steps five ticks walks straight over that tick, and `applyReplayPlan`
+    // then applies the command on the tick the frame happened to end on — the log is right and the
+    // replay is late, which is how two runs of one match end on different terminal ticks. The time
+    // that does not fit stays in the accumulator and is spent by the following frames, so a replay
+    // clock may briefly trail the wall clock and the simulation stays exact: the surplus is never
+    // dropped to make up ground.
+    const pending = pendingCommandTick();
+    // `snapshot` is the projection of the core and is in sync with it here, because every path that
+    // touches the core — `step`, `dispatch` and `restartMatch` — refreshes the projection.
+    const tickCeiling = pending === null ? Infinity : pending - snapshot.tick;
+    let steps = 0;
+    while (steps < tickCeiling && accumulator >= STEP_SECONDS) {
       simulation.step();
       accumulator -= STEP_SECONDS;
-      stepped = true;
+      steps += 1;
     }
-    if (stepped) {
+    if (steps > 0) {
       eventsDrained += consumeEvents();
       syncFromCore();
     }

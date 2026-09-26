@@ -295,6 +295,63 @@ const readDebugOrThrow = async (page: Page): Promise<DebugReading> => {
   return reading;
 };
 
+// The tick a recorded command was applied on only exists in the page, so it is read there and
+// together with the tick it was issued on. A command that arrives late shows up as a pair of
+// different numbers rather than as a different terminal tick three hundred ticks later.
+type CommandPlanEntry = { tick: number; appliedTick: number | null; type: string };
+
+const readCommandPlan = (page: Page) =>
+  page.evaluate(
+    (): CommandPlanEntry[] | null =>
+      window.__ECHOES_DEBUG__?.commandPlan.map((entry) => ({
+        tick: entry.tick,
+        appliedTick: entry.appliedTick,
+        type: entry.command.type,
+      })) ?? null,
+  );
+
+type ClockMarkReading = {
+  label: string;
+  tick: number;
+  waveTick: number;
+  at: number;
+  accumulator: number;
+  paused: boolean;
+};
+
+// Clock marks are taken inside the page at the moment the page handled the click, so a duration
+// measured from two of them contains no round-trip between the test process and the page.
+const readClockMarks = (page: Page) =>
+  page.evaluate((): ClockMarkReading[] | null => window.__ECHOES_DEBUG__?.clockMarks.map((mark) => ({ ...mark })) ?? null);
+
+const markClock = (page: Page, label: string) =>
+  page.evaluate((name) => {
+    window.__ECHOES_DEBUG__?.markClock(name);
+  }, label);
+
+const findMark = (marks: ClockMarkReading[] | null, label: string): ClockMarkReading => {
+  const mark = marks?.find((entry) => entry.label === label);
+  if (!mark) {
+    throw new Error(`clock mark ${label} missing`);
+  }
+  return mark;
+};
+
+// The QA frame clock. `0.1` s is two ticks per frame and `0.25` s is the product's own frame clamp,
+// five ticks per frame. Both divide the tick exactly, so each run walks a fixed tick lattice and
+// two runs with different values walk different ones over the same recorded commands. The value is
+// clamped again inside the page, so a test cannot ask for a frame the product would never produce.
+const QA_FIRST_RUN_FRAME_SECONDS = 0.1;
+const QA_FRAME_CANDIDATE_SECONDS = [0.25, 0.2, 0.15, 0.1];
+
+const setFrameDelta = (page: Page, seconds: number | null) =>
+  page.evaluate((value) => {
+    window.__ECHOES_DEBUG__?.forceFrameDelta(value);
+  }, seconds);
+
+const describePlan = (plan: CommandPlanEntry[]): string =>
+  plan.map((entry) => `${entry.type}@${entry.tick}->${entry.appliedTick}`).join(' ');
+
 const clickPad = async (page: Page, padId: string) => {
   const canvas = page.getByTestId('scene-canvas');
   const box = await canvas.boundingBox();
@@ -1010,20 +1067,40 @@ test('freezes and resumes the fixed-step clock without drift', async ({ page }) 
   await page.getByTestId('pause-toggle').click();
   const resumed = await readDebugOrThrow(page);
   expect(resumed.paused).toBe(false);
-  // The accumulator keeps its sub-tick remainder, so resuming must not fast-forward.
-  expect(resumed.snapshot.tick).toBeLessThanOrEqual(frozen.snapshot.tick + 6);
-  expect(resumed.snapshot.waveTick).toBeLessThanOrEqual(frozen.snapshot.waveTick + 6);
   await expect(page.getByTestId('state-badge')).toBeHidden();
   await expect(page.getByTestId('viewport')).toHaveAttribute('data-paused', 'false');
   await expect(page.getByTestId('pause-toggle')).toHaveText('Pause');
 
-  await page.waitForTimeout(1000);
+  // What a resume actually costs is measured inside the page, at the tick the click was handled:
+  // the accumulator keeps its sub-tick remainder, so resuming must not fast-forward. A reading
+  // taken after the round-trip also counts the frames the tool took to come back, and on a loaded
+  // machine that is more than the 300 ms this boundary allows — which is why the measurement lives
+  // in the page and the boundary below is the one the test has always used.
+  const marks = await readClockMarks(page);
+  const pauseMark = findMark(marks, 'pause');
+  const resumeMark = findMark(marks, 'resume');
+  expect(pauseMark.paused).toBe(true);
+  expect(resumeMark.paused).toBe(false);
+  expect(pauseMark.tick).toBe(frozen.snapshot.tick);
+  expect(resumeMark.tick - pauseMark.tick).toBeLessThanOrEqual(6);
+  expect(resumeMark.waveTick - pauseMark.waveTick).toBeLessThanOrEqual(6);
+  // The remainder of the tick the pause interrupted is still there, so the accumulator is never
+  // negative and never holds a whole tick of product clock after the loop has spent what it can.
+  expect(pauseMark.accumulator).toBeGreaterThanOrEqual(0);
+  expect(pauseMark.accumulator).toBeLessThan(1 / frozen.tickRate);
+
+  // The same for the rate: the window is a second of the page's own clock, so the tick bounds below
+  // keep the meaning they always had instead of absorbing the round-trips around the wait.
+  await page.waitForFunction((from) => performance.now() - from >= 1000, resumeMark.at);
+  await markClock(page, 'after-1s');
+  const afterMark = findMark(await readClockMarks(page), 'after-1s');
+  const windowSeconds = (afterMark.at - resumeMark.at) / 1000;
+  // 20 ticks per second: the clock has to run on, but not faster than real time.
+  expect(afterMark.tick - resumeMark.tick).toBeGreaterThanOrEqual(12);
+  expect(afterMark.tick - resumeMark.tick).toBeLessThanOrEqual(30);
+  expect(windowSeconds).toBeLessThanOrEqual(1.5);
 
   const running = await readDebugOrThrow(page);
-  const advanced = running.snapshot.tick - resumed.snapshot.tick;
-  // 20 ticks per second: the clock has to run on, but not faster than real time.
-  expect(advanced).toBeGreaterThanOrEqual(12);
-  expect(advanced).toBeLessThanOrEqual(30);
   expect(running.snapshot.waveTick).toBeGreaterThan(frozen.snapshot.waveTick);
   expect(running.enemyPositions).not.toEqual(frozen.enemyPositions);
   expectProjectionMatchesSnapshot(running);
@@ -1663,6 +1740,91 @@ test('reproduces the same clip pose on the same tick after a restart', async ({ 
   console.log(
     `terminal reports: ${JSON.stringify(first.matchReports)} vs ${JSON.stringify(second.matchReports)}`,
   );
+});
+
+test('applies a recorded command on its own tick when a frame steps several ticks', async ({ page }) => {
+  test.setTimeout(180_000);
+  await page.goto('/');
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await waitForAssetsReady(page);
+
+  // The claim under test: replay reproduces the match whatever number of ticks a frame steps. The
+  // two runs therefore walk different tick lattices over the same recorded commands — two ticks per
+  // frame in the run that records them, and the product's five-tick clamp in the replay — and the
+  // terminal tick, the report and the pose may not move.
+  await setFrameDelta(page, QA_FIRST_RUN_FRAME_SECONDS);
+  await armDefendedWave(page);
+  await page.getByTestId('start-wave').click();
+  await page.waitForFunction(() => window.__ECHOES_DEBUG__?.snapshot.status === 'victory', undefined, {
+    timeout: 90_000,
+  });
+
+  const first = await readDebugOrThrow(page);
+  const firstPlan = await readCommandPlan(page);
+  expect(firstPlan).toHaveLength(placements.length + 1);
+  // In the run that recorded them, every command reached the core on the tick it was issued on.
+  firstPlan?.forEach((entry) => {
+    expect(entry.appliedTick, `${entry.type} recorded at ${entry.tick}`).toBe(entry.tick);
+  });
+
+  // The replay clock is chosen so that its step lattice provably skips one of the recorded ticks.
+  // On a loop free to step past a pending command that frame is the one that applies the command
+  // late and forks the run; on the fixed loop the same frame stops on the tick. It is verified
+  // rather than assumed, because a test that stays green on the unfixed loop is the exact failure
+  // this scenario exists to prevent.
+  const replayFrameSeconds = QA_FRAME_CANDIDATE_SECONDS.find((seconds) =>
+    firstPlan?.some((entry) => entry.tick > 0 && entry.tick % Math.round(seconds * first.tickRate) !== 0),
+  );
+  if (replayFrameSeconds === undefined) {
+    throw new Error(
+      `no multi-tick frame lattice skips a recorded tick of ${describePlan(firstPlan ?? [])}`,
+    );
+  }
+  const replayTicksPerFrame = Math.round(replayFrameSeconds * first.tickRate);
+  expect(replayTicksPerFrame).toBeGreaterThanOrEqual(2);
+
+  await setFrameDelta(page, replayFrameSeconds);
+  await page.getByTestId('restart-match').click();
+  await page.waitForFunction(() => window.__ECHOES_DEBUG__?.snapshot.status === 'victory', undefined, {
+    timeout: 90_000,
+  });
+  await waitForAssetsReady(page);
+
+  const second = await readDebugOrThrow(page);
+  const secondPlan = await readCommandPlan(page);
+  console.log(
+    `frames: ${Math.round(QA_FIRST_RUN_FRAME_SECONDS * first.tickRate)} ticks/frame in run 1, ` +
+      `${replayTicksPerFrame} in the replay\n` +
+      `plan run 1:  ${describePlan(firstPlan ?? [])}\n` +
+      `plan replay: ${describePlan(secondPlan ?? [])}\n` +
+      `terminal tick: ${first.matchReports[0]?.tick} -> ${second.matchReports[1]?.tick}`,
+  );
+
+  // The heart of it: every command reached the core on the tick it was recorded on.
+  secondPlan?.forEach((entry, index) => {
+    expect(entry.appliedTick, `command ${index} of the replay landed on tick ${entry.appliedTick}`).toBe(
+      entry.tick,
+    );
+  });
+  expect(second.matchReports).toHaveLength(2);
+  expect(second.matchReports[1]).toEqual(first.matchReports[0]);
+  expect(second.snapshot.tick).toBe(first.snapshot.tick);
+  expect(second.snapshot.gold).toBe(first.snapshot.gold);
+  expect(second.replaying).toBe(false);
+  expect(second.replayIndex).toBe(second.commandCount);
+
+  // The pose of the terminal tick is a function of that tick, so it is the same one.
+  const firstView = first.towerModels.find((view) => view.modelId === 'pulse-spire');
+  const secondView = second.towerModels.find((view) => view.modelId === 'pulse-spire');
+  expect(firstView?.clip).not.toBeNull();
+  expect(secondView?.entityId).toBe(firstView?.entityId);
+  expect(secondView?.clip?.phase).toBe(firstView?.clip?.phase);
+  expect(secondView?.clip?.time).toBeCloseTo(firstView?.clip?.time ?? Number.NaN, 6);
+  secondView?.clip?.pose.forEach((component, index) => {
+    expect(component).toBeCloseTo(firstView?.clip?.pose[index] ?? Number.NaN, 6);
+  });
+  logClip('clip at terminal tick, first run', first.snapshot.tick, firstView?.clip ?? null);
+  logClip('clip at terminal tick, replay', second.snapshot.tick, secondView?.clip ?? null);
 });
 
 test('refuses a model whose skeleton carries more bones than the budget allows', async ({ page }) => {

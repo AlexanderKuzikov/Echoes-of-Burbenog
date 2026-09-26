@@ -4,6 +4,24 @@
 
 Проект — оригинальная 3D Tower Defense игра с LLM-first рабочим процессом. Browser bootstrap, pure simulation core, vertical slice (pause/resume, replay по command log) и asset pipeline с генератором GLB, budgets, per-material IBL и skeletal animation приняты; текущий шаг — фаза 4, задача `0014` выдана кодовой сессии (P0, точность replay), на ней фаза закрывается. Текущий product scope — solo; multiplayer пока только учитывать в архитектурных seams.
 
+## Где искать файлы
+
+Рабочий каталог сессии — корень этого репозитория, `D:\GitHub\Echoes-of-Burbenog`. Все пути ниже
+относительные и от него; если сессия стартовала выше по дереву, относительные пути не резолвятся, а
+`AGENTS.md` может достаться соседний, из `D:\GitHub`, — это другой файл с общими правилами.
+
+- `AGENTS.md` — эти инструкции.
+- `docs/CONTEXT.md` — состояние проекта, журнал, открытые проблемы.
+- `docs/PLAN.md` — трекер штаба: брать только следующую `[ ]` задачу.
+- `docs/tasks/NNNN-<slug>.md` — задание текущей задачи; имя файла задаёт штаб, не искать наугад.
+- `docs/DECISIONS.md` — append-only решения, включая те, что объясняют «почему так».
+- `docs/ARCHITECTURE.md` — границы модулей и runtime contract.
+- `docs/screenshots/` — копии E2E-снимков, на которые ссылается `README.md`.
+
+Код и проверки: `src/main.ts` (client), `src/game-core/` (pure core, только чтение без отдельного
+решения), `src/asset-registry.ts`, `src/asset-budgets.ts`, `scripts/build-assets.ts` (генератор GLB),
+`scripts/check-simulation.ts` (core check), `tests/smoke.spec.ts` (Playwright E2E).
+
 ## Commands
 
 - Кодовые команды bootstrap: `npm run dev`, `npm test`, `npm run test:core`, `npm run typecheck`, `npm run build`, `npx playwright test`.
