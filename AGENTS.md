@@ -2,7 +2,7 @@
 
 ## Project
 
-Проект — оригинальная 3D Tower Defense игра с LLM-first рабочим процессом. Browser bootstrap, pure simulation core, vertical slice (pause/resume, replay по command log), asset pipeline с генератором GLB, budgets, per-material IBL, skeletal animation и сохранение матча приняты; текущий шаг — фаза 5, задача `0016` (экран входа и полный E2E) выдана кодовой сессии, на ней фаза закрывается. Текущий product scope — solo; multiplayer пока только учитывать в архитектурных seams.
+Проект — оригинальная 3D Tower Defense игра с LLM-first рабочим процессом. Browser bootstrap, pure simulation core, vertical slice (pause/resume, replay по command log), asset pipeline с генератором GLB, budgets, per-material IBL, skeletal animation, сохранение матча и экран входа приняты; текущий шаг — фаза 6, задача `0017` (authoritative session, транспорт SSE плюс POST) выдана кодовой сессии. Solo остаётся режимом по умолчанию; multiplayer теперь в работе, и второй реализации правил быть не может.
 
 ## Где искать файлы
 
