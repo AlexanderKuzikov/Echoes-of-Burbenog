@@ -646,9 +646,10 @@ test('reports defeat when an undefended wave reaches the core', async ({ page })
   await expect(page.getByTestId('match-result')).toHaveText('Core breached');
   await expect(page.getByTestId('viewport')).toHaveAttribute('data-phase', 'defeat');
 
-  // The result outranks the stale `Wave 1 started` command feedback.
+  // The result outranks the stale `Wave 1 started` command feedback, and the copy does
+  // not promise a different outcome than the deterministic restart can give.
   await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'terminal');
-  await expect(page.getByTestId('command-feedback')).toHaveText('Core breached · restart replays the same seed');
+  await expect(page.getByTestId('command-feedback')).toHaveText('Core breached · restart repeats this run exactly');
 
   await page.screenshot({ path: 'test-results/wave-combat-defeat.png', fullPage: true });
 });
@@ -756,7 +757,7 @@ test('restarts from the same seed and replays the recorded command log', async (
   expect(firstReport?.eventCounts.coreDamaged).toBe(0);
   expect(first.commandCount).toBe(placements.length + 1);
   await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'terminal');
-  await expect(page.getByTestId('command-feedback')).toHaveText('Sector secured · restart replays the same seed');
+  await expect(page.getByTestId('command-feedback')).toHaveText('Sector secured · restart repeats this run exactly');
 
   // Freeze the clock first so the restarted match can be inspected before the recorded
   // commands start landing on their original ticks.
@@ -782,6 +783,11 @@ test('restarts from the same seed and replays the recorded command log', async (
   expectProjectionMatchesSnapshot(restarted);
   await expect(page.getByTestId('match-result')).toBeHidden();
   await expect(page.getByTestId('viewport')).toHaveAttribute('data-replay', 'running');
+  await expect(page.getByTestId('viewport')).toHaveAttribute('data-paused', 'true');
+  // A replay that is also paused has to say so instead of showing one of the two states.
+  await expect(page.getByTestId('state-badge')).toBeVisible();
+  await expect(page.getByTestId('state-badge')).toHaveAttribute('data-state', 'paused-replay');
+  await expect(page.getByTestId('state-badge')).toHaveText('Replay paused · 0 / 4 commands');
   await expect(page.getByTestId('start-wave')).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Grove Lens' })).toBeDisabled();
   await expect(page.getByTestId('command-feedback')).toHaveText('Replaying recorded commands');
@@ -821,6 +827,100 @@ test('restarts from the same seed and replays the recorded command log', async (
   await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'terminal');
   await expect(page.getByTestId('match-result')).toHaveText('Sector secured');
   await page.screenshot({ path: 'test-results/vertical-slice-replay-victory.png', fullPage: true });
+});
+
+test('rejects commands injected during replay and keeps the recorded run identical', async ({ page }) => {
+  test.setTimeout(180_000);
+  await page.goto('/');
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+
+  const recordedCommands = placements.length + 1;
+  await armDefendedWave(page);
+  await page.getByTestId('start-wave').click();
+  await page.waitForFunction(() => window.__ECHOES_DEBUG__?.snapshot.status === 'victory', undefined, {
+    timeout: 90_000,
+  });
+
+  const first = await readDebugOrThrow(page);
+  expect(first.matchReports).toHaveLength(1);
+  const firstReport = first.matchReports[0];
+  expect(first.commandCount).toBe(recordedCommands);
+
+  // Freeze the clock so the replay is inspected at replayIndex 0, where a command that
+  // slipped past the guard would land on tick 0 and fork the run before it even starts.
+  await page.getByTestId('pause-toggle').click();
+  await page.getByTestId('restart-match').click();
+
+  const restarted = await readDebugOrThrow(page);
+  expect(restarted.paused).toBe(true);
+  expect(restarted.replaying).toBe(true);
+  expect(restarted.replayIndex).toBe(0);
+  expect(restarted.commandCount).toBe(recordedCommands);
+
+  const injectedPlacement = await page.evaluate(() =>
+    window.__ECHOES_DEBUG__?.dispatch({ type: 'placeTower', padId: 'pad-core', towerId: 'pulse-spire' }),
+  );
+  expect(injectedPlacement).toEqual({ accepted: false, reason: 'replay-in-progress' });
+  const injectedWave = await page.evaluate(() => window.__ECHOES_DEBUG__?.dispatch({ type: 'startWave' }));
+  expect(injectedWave).toEqual({ accepted: false, reason: 'replay-in-progress' });
+  // The real input path goes through the same choke point and is refused the same way.
+  await clickPad(page, 'pad-core');
+  await expect(page.getByTestId('start-wave')).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Pulse Spire' })).toBeDisabled();
+  await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-reason', 'replay-in-progress');
+
+  const afterInjection = await readDebugOrThrow(page);
+  expect(afterInjection.commandCount).toBe(recordedCommands);
+  expect(afterInjection.replayIndex).toBe(0);
+  expect(afterInjection.snapshot.tick).toBe(0);
+  expect(afterInjection.snapshot.status).toBe('preparation');
+  expect(afterInjection.snapshot.gold).toBe(startingGold);
+  expect(afterInjection.snapshot.pads['pad-core']).toBeNull();
+  expect(afterInjection.snapshot.pads['pad-east']).toBeNull();
+  expect(afterInjection.snapshot.towers).toEqual([]);
+  expect(afterInjection.rendered.towers).toBe(0);
+  expect(afterInjection.eventCounts).toEqual(emptyEventCounts());
+  expect(afterInjection.feedback).toEqual({
+    state: 'rejected',
+    message: 'Recorded run is replaying · commands are locked until it finishes',
+    reason: 'replay-in-progress',
+  });
+  expectProjectionMatchesSnapshot(afterInjection);
+
+  // Same guard once the replay is actually applying commands, where an extra entry would
+  // be re-applied out of tick order and shift every later command.
+  await page.getByTestId('pause-toggle').click();
+  await page.waitForFunction(() => {
+    const debug = window.__ECHOES_DEBUG__;
+    return (debug?.replayIndex ?? 0) > 0 && debug?.replaying === true;
+  });
+
+  const midResult = await page.evaluate(() =>
+    window.__ECHOES_DEBUG__?.dispatch({ type: 'placeTower', padId: 'pad-core', towerId: 'pulse-spire' }),
+  );
+  expect(midResult).toEqual({ accepted: false, reason: 'replay-in-progress' });
+  const midReplay = await readDebugOrThrow(page);
+  expect(midReplay.paused).toBe(false);
+  expect(midReplay.commandCount).toBe(recordedCommands);
+  expect(midReplay.replayIndex).toBeGreaterThan(0);
+  expect(midReplay.replayIndex).toBeLessThan(recordedCommands);
+  expect(midReplay.snapshot.pads['pad-core']).toBeNull();
+  expect(midReplay.snapshot.towers.some((tower) => tower.padId === 'pad-core')).toBe(false);
+
+  await page.waitForFunction(() => window.__ECHOES_DEBUG__?.snapshot.status === 'victory', undefined, {
+    timeout: 90_000,
+  });
+
+  const second = await readDebugOrThrow(page);
+  expect(second.commandCount).toBe(recordedCommands);
+  expect(second.matchReports).toHaveLength(2);
+  // The replayed match is bit-for-bit the run it reproduced, injections included not.
+  expect(second.matchReports[1]).toEqual(firstReport);
+  expect(second.snapshot.status).toBe('victory');
+  expect(second.snapshot.gold).toBe(victoryGold);
+  expect(second.snapshot.towers.every((tower) => tower.padId !== 'pad-core')).toBe(true);
+  expect(second.replaying).toBe(false);
+  expect(second.replayIndex).toBe(recordedCommands);
 });
 
 test('drops transient canvas effects under prefers-reduced-motion', async ({ page }) => {

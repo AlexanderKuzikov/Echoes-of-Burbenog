@@ -283,6 +283,13 @@ h1 {
   color: #c7e7df;
 }
 
+/* Paused replay keeps the paused amber outline and borrows the replay colour for the
+   label, so the badge never reads as either state alone. */
+.state-badge[data-state="paused-replay"] {
+  border-color: rgba(255, 197, 107, 0.55);
+  color: #c7e7df;
+}
+
 .combat-log {
   bottom: 20px;
   left: 22px;

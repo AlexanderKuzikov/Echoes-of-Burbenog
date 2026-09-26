@@ -2,7 +2,7 @@
 
 ## Project
 
-Проект — оригинальная 3D Tower Defense игра с LLM-first рабочим процессом. Browser bootstrap, pure simulation core, placement и combat presentation приняты; следующий шаг — pause/resume, replay и приёмка vertical slice. Текущий product scope — solo; multiplayer пока только учитывать в архитектурных seams.
+Проект — оригинальная 3D Tower Defense игра с LLM-first рабочим процессом. Browser bootstrap, pure simulation core, placement, combat presentation и vertical slice (pause/resume, replay по command log, regression) приняты; следующий шаг — фаза 4: asset pipeline и 3D polish. Текущий product scope — solo; multiplayer пока только учитывать в архитектурных seams.
 
 ## Commands
 

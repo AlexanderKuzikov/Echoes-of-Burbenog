@@ -1,6 +1,6 @@
 # Echoes of Burbenog — CONTEXT
 
-> Последнее обновление: 2026-09-26 08:20
+> Последнее обновление: 2026-09-26 09:05
 
 ## Статус
 
@@ -16,14 +16,14 @@
 | Build palette | Content-bound | Кнопки хранят `data-tower-id`, selection идёт через `aria-pressed`; canvas-клик по pad шлёт `placeTower` тем же `dispatchCommand`, что и debug |
 | Combat presentation | Событийная | `drainEvents` даёт typed-счётчики, bounded combat log и transient 3D feedback: наведение и вспышка башни (`towerFired`), burst-ring (`enemyKilled`), flash core (`coreDamaged`); события не меняют state |
 | Pause/resume | Проверен | Pause — только control часов: `step()` не вызывается, accumulator хранит дробную часть, поэтому tick и позиции замерли, а resume продолжил с того же тика без fast-forward; команды при паузе доходят до core |
-| Replay | Требует fix | Pause/resume проверены; replay-инвариант нарушается только через QA dispatch во время replay |
-| Terminal feedback | Требует polish | После victory/defeat приоритет результата работает; misleading replay/restart copy остаётся на исправление |
+| Replay | Проверен | Pause/resume проверены; replay-инвариант держит `dispatchPlayerCommand`: во время replay любая player-команда (pad-клик, Start Wave, QA seam) отклоняется с `replay-in-progress`, не пишется в log и не доходит до core; `EOB-015` закрыт |
+| Terminal feedback | Проверен | После victory/defeat приоритет результата работает; copy правдивый — `restart repeats this run exactly`, а не обещание другого исхода; blocked-copy во время replay не предлагает «другой ра» |
 | Preparation display | Правдивый | При `preparationTicksLeft === 0` phase clock показывает `Awaiting start`, а не замороженный `T-00:00`; решение по `EOB-013` принято в пользу display |
 | Reduced motion | Проверен | `prefers-reduced-motion: reduce` гасит burst-ring, наведение и вспышку башни, scale-пульс core и ambient-анимацию; позиции, health bars, материалы, combat log и HUD остаются читаемыми |
 | Multiplayer | Отложен | Solo-first; session и protocol seams сохраняются |
 | Asset pipeline | Не начат | Первые assets — собственные схематичные placeholder-модели |
 | Desktop packaging | Отложен | Wails/Go после стабилизации browser client |
-| QA/agent harness | На исправлении | 0008 вернулся на replay-инвариант и terminal/restart polish |
+| QA/agent harness | Проверен | 9 Playwright-сценариев, включая regression на QA-инъекцию во время replay: log не растёт, два terminal-отчёта совпадают; красный прогон без guard подтверждён |
 
 ## Глоссарий
 
@@ -55,7 +55,6 @@
 | EOB-011 | P2 | `favicon.ico` даёт 404 в browser console; отдельная задача на favicon или inline data-URL icon |
 | EOB-012 | P2 | Усилить E2E: content-bound selectors, entityId-сопоставление позиций, реальные route-счётчики, typed event и console assertions |
 | EOB-014 | P2 | Разнести монолитный `src/main.ts` на presentation/input/HUD модули после приёмки vertical slice |
-| EOB-015 | P1 | Централизовать `replaying` guard в `dispatchPlayerCommand`, запретить QA-инъекции во время replay и явно показывать paused+replay state |
 
 ## Журнал работ
 
@@ -84,6 +83,7 @@
 | 2026-09-26 | Выдано задание `0008` кодовой сессии: pause/resume, replay и приёмка vertical slice |
 | 2026-09-26 | Кодовая сессия сдала `0008`: Pause как control часов без fast-forward и drift, Restart с replay tick-упорядоченного command log по тому же seed, terminal feedback с приоритетом над command feedback, `Awaiting start` вместо `T-00:00`, `prefers-reduced-motion` без transient-эффектов; typecheck, build, test:core и 8 Playwright прошли, два terminal-отчёта прогона и replay совпали (victory, tick 304, gold 229); screenshots paused/replay/reduced-motion прочитаны; core без изменений; задача на проверке штаба |
 | 2026-09-26 | Штаб вернул `0008` на точечный fix: replay-инвариант через QA seam и paused+replay presentation; `0009` не выдаётся |
+| 2026-09-26 | Кодовая сессия закрыла точечный fix `0008`: guard `replaying` перенесён в `dispatchPlayerCommand` (pad-клик, Start Wave и QA seam отклоняются одной причиной `replay-in-progress`, log и core не трогаются), replay/restart copy заменён на правдивый, badge получил состояние `paused-replay`; добавлен regression-тест на QA-инъекцию во время replay — с временно убранным guard он красный; typecheck, build, test:core и 9 Playwright (41 s) зелёные, `repeat-each=2` по replay — 4/4; core без изменений; `0008` принята |
 
 ## Структура проекта
 
@@ -96,14 +96,14 @@
 - `docs/ARCHITECTURE.md` — архитектура и границы модулей.
 - `docs/PLAN.md` — этапы разработки и критерии готовности.
 - `Old-Burbenog/BURBENOG-TD-RESEARCH.md` — исследовательский brief по оригинальной карте и рекомендации для ремейка.
-- `src/main.ts` — browser bootstrap, presentation entry point, snapshot projection, build palette, pad picking, запуск волны, combat presentation, pause/resume, replay по command log и reduced-motion guard.
+- `src/main.ts` — browser bootstrap, presentation entry point, snapshot projection, build palette, pad picking, запуск волны, combat presentation, pause/resume, replay по command log с guard в `dispatchPlayerCommand` и reduced-motion guard.
 - `src/game-core/` — pure deterministic simulation, content validation и training scenario.
 - `scripts/check-simulation.ts` — один runnable core check.
-- `tests/smoke.spec.ts` — browser E2E: bootstrap smoke, snapshot binding contract, placement contract, полный цикл до victory и defeat, pause/resume без drift, replay determinism, prefers-reduced-motion.
+- `tests/smoke.spec.ts` — browser E2E: bootstrap smoke, snapshot binding contract, placement contract, полный цикл до victory и defeat, pause/resume без drift, replay determinism, отклонение команд во время replay, prefers-reduced-motion.
 - `docs/tasks/0005-client-snapshot-binding.md` — принятое задание.
 - `docs/tasks/0006-build-pad-placement.md` — принятое задание.
 - `docs/tasks/0007-wave-combat-presentation.md` — принятое задание.
-- `docs/tasks/0008-vertical-slice-acceptance.md` — задание на точечный fix перед приёмкой.
+- `docs/tasks/0008-vertical-slice-acceptance.md` — принятое задание (включая точечный fix).
 
 Планируемая:
 

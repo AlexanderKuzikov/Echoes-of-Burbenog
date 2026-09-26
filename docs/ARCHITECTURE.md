@@ -79,6 +79,7 @@ Snapshot restore и command-log replay в core сознательно отлож
 - Preparation clock показывает `Awaiting start`, когда `preparationTicksLeft === 0`: content prep-окно короткое, и замороженный `T-00:00` читался как живой таймер.
 - Pause — только control часов клиента: `step()` не вызывается, accumulator сохраняет дробную часть, поэтому resume продолжает с того же тика без fast-forward и drift. Commands при паузе продолжают доходить до core.
 - Restart — client-side QA replay: новый `Simulation` из того же `config` плюс tick-упорядоченный `commandLog`, который проигрывается тем же `dispatchCommand` на исходных тиках. Пока replay идёт, player-команды заблокированы. Persistence и network replay в это не входят.
+- `dispatchPlayerCommand` — единственный путь player-команды и в `commandLog`, и в core, поэтому replay-guard (`replaying`) живёт там же: во время replay команда отклоняется с client-причиной `replay-in-progress`, не пишется в log и не доходит до core. Pad-клик, Start Wave и QA seam `dispatch` не могут разойтись в правилах.
 - Каждый terminal-матч пишет один `matchReport` (status, tick, gold, integrity, leaks, `eventCounts`), поэтому повторный прогон сравнивается с исходным напрямую.
 - Terminal feedback имеет приоритет над command feedback: после victory/defeat строка статуса описывает результат, а не последнюю команду.
 - Events из `drainEvents` — только transient presentation: typed-счётчики, bounded combat log, вспышка и наведение башни, burst-ring убийства, flash core. События не меняют state и не используются как источник значений.

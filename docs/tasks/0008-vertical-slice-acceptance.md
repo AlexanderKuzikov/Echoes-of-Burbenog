@@ -1,9 +1,9 @@
 # 0008 — Принять vertical slice: pause/resume, seed replay и regression
 
-> Статус: на исправлении
+> Статус: принята
 > Приоритет: P0
 > Фаза: 3 — Первый визуальный vertical slice
-> Следующая приёмка: после replay-инварианта и terminal/restart polish
+> Приёмка: replay-инвариант и terminal/restart polish закрыты точечным fix
 
 ## Контекст
 
@@ -77,7 +77,7 @@ E2E должен использовать реальные click по pads и St
 
 ## Отчёт кодовой сессии
 
-**Статус: на проверке.** Штаб не принимал задачу; `[x]` в `docs/PLAN.md` и статус `принята` проставляются после приёмки.
+**Статус сдачи: на проверке** (первая сдача версии 1; вердикт и доработки — в отчёте по точечному fix ниже). Штаб не принимал задачу в этой части; `[x]` в `docs/PLAN.md` и статус `принята` проставлены после приёмки.
 
 ### Изменённые файлы
 
@@ -135,3 +135,46 @@ eventCounts: towerPlaced 3, waveStarted 1, enemySpawned 16,
 - Required fix: перенести guard в `dispatchPlayerCommand`, покрыть его тестом инъекции во время replay и проверить неизменность command log/match report.
 - Required polish: исправить misleading text про «restart again to change the run» и сделать состояние `replaying + paused` явным в badge/status.
 - После fix повторно прогнать `typecheck`, `build`, `npm test` и 0008 screenshots; `0009` до этого не выдаётся.
+
+## Отчёт сессии по точечному fix
+
+**Статус: исправлено, task verdict — принята.**
+
+### Root cause и fix
+
+- `dispatchPlayerCommand` — единственный путь и в `commandLog`, и в core для player-команд, поэтому replay-guard перенесён туда и удалён из `attemptPlacement`/`attemptWaveStart`. Пока `replaying`, команда возвращает `{ accepted: false, reason: 'replay-in-progress' }`, не пишется в log и не доходит до core — одинаково для pad-клика, Start Wave и QA seam.
+- Вызывающие только докладывают core-отказы и не перетирают feedback guard-а; pad не мигает при replay-отказе, потому что build не доходил до проверки.
+- Copy: blocked-feedback `Recorded run is replaying · commands are locked until it finishes` вместо ложного «restart again to change the run»; terminal-feedback `Sector secured / Core breached · restart repeats this run exactly` вместо «restart replays the same seed», который на defeat читался как шанс на другой исход.
+- Presentation: badge различает `paused + replay` — `data-state="paused-replay"`, текст `Replay paused · n / m commands`, amber outline paused и teal label replay. `data-paused`/`data-replay` на viewport не менялись: пауза и replay — независимые часы.
+- Core не менялся, `package.json` не менялся, зависимостей нет.
+
+### Regression-тест
+
+`tests/smoke.spec.ts` — «rejects commands injected during replay and keeps the recorded run identical»:
+
+- на paused replay (`replayIndex 0`, tick 0) QA-инъекция `placeTower pad-core` и `startWave` возвращают `replay-in-progress`; реальный canvas-клик по `pad-core` отклоняется тем же кодом; `commandCount` остаётся 4, gold 220, `pads['pad-core']` и `pads['pad-east']` пусты, `towers` пуст, `eventCounts` пустые, `feedback.state` — `rejected`;
+- в середине replay (`0 < replayIndex < 4`) повторная инъекция снова отклоняется, log не растёт, башни на `pad-core` не появляется;
+- после terminal оба `matchReports` совпадают полностью, `commandCount` = 4, победный gold и статус те же.
+
+Красный прогон подтверждён: с временно убранным guard тест падает на первой же инъекции (`accepted: true` вместо `replay-in-progress`).
+
+### Команды и результат
+
+- `npm run typecheck` — ok.
+- `npm run build` — ok.
+- `npm run test:core` — ok: `simulation check: ok`, victory tick 323, gold 229.
+- `npm test` (9 Playwright, 6 workers) — 9/9 ok, 41 s.
+- `npx playwright test --repeat-each=2 -g "restarts from the same seed|injected during replay"` — 4/4 ok, 36 s.
+- Playwright шёл через `PLAYWRIGHT_EXECUTABLE_PATH` на локальный `chromium-1208`: bundled headless shell 1243 не установлен, путь в проекте не сохранён.
+
+### Screenshots
+
+- `test-results/vertical-slice-replay-reset.png` — paused replay читается однозначно: badge `REPLAY PAUSED · 0 / 4 COMMANDS`, amber outline viewport, `RESUME`, палитра и Start Wave disabled, aether 220.
+- `test-results/wave-combat-defeat.png` — terminal copy `CORE BREACHED · RESTART REPEATS THIS RUN EXACTLY` вместо устаревшего command feedback.
+- `test-results/vertical-slice-paused.png`, `vertical-slice-replay-victory.png`, `vertical-slice-reduced-motion.png`, `wave-combat-midwave.png`, `wave-combat-victory.png`, `build-pad-placement.png` — композиция не пострадала.
+
+### За пределами fix
+
+- Разбивка `src/main.ts` на `src/client/` (`EOB-014`), console-assertions и content-bound selectors (`EOB-012`).
+- Session-level replay и server-owned причины отказа вместо client-guard (`EOB-010`, `0016`).
+- Favicon (`EOB-011`); `0009` не выдавалась.

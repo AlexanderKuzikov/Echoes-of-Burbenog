@@ -628,8 +628,8 @@ let coreDamagedUntil = 0;
 let snapshot = simulation.getSnapshot();
 
 const terminalFeedbackLabels: Record<'victory' | 'defeat', string> = {
-  victory: 'Sector secured · restart replays the same seed',
-  defeat: 'Core breached · restart replays the same seed',
+  victory: 'Sector secured · restart repeats this run exactly',
+  defeat: 'Core breached · restart repeats this run exactly',
 };
 
 const syncHud = () => {
@@ -650,9 +650,11 @@ const syncHud = () => {
   pauseToggle.setAttribute('aria-pressed', String(paused));
   viewportShell.dataset.paused = String(paused);
   viewportShell.dataset.replay = replaying ? 'running' : 'idle';
-  stateBadge.dataset.state = replaying ? 'replay' : paused ? 'paused' : 'idle';
+  // Pause and replay are independent clocks, so the badge has to name both at once.
+  stateBadge.dataset.state = replaying ? (paused ? 'paused-replay' : 'replay') : paused ? 'paused' : 'idle';
   if (replaying) {
-    stateBadge.textContent = `Replay · ${replayIndex} / ${commandLog.length} commands`;
+    const progress = `${replayIndex} / ${commandLog.length} commands`;
+    stateBadge.textContent = paused ? `Replay paused · ${progress}` : `Replay · ${progress}`;
     stateBadge.hidden = false;
   } else if (paused) {
     stateBadge.textContent = 'Paused';
@@ -781,9 +783,19 @@ const dispatchCommand = (command: Command): CommandResult => {
   return result;
 };
 
+const replayBlockedReason = 'replay-in-progress';
+const replayBlockedFeedback = 'Recorded run is replaying · commands are locked until it finishes';
+
 // Player intent is logged with the tick it was issued on. Seed plus the tick-ordered
 // log is the whole input of a match, so replaying the log on a fresh core reproduces it.
+// This is also the only place that may append to the log, so it carries the replay guard:
+// while a replay is running nothing outside `applyReplayPlan` can fork the run, no matter
+// whether the command arrives from a pad click, Start Wave or the QA seam.
 const dispatchPlayerCommand = (command: Command): CommandResult => {
+  if (replaying) {
+    setFeedback('rejected', replayBlockedFeedback, replayBlockedReason);
+    return { accepted: false, reason: replayBlockedReason };
+  }
   commandLog.push({ tick: snapshot.tick, command });
   return dispatchCommand(command);
 };
@@ -1040,13 +1052,7 @@ const flashPadError = (padId: string) => {
   }
 };
 
-const replayBlockedFeedback = 'Replay in progress · restart again to change the run';
-
 const attemptPlacement = (padId: string) => {
-  if (replaying) {
-    setFeedback('rejected', replayBlockedFeedback, 'replay-in-progress');
-    return;
-  }
   const result = dispatchPlayerCommand({ type: 'placeTower', padId, towerId: selectedTowerId });
   const name = towerDefinitions.get(selectedTowerId)?.name ?? selectedTowerId;
   if (result.accepted) {
@@ -1054,6 +1060,11 @@ const attemptPlacement = (padId: string) => {
     return;
   }
   const reason = result.reason ?? 'rejected';
+  if (reason === replayBlockedReason) {
+    // The guard already explained that the recorded run owns the core; a pad flash
+    // would claim the core rejected a build it never saw.
+    return;
+  }
   flashPadError(padId);
   setFeedback('rejected', rejectionMessages[reason] ?? `Rejected: ${reason}`, reason);
 };
@@ -1066,16 +1077,15 @@ renderer.domElement.addEventListener('click', (event) => {
 });
 
 const attemptWaveStart = () => {
-  if (replaying) {
-    setFeedback('rejected', replayBlockedFeedback, 'replay-in-progress');
-    return;
-  }
   const result = dispatchPlayerCommand({ type: 'startWave' });
   if (result.accepted) {
     setFeedback('accepted', `Wave ${snapshot.waveIndex + 1} started`);
     return;
   }
   const reason = result.reason ?? 'rejected';
+  if (reason === replayBlockedReason) {
+    return;
+  }
   setFeedback('rejected', rejectionMessages[reason] ?? `Rejected: ${reason}`, reason);
 };
 

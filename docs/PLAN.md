@@ -2,7 +2,7 @@
 
 > Веду я (штаб). Каждый пункт — одно будущее задание кодовой сессии: отдельно сдаётся, отдельно тестируется и отдельно откатывается.
 > Статусы: `[ ]` — не начато или сдано и ждёт приёмки, `[x]` — принято штабом после проверки. Номера заданий сквозные.
-> Следующая задача: `0008` — сдана кодовой сессией, ждёт приёмки штаба. Текущий этап: первый визуальный vertical slice.
+> Следующая задача: `0009` — не выдана, ждёт решения штаба. Текущий этап: фаза 3 закрыта, фаза 4 (asset pipeline) не начата.
 
 ## Принципы
 
@@ -20,7 +20,7 @@
 | 0. Repository и contracts | Принята | 0002 — visual identity и scope |
 | 1. Browser bootstrap | Принята | 0003 — Three.js scene и QA |
 | 2. Pure simulation core | Принята | 0004 — deterministic core |
-| 3. Первый визуальный vertical slice | В работе | 0008 — pause/replay и приёмка slice; сдана, ждёт приёмки |
+| 3. Первый визуальный vertical slice | Принята | 0008 — pause/replay и приёмка slice; принят после точечного fix |
 | 4. Asset pipeline и 3D polish | Ожидает | — |
 | 5. Offline singleplayer | Ожидает | — |
 | 6. Local cooperative mode | Ожидает | — |
@@ -41,14 +41,15 @@
 
 - [x] 0004 — Реализовать pure core: commands, state, events, fixed tick, seeded RNG, маршруты, волны, economy и win/lose (принято: core scenario, two-wave determinism, focused checks и review)
 
-## Фаза 3 — Первый визуальный vertical slice — следующая
+## Фаза 3 — Первый визуальный vertical slice — принята
 
 - [x] 0005 — Связать `MatchSnapshot` с Three.js objects: синхронизировать core, build pads, towers и enemies (принято штабом: typecheck, build, core check, Playwright snapshot contract до victory, screenshots и независимый review; blockers — 0)
 - [x] 0006 — Сделать placement по build pads: выбор tower, command в core, стоимость и занятость pad (принято штабом: typecheck, build, test:core, 3 Playwright, реальные canvas-клики, screenshot и независимый review; blockers — 0; follow-up тестов — `EOB-012`)
 - [x] 0007 — Подключить запуск волны, движение enemies, targeting, damage и win/lose к HUD (принято штабом: typecheck, build, test:core, 5 Playwright, victory и defeat реальными кликами, typed event counts, 3 screenshot и независимый review; blockers — 0; follow-ups — `EOB-012`/`EOB-013`)
-- [ ] 0008 — Принять vertical slice: pause/resume, seed replay, core check, Playwright E2E и screenshot review (возвращена на исправление: replay-инвариант и terminal/restart polish; критерий: все проверки зелёные, визуальная композиция читаема)
+- [x] 0008 — Принять vertical slice: pause/resume, seed replay, core check, Playwright E2E и screenshot review (принято штабом после точечного fix; критерий: все проверки зелёные, визуальная композиция читаема)
   - Кодовая сессия сдала `0008`: Pause как control часов без fast-forward и drift, Restart с replay tick-упорядоченного command log по тому же seed, terminal feedback с приоритетом над command feedback, `Awaiting start` вместо `T-00:00`, `prefers-reduced-motion` без transient-эффектов; typecheck, build, test:core и 8 Playwright прошли, два terminal-отчёта прогона и replay совпали (victory, tick 304, gold 229); screenshots paused/replay/reduced-motion прочитаны; core без изменений.
   - Штаб вернул задачу на точечный fix: `dispatchPlayerCommand` должен блокировать QA-инъекции во время replay, а misleading replay/restart text и paused+replay badge должны быть исправлены. `0009` не выдаётся.
+  - Точечный fix сдан: `replaying`-guard живёт в `dispatchPlayerCommand` и закрывает pad-клик, Start Wave и QA seam одним кодом с client-причиной `replay-in-progress`; blocked и terminal copy больше не обещают другой исход; badge получил состояние `paused-replay` с текстом `Replay paused · n / m`. Новый Playwright-сценарий инъекции на tick 0 и в середине replay держит `commandCount` = 4 и два идентичных `matchReports`; с временно убранным guard тест красный. `typecheck`, `build`, `test:core` (tick 323, gold 229) и 9 Playwright (41 s) зелёные, `repeat-each=2` по replay — 4/4; screenshots replay-reset и defeat перечитаны. Core без изменений.
 
 ## Фаза 4 — Asset pipeline и 3D polish — ожидает
 
