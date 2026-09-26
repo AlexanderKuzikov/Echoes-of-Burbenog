@@ -1,6 +1,6 @@
 # Echoes of Burbenog — CONTEXT
 
-> Последнее обновление: 2026-09-26 06:26
+> Последнее обновление: 2026-09-26 07:40
 
 ## Статус
 
@@ -11,12 +11,12 @@
 | Документация | Базовая завершена | Созданы README, инструкции, архитектура, решения и план |
 | Целевая платформа | Зафиксирована | Windows 10/11; performance budgets уточняются |
 | Gameplay prototype | Bootstrap + core проверены | 3D-ready сцена, pure simulation, schematic build pads и базовый HUD |
-| Client | Bootstrap проверен | TypeScript + Three.js + Vite; simulation integration — следующий этап |
+| Client | Привязан к core | Один `Simulation` из training scenario; сцена, pads, path, core, towers и enemies строятся из `MatchSnapshot`; ручных tower/enemy массивов нет |
 | Simulation | Проверен | Pure core: commands, state, events, fixed tick, seeded RNG, wave transitions |
 | Multiplayer | Отложен | Solo-first; session и protocol seams сохраняются |
 | Asset pipeline | Не начат | Первые assets — собственные схематичные placeholder-модели |
 | Desktop packaging | Отложен | Wails/Go после стабилизации browser client |
-| QA/agent harness | Проверен | Core scenario, typecheck, build, Playwright E2E и screenshot review прошли |
+| QA/agent harness | Проверен | Core scenario, typecheck, build, Playwright E2E, snapshot contract и screenshot review прошли |
 
 ## Глоссарий
 
@@ -45,6 +45,7 @@
 | EOB-008 | P1 | Зафиксировать лицензию и правила использования внешних ассетов |
 | EOB-009 | P1 | Решить, остаётся ли Go/Wails только упаковкой или также используется для dedicated server |
 | EOB-010 | P1 | Перед session layer выбрать replay strategy: command log + seed или restore из snapshot |
+| EOB-011 | P2 | `favicon.ico` даёт 404 в browser console; отдельная задача на favicon или inline data-URL icon |
 
 ## Журнал работ
 
@@ -62,6 +63,7 @@
 | 2026-09-25 | Реализован и проверен pure simulation core; добавлены content validation, wave transitions и focused scenario checks |
 | 2026-09-26 | План переведён в формат штаба с сквозными заданиями и отметками `[x]/[ ]`; следующая задача `0005` |
 | 2026-09-26 | Выдано задание `0005` кодовой сессии: привязка `MatchSnapshot` к Three.js client |
+| 2026-09-26 | Принято задание `0005`: client синхронизируется с `MatchSnapshot`, сцена строится из content, HUD берёт значения из snapshot; Playwright проверяет projection до victory |
 
 ## Структура проекта
 
@@ -74,11 +76,11 @@
 - `docs/ARCHITECTURE.md` — архитектура и границы модулей.
 - `docs/PLAN.md` — этапы разработки и критерии готовности.
 - `Old-Burbenog/BURBENOG-TD-RESEARCH.md` — исследовательский brief по оригинальной карте и рекомендации для ремейка.
-- `src/main.ts` — browser bootstrap и presentation entry point.
+- `src/main.ts` — browser bootstrap, presentation entry point и snapshot projection.
 - `src/game-core/` — pure deterministic simulation, content validation и training scenario.
 - `scripts/check-simulation.ts` — один runnable core check.
-- `tests/smoke.spec.ts` — browser E2E smoke test.
-- `docs/tasks/0005-client-snapshot-binding.md` — задание для следующей кодовой сессии.
+- `tests/smoke.spec.ts` — browser E2E: bootstrap smoke и snapshot binding contract.
+- `docs/tasks/0005-client-snapshot-binding.md` — принятое задание.
 
 Планируемая:
 

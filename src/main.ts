@@ -1,11 +1,50 @@
 import * as THREE from 'three';
+import { TICK_RATE, createSimulation, createTrainingScenario } from './game-core/index.ts';
+import type { Command, CommandResult, MatchSnapshot } from './game-core/index.ts';
 import './styles.css';
+
+type RenderCounters = {
+  pads: number;
+  towers: number;
+  enemies: number;
+  routeSegments: number;
+};
 
 type DebugState = {
   ready: boolean;
   renderer: string;
-  objectCount: number;
   camera: string;
+  seed: number;
+  tickRate: number;
+  mapId: string;
+  routeIds: string[];
+  padIds: string[];
+  waveCount: number;
+  eventsDrained: number;
+  snapshot: MatchSnapshot;
+  dispatch: (command: Command) => CommandResult;
+  readonly objectCount: number;
+  readonly rendered: RenderCounters;
+  readonly towerPositions: Array<{ x: number; z: number }>;
+  readonly enemyPositions: Array<{ x: number; z: number }>;
+};
+
+type PadView = {
+  id: string;
+  base: THREE.Mesh;
+  ring: THREE.Mesh;
+  occupied: boolean;
+};
+
+type TowerView = {
+  group: THREE.Group;
+  crystal: THREE.Mesh;
+};
+
+type EnemyView = {
+  group: THREE.Group;
+  body: THREE.Mesh;
+  healthFill: THREE.Mesh;
 };
 
 declare global {
@@ -17,10 +56,19 @@ declare global {
 const sceneMount = document.querySelector<HTMLDivElement>('#scene');
 const statusLabel = document.querySelector<HTMLSpanElement>('[data-testid="scene-status"]');
 const selectionStatus = document.querySelector<HTMLElement>('[data-testid="selection-status"]');
+const goldValue = document.querySelector<HTMLElement>('[data-testid="gold-value"]');
+const integrityValue = document.querySelector<HTMLElement>('[data-testid="core-integrity"]');
+const waveValue = document.querySelector<HTMLElement>('[data-testid="wave-status"]');
 
-if (!sceneMount || !statusLabel || !selectionStatus) {
+if (!sceneMount || !statusLabel || !selectionStatus || !goldValue || !integrityValue || !waveValue) {
   throw new Error('Bootstrap DOM is incomplete');
 }
+
+const config = createTrainingScenario();
+const simulation = createSimulation(config);
+const padDefinitions = new Map(config.map.buildPads.map((pad) => [pad.id, pad]));
+const waveCount = config.waves.length;
+const STEP_SECONDS = 1 / TICK_RATE;
 
 const renderer = new THREE.WebGLRenderer({
   antialias: true,
@@ -68,12 +116,12 @@ const groundMaterial = new THREE.MeshStandardMaterial({
   roughness: 0.92,
   metalness: 0.04,
 });
-const ground = new THREE.Mesh(new THREE.PlaneGeometry(18, 12), groundMaterial);
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(config.map.width, config.map.depth), groundMaterial);
 ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
 scene.add(ground);
 
-const grid = new THREE.GridHelper(18, 18, 0x3d7376, 0x24464e);
+const grid = new THREE.GridHelper(config.map.width, config.map.width, 0x3d7376, 0x24464e);
 grid.position.y = 0.012;
 scene.add(grid);
 
@@ -83,62 +131,78 @@ const pathMaterial = new THREE.MeshStandardMaterial({
   emissiveIntensity: 0.65,
   roughness: 0.82,
 });
-const pathCurve = new THREE.CatmullRomCurve3([
-  new THREE.Vector3(-6.6, 0.08, -2.9),
-  new THREE.Vector3(-4.5, 0.08, -2.2),
-  new THREE.Vector3(-2.8, 0.08, -0.4),
-  new THREE.Vector3(-1.1, 0.08, 1.1),
-  new THREE.Vector3(1.2, 0.08, 1.3),
-  new THREE.Vector3(3.2, 0.08, 0.2),
-  new THREE.Vector3(4.7, 0.08, -1.9),
-  new THREE.Vector3(6.5, 0.08, -2.8),
-]);
-const path = new THREE.Mesh(new THREE.TubeGeometry(pathCurve, 72, 0.34, 8, false), pathMaterial);
-path.receiveShadow = true;
-scene.add(path);
+const PATH_Y = 0.08;
+const routeSegmentCount = config.map.routes.reduce((total, route) => total + route.points.length - 1, 0);
+for (const [routeIndex, route] of config.map.routes.entries()) {
+  for (let index = 1; index < route.points.length; index += 1) {
+    const start = route.points[index - 1];
+    const end = route.points[index];
+    const deltaX = end.x - start.x;
+    const deltaZ = end.z - start.z;
+    const length = Math.hypot(deltaX, deltaZ);
+    const segment = new THREE.Mesh(new THREE.BoxGeometry(length, 0.08, 0.62), pathMaterial);
+    segment.position.set((start.x + end.x) / 2, PATH_Y + routeIndex * 0.004, (start.z + end.z) / 2);
+    // Three.js rotates local +X toward -Z, so the Y angle is negated.
+    segment.rotation.y = Math.atan2(-deltaZ, deltaX);
+    segment.receiveShadow = true;
+    segment.name = `route:${route.id}`;
+    scene.add(segment);
+  }
+}
 
 const padGeometry = new THREE.CylinderGeometry(0.62, 0.72, 0.14, 6);
-const padMaterial = new THREE.MeshStandardMaterial({
-  color: 0x2b7073,
-  emissive: 0x0b3135,
-  emissiveIntensity: 0.9,
-  roughness: 0.48,
-  metalness: 0.18,
-});
-const padPositions = [
-  new THREE.Vector3(-4.8, 0.12, -0.9),
-  new THREE.Vector3(-2.4, 0.12, 2.3),
-  new THREE.Vector3(0.1, 0.12, -1.7),
-  new THREE.Vector3(2.4, 0.12, 2.1),
-  new THREE.Vector3(4.8, 0.12, 0.7),
-];
-for (const position of padPositions) {
-  const pad = new THREE.Mesh(padGeometry, padMaterial);
-  pad.position.copy(position);
-  pad.castShadow = true;
-  pad.receiveShadow = true;
-  scene.add(pad);
+const padViews = new Map<string, PadView>();
+for (const pad of config.map.buildPads) {
+  const group = new THREE.Group();
+  group.position.set(pad.position.x, 0, pad.position.z);
+  group.name = `pad:${pad.id}`;
+
+  const base = new THREE.Mesh(
+    padGeometry,
+    new THREE.MeshStandardMaterial({
+      color: 0x2b7073,
+      emissive: 0x0b3135,
+      emissiveIntensity: 0.9,
+      roughness: 0.48,
+      metalness: 0.18,
+    }),
+  );
+  base.position.y = 0.12;
+  base.castShadow = true;
+  base.receiveShadow = true;
+  group.add(base);
 
   const ring = new THREE.Mesh(
     new THREE.RingGeometry(0.72, 0.8, 6),
     new THREE.MeshBasicMaterial({ color: 0x6ee2cf, transparent: true, opacity: 0.48, side: THREE.DoubleSide }),
   );
   ring.rotation.x = -Math.PI / 2;
-  ring.position.set(position.x, 0.205, position.z);
-  scene.add(ring);
+  ring.position.y = 0.205;
+  group.add(ring);
+
+  scene.add(group);
+  padViews.set(pad.id, { id: pad.id, base, ring, occupied: false });
 }
 
-const animatedTowers: Array<{ group: THREE.Group; crystal: THREE.Mesh }> = [];
-const animatedEnemies: Array<{ group: THREE.Group; healthFill: THREE.Mesh }> = [];
+const towerVisuals: Record<string, { accent: number; roof: number; scale: number }> = {
+  'pulse-spire': { accent: 0x6ee2cf, roof: 0xd29b62, scale: 1 },
+  'grove-lens': { accent: 0x8cd6ff, roof: 0x8d6bb5, scale: 0.95 },
+  'frost-relay': { accent: 0xffc56b, roof: 0xbe6b55, scale: 1.05 },
+};
+const unknownTowerVisual = { accent: 0x9fd6c8, roof: 0x5b7f86, scale: 1 };
 
-const createTower = (x: number, z: number, accent: number, roofColor: number) => {
+const towerViews = new Map<number, TowerView>();
+const createTowerView = (towerId: string): TowerView => {
+  const visual = towerVisuals[towerId] ?? unknownTowerVisual;
   const group = new THREE.Group();
-  group.position.set(x, 0.14, z);
+  group.scale.setScalar(visual.scale);
+  group.name = `tower:${towerId}`;
 
   const base = new THREE.Mesh(
     new THREE.CylinderGeometry(0.46, 0.56, 0.3, 6),
     new THREE.MeshStandardMaterial({ color: 0x1d4651, roughness: 0.46, metalness: 0.34 }),
   );
+  base.position.y = 0.15;
   base.castShadow = true;
   base.receiveShadow = true;
   group.add(base);
@@ -153,7 +217,7 @@ const createTower = (x: number, z: number, accent: number, roofColor: number) =>
 
   const roof = new THREE.Mesh(
     new THREE.ConeGeometry(0.45, 0.42, 6),
-    new THREE.MeshStandardMaterial({ color: roofColor, roughness: 0.3, metalness: 0.3 }),
+    new THREE.MeshStandardMaterial({ color: visual.roof, roughness: 0.3, metalness: 0.3 }),
   );
   roof.position.y = 1.08;
   roof.castShadow = true;
@@ -162,8 +226,8 @@ const createTower = (x: number, z: number, accent: number, roofColor: number) =>
   const crystal = new THREE.Mesh(
     new THREE.OctahedronGeometry(0.18, 0),
     new THREE.MeshStandardMaterial({
-      color: accent,
-      emissive: accent,
+      color: visual.accent,
+      emissive: visual.accent,
       emissiveIntensity: 2.4,
       roughness: 0.18,
       metalness: 0.15,
@@ -174,28 +238,32 @@ const createTower = (x: number, z: number, accent: number, roofColor: number) =>
 
   const aura = new THREE.Mesh(
     new THREE.TorusGeometry(0.57, 0.025, 8, 32),
-    new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0.7 }),
+    new THREE.MeshBasicMaterial({ color: visual.accent, transparent: true, opacity: 0.7 }),
   );
   aura.rotation.x = Math.PI / 2;
   aura.position.y = 0.18;
   group.add(aura);
 
-  scene.add(group);
-  animatedTowers.push({ group, crystal });
+  return { group, crystal };
 };
 
-createTower(-4.8, -0.9, 0x6ee2cf, 0xd29b62);
-createTower(-2.4, 2.3, 0x8cd6ff, 0x8d6bb5);
-createTower(2.4, 2.1, 0xffc56b, 0xbe6b55);
+const enemyVisuals: Record<string, { color: number; scale: number }> = {
+  husk: { color: 0xe46c62, scale: 0.84 },
+  runner: { color: 0xf0a85d, scale: 0.68 },
+  wisp: { color: 0xd85c8b, scale: 0.76 },
+};
+const unknownEnemyVisual = { color: 0xc9a27a, scale: 0.74 };
 
-const createEnemy = (x: number, z: number, scale: number, color: number) => {
+const enemyViews = new Map<number, EnemyView>();
+const createEnemyView = (enemyId: string): EnemyView => {
+  const visual = enemyVisuals[enemyId] ?? unknownEnemyVisual;
   const group = new THREE.Group();
-  group.position.set(x, 0.28, z);
-  group.scale.setScalar(scale);
+  group.scale.setScalar(visual.scale);
+  group.name = `enemy:${enemyId}`;
 
   const body = new THREE.Mesh(
     new THREE.IcosahedronGeometry(0.32, 1),
-    new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.45, roughness: 0.62 }),
+    new THREE.MeshStandardMaterial({ color: visual.color, emissive: visual.color, emissiveIntensity: 0.45, roughness: 0.62 }),
   );
   body.castShadow = true;
   group.add(body);
@@ -219,21 +287,30 @@ const createEnemy = (x: number, z: number, scale: number, color: number) => {
     new THREE.BoxGeometry(0.76, 0.045, 0.045),
     new THREE.MeshBasicMaterial({ color: 0x74e0b4 }),
   );
-  healthFill.position.set(-0.06, 0.78, 0.025);
+  healthFill.position.set(0, 0.78, 0.025);
   group.add(healthFill);
 
-  scene.add(group);
-  animatedEnemies.push({ group, healthFill });
+  return { group, body, healthFill };
 };
 
-createEnemy(5.6, -2.7, 0.78, 0xe46c62);
-createEnemy(4.3, -2.3, 0.92, 0xf0a85d);
-createEnemy(2.9, -1.2, 0.66, 0xd85c8b);
-createEnemy(1.6, -0.2, 0.8, 0xe46c62);
-createEnemy(0.1, 0.9, 0.62, 0xf0a85d);
+const disposeInstance = (object: THREE.Object3D) => {
+  object.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    mesh.geometry?.dispose();
+    const material = mesh.material;
+    if (Array.isArray(material)) {
+      for (const entry of material) {
+        entry.dispose();
+      }
+    } else {
+      material?.dispose();
+    }
+  });
+};
 
 const core = new THREE.Group();
-core.position.set(-6.3, 0.3, 2.5);
+core.position.set(config.map.corePosition.x, 0.3, config.map.corePosition.z);
+core.name = 'core';
 const coreBase = new THREE.Mesh(
   new THREE.CylinderGeometry(0.8, 0.95, 0.32, 8),
   new THREE.MeshStandardMaterial({ color: 0x285a62, roughness: 0.38, metalness: 0.42 }),
@@ -304,33 +381,199 @@ const resize = () => {
 window.addEventListener('resize', resize);
 resize();
 
-const timer = new THREE.Timer();
-let elapsed = 0;
-const renderFrame = (timestamp: number) => {
-  timer.update(timestamp);
-  const delta = Math.min(timer.getDelta(), 0.05);
-  elapsed += delta;
-  for (const [index, tower] of animatedTowers.entries()) {
-    tower.group.rotation.y += delta * (0.34 + index * 0.08);
-    tower.crystal.position.y = 1.43 + Math.sin(elapsed * 2.1 + index) * 0.07;
-  }
-  for (const [index, enemy] of animatedEnemies.entries()) {
-    enemy.group.rotation.y += delta * (0.7 + index * 0.12);
-    enemy.group.position.y = 0.28 + Math.sin(elapsed * 2.8 + index * 0.7) * 0.045;
-    enemy.healthFill.scale.x = 0.78 + Math.sin(elapsed * 1.5 + index) * 0.12;
-  }
-  coreCrystal.rotation.y += delta * 0.6;
-  coreRing.rotation.z += delta * 0.25;
-  particles.rotation.y += delta * 0.08;
-  renderer.render(scene, camera);
-  requestAnimationFrame(renderFrame);
+const padFreeColor = new THREE.Color(0x2b7073);
+const padFreeEmissive = new THREE.Color(0x0b3135);
+const padOccupiedColor = new THREE.Color(0x3a4b55);
+const padOccupiedEmissive = new THREE.Color(0x0a1a1e);
+const padFreeRing = new THREE.Color(0x6ee2cf);
+const padOccupiedRing = new THREE.Color(0xffc56b);
+const coreHealthy = new THREE.Color(0x2ac7b5);
+const coreFailing = new THREE.Color(0xe46c62);
+const baseBodyEmissive = 0.45;
+const slowedBodyEmissive = 1.15;
+const enemyBaseY = 0.28;
+
+let coreDefeated = false;
+let snapshot = simulation.getSnapshot();
+
+const syncHud = () => {
+  goldValue.textContent = String(snapshot.gold);
+  const integrity = snapshot.maxCoreHealth > 0 ? snapshot.coreHealth / snapshot.maxCoreHealth : 0;
+  integrityValue.textContent = `${Math.round(integrity * 100)}%`;
+  waveValue.textContent = `${String(snapshot.waveIndex + 1).padStart(2, '0')} / ${String(waveCount).padStart(2, '0')}`;
 };
+
+const applySnapshot = (next: MatchSnapshot) => {
+  snapshot = next;
+
+  for (const padView of padViews.values()) {
+    const occupant = next.pads[padView.id];
+    const occupied = occupant !== null && occupant !== undefined;
+    if (occupied === padView.occupied) {
+      continue;
+    }
+    padView.occupied = occupied;
+    const baseMaterial = padView.base.material as THREE.MeshStandardMaterial;
+    const ringMaterial = padView.ring.material as THREE.MeshBasicMaterial;
+    baseMaterial.color.copy(occupied ? padOccupiedColor : padFreeColor);
+    baseMaterial.emissive.copy(occupied ? padOccupiedEmissive : padFreeEmissive);
+    baseMaterial.emissiveIntensity = occupied ? 0.4 : 0.9;
+    ringMaterial.color.copy(occupied ? padOccupiedRing : padFreeRing);
+    ringMaterial.opacity = occupied ? 0.72 : 0.48;
+  }
+
+  const aliveTowers = new Set<number>();
+  for (const tower of next.towers) {
+    aliveTowers.add(tower.entityId);
+    let view = towerViews.get(tower.entityId);
+    if (!view) {
+      const pad = padDefinitions.get(tower.padId);
+      if (!pad) {
+        continue;
+      }
+      view = createTowerView(tower.towerId);
+      view.group.position.set(pad.position.x, 0.14, pad.position.z);
+      scene.add(view.group);
+      towerViews.set(tower.entityId, view);
+    }
+  }
+  for (const [entityId, view] of towerViews) {
+    if (aliveTowers.has(entityId)) {
+      continue;
+    }
+    scene.remove(view.group);
+    disposeInstance(view.group);
+    towerViews.delete(entityId);
+  }
+
+  const aliveEnemies = new Set<number>();
+  for (const enemy of next.enemies) {
+    aliveEnemies.add(enemy.entityId);
+    let view = enemyViews.get(enemy.entityId);
+    if (!view) {
+      view = createEnemyView(enemy.enemyId);
+      scene.add(view.group);
+      enemyViews.set(enemy.entityId, view);
+    }
+    view.group.position.set(enemy.x, enemyBaseY, enemy.z);
+    const healthRatio = enemy.maxHealth > 0 ? Math.max(0, Math.min(1, enemy.health / enemy.maxHealth)) : 0;
+    view.healthFill.scale.x = Math.max(healthRatio, 0.001);
+    view.healthFill.position.x = -0.38 + 0.38 * healthRatio;
+    const bodyMaterial = view.body.material as THREE.MeshStandardMaterial;
+    bodyMaterial.emissiveIntensity = enemy.slowTicks > 0 ? slowedBodyEmissive : baseBodyEmissive;
+  }
+  for (const [entityId, view] of enemyViews) {
+    if (aliveEnemies.has(entityId)) {
+      continue;
+    }
+    scene.remove(view.group);
+    disposeInstance(view.group);
+    enemyViews.delete(entityId);
+  }
+
+  const integrity = next.maxCoreHealth > 0 ? next.coreHealth / next.maxCoreHealth : 0;
+  coreCrystal.material.emissiveIntensity = 0.6 + 1.5 * integrity;
+  const defeated = next.status === 'defeat';
+  if (defeated !== coreDefeated) {
+    coreDefeated = defeated;
+    coreCrystal.material.emissive.copy(defeated ? coreFailing : coreHealthy);
+    coreRing.material.color.copy(defeated ? coreFailing : padFreeRing);
+  }
+
+  syncHud();
+};
+
+const syncFromCore = () => {
+  const next = simulation.getSnapshot();
+  if (next.tick === snapshot.tick && next.status === snapshot.status) {
+    return;
+  }
+  applySnapshot(next);
+};
+
+const dispatchCommand = (command: Command): CommandResult => {
+  const result = simulation.dispatch(command);
+  applySnapshot(simulation.getSnapshot());
+  return result;
+};
+
+applySnapshot(snapshot);
+
+let eventsDrained = 0;
+let accumulator = 0;
+let elapsed = 0;
+let previousTimestamp = performance.now();
 
 statusLabel.textContent = 'Scene online';
 window.__ECHOES_DEBUG__ = {
   ready: true,
   renderer: 'Three.js WebGL',
-  objectCount: scene.children.length,
   camera: 'orthographic',
+  seed: config.seed,
+  tickRate: TICK_RATE,
+  mapId: config.map.id,
+  routeIds: config.map.routes.map((route) => route.id),
+  padIds: config.map.buildPads.map((pad) => pad.id),
+  waveCount,
+  get eventsDrained() {
+    return eventsDrained;
+  },
+  get snapshot() {
+    return snapshot;
+  },
+  get objectCount() {
+    return scene.children.length;
+  },
+  get rendered() {
+    return {
+      pads: padViews.size,
+      towers: towerViews.size,
+      enemies: enemyViews.size,
+      routeSegments: routeSegmentCount,
+    };
+  },
+  get towerPositions() {
+    return Array.from(towerViews.values(), (view) => ({ x: view.group.position.x, z: view.group.position.z }));
+  },
+  get enemyPositions() {
+    return Array.from(enemyViews.values(), (view) => ({ x: view.group.position.x, z: view.group.position.z }));
+  },
+  dispatch: dispatchCommand,
 };
+
+const renderFrame = (timestamp: number) => {
+  const frameDelta = Math.min((timestamp - previousTimestamp) / 1000, 0.25);
+  previousTimestamp = timestamp;
+  accumulator += frameDelta;
+  let stepped = false;
+  while (accumulator >= STEP_SECONDS) {
+    simulation.step();
+    accumulator -= STEP_SECONDS;
+    stepped = true;
+  }
+  if (stepped) {
+    eventsDrained += simulation.drainEvents().length;
+    syncFromCore();
+  }
+
+  elapsed += frameDelta;
+  let towerSlot = 0;
+  for (const view of towerViews.values()) {
+    view.group.rotation.y += frameDelta * (0.34 + towerSlot * 0.08);
+    view.crystal.position.y = 1.43 + Math.sin(elapsed * 2.1 + towerSlot) * 0.07;
+    towerSlot += 1;
+  }
+  let enemySlot = 0;
+  for (const view of enemyViews.values()) {
+    view.group.rotation.y += frameDelta * (0.7 + enemySlot * 0.12);
+    view.group.position.y = enemyBaseY + Math.sin(elapsed * 2.8 + enemySlot * 0.7) * 0.045;
+    enemySlot += 1;
+  }
+  coreCrystal.rotation.y += frameDelta * 0.6;
+  coreRing.rotation.z += frameDelta * 0.25;
+  particles.rotation.y += frameDelta * 0.08;
+  renderer.render(scene, camera);
+  requestAnimationFrame(renderFrame);
+};
+
 requestAnimationFrame(renderFrame);

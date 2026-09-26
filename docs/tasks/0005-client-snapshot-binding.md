@@ -1,9 +1,9 @@
 # 0005 — Связать MatchSnapshot с Three.js client
 
-> Статус: выдана
+> Статус: принята
 > Приоритет: P0
 > Фаза: 3 — Первый визуальный vertical slice
-> Следующая приёмка: после отдельного commit и проверки штабом
+> Следующая приёмка: закрыта; следующая задача `0006`
 
 ## Контекст
 
@@ -60,12 +60,39 @@ npm test
 
 ## Отчёт сессии
 
-После работы указать:
+Изменённые файлы:
 
-- изменённые файлы;
-- команды и фактический результат;
-- путь к screenshot;
-- что осталось за пределами 0005;
-- статус задачи: `на проверке` или `принята`.
+- `src/main.ts` — один `Simulation` из `createTrainingScenario()`, fixed-step accumulator, projection по `entityId`, сцена из `map.routes`, `map.buildPads`, `map.corePosition`, `map.width/depth`, расширенный `__ECHOES_DEBUG__`.
+- `index.html` — два `data-testid` для проверки HUD-привязки (`gold-value`, `core-integrity`), стартовые значения совпадают со snapshot.
+- `tests/smoke.spec.ts` — новый E2E `drives presentation from MatchSnapshot without duplicated state`.
+- `docs/PLAN.md`, `docs/CONTEXT.md`, этот файл — статусы и evidence.
+- `src/game-core/*` не менялись.
 
-До приёмки задача остаётся `[ ]` в `docs/PLAN.md`.
+Команды и результат:
+
+- `npm run typecheck` — зелёный.
+- `npm run build` — зелёный; остаётся прежнее предупреждение Vite о chunk > 500 kB (three.js).
+- `npm run test:core` — `simulation check: ok` (victory, tick 323, gold 229).
+- `npm test` — `npm run test:core` плюс 2 Playwright теста, оба зелёные; snapshot binding тест идёт 16.8 s реального времени, потому что ждёт victory на фиксированном seed.
+- Playwright запускался офлайн через `PLAYWRIGHT_EXECUTABLE_PATH` на установленный chromium; путь в проекте не сохранён.
+
+Screenshots:
+
+- `test-results/bootstrap.png` — стартовое состояние: data-driven core, 5 pads, два route; ручных tower/enemy объектов нет.
+- `test-results/snapshot-binding.png` — три башни на занятых pads и enemies с health bars в середине волны.
+
+Что проверено в E2E:
+
+- `__ECHOES_DEBUG__` отражает `MatchSnapshot`: content identity (seed, map, routes, pads, waves), `preparationTicksLeft === max(0, prepTicks - tick)`, `rngState` до first RNG use.
+- Projection: `rendered.pads/towers/enemies` равны snapshot, позиции enemies совпадают с `enemy.x/z`, башни стоят на координатах pads из content.
+- Создание, обновление и удаление объектов: волна доходит до victory, `rendered.enemies` становится 0, `gold` совпадает с детерминированным значением 229.
+- HUD: Aether, Integrity и Wave берутся из snapshot.
+
+Что осталось за пределами 0005:
+
+- Кликовый placement и стоимость — 0006.
+- Start-wave кнопка, targeting, damage, win/lose в HUD, countdown objective — 0007.
+- Pause/resume, seed replay, screenshot baseline — 0008.
+- `favicon.ico` даёт 404 в console; это состояние было до задания, отмечено как EOB-011.
+
+Статус задачи: принята.

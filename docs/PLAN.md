@@ -2,7 +2,7 @@
 
 > Веду я (штаб). Каждый пункт — одно будущее задание кодовой сессии: отдельно сдаётся, отдельно тестируется и отдельно откатывается.
 > Статусы: `[ ]` — не начато, `[x]` — принято штабом после проверки. Номера заданий сквозные.
-> Следующая задача: `0005`. Текущий этап: первый визуальный vertical slice.
+> Следующая задача: `0006`. Текущий этап: первый визуальный vertical slice.
 
 ## Принципы
 
@@ -20,7 +20,7 @@
 | 0. Repository и contracts | Принята | 0002 — visual identity и scope |
 | 1. Browser bootstrap | Принята | 0003 — Three.js scene и QA |
 | 2. Pure simulation core | Принята | 0004 — deterministic core |
-| 3. Первый визуальный vertical slice | В работе | Следующая: 0005 |
+| 3. Первый визуальный vertical slice | В работе | 0005 — snapshot binding; следующая: 0006 |
 | 4. Asset pipeline и 3D polish | Ожидает | — |
 | 5. Offline singleplayer | Ожидает | — |
 | 6. Local cooperative mode | Ожидает | — |
@@ -43,7 +43,7 @@
 
 ## Фаза 3 — Первый визуальный vertical slice — следующая
 
-- [ ] 0005 — Связать `MatchSnapshot` с Three.js objects: синхронизировать core, build pads, towers и enemies (выдана кодовой сессии; критерий: client отображает состояние core без ручного дублирования)
+- [x] 0005 — Связать `MatchSnapshot` с Three.js objects: синхронизировать core, build pads, towers и enemies (принято: typecheck, build, core check, Playwright snapshot contract до victory и screenshot review; `__ECHOES_DEBUG__` отдаёт snapshot, rendered-счётчики и позиции)
 - [ ] 0006 — Сделать placement по build pads: выбор tower, command в core, стоимость и занятость pad (критерий: placement проходит pure check и E2E)
 - [ ] 0007 — Подключить запуск волны, движение enemies, targeting, damage и win/lose к HUD (критерий: полный игровой цикл воспроизводится в браузере)
 - [ ] 0008 — Принять vertical slice: pause/resume, seed replay, core check, Playwright E2E и screenshot review (критерий: все проверки зелёные, визуальная композиция читаема)

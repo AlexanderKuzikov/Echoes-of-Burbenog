@@ -71,3 +71,13 @@
 **Альтернативы:** Начать gameplay внутри Three.js client; использовать client-side флаги вместо simulation state; ввести ECS или общую event bus до появления второй реализации.
 
 **Trade-off:** Core требует отдельного слоя content и сценариев, но даёт headless-проверяемость и сохраняет seam для будущей authoritative session.
+
+## 2026-09-26: Snapshot-driven presentation и fixed-step client clock
+
+**Контекст:** Browser bootstrap создавал tower и enemy объекты вручную, дублируя то, что уже моделирует core. Solo-сессии нет, authoritative server отложен, но presentation не должна расходиться с simulation state.
+
+**Решение:** Client держит ровно один `Simulation` из `createTrainingScenario()` и получает `MatchSnapshot` как единственный источник presentation state. Core тикает fixed-step accumulator, который накапливает реальное время в `requestAnimationFrame` и вызывает `step()` только целыми тиками; browser delta произвольной величины в core не попадает. Сцена, build pads, routes, core и ground строятся из `map` content. Towers и enemies — presentation-объекты в `Map` по `entityId`: создание при появлении в snapshot, обновление позиции и health, удаление с dispose при исчезновении. Cosmetic анимация не меняет snapshot. `window.__ECHOES_DEBUG__` отдаёт snapshot, rendered-счётчики, позиции и `dispatch` как QA seam для Playwright.
+
+**Альтернативы:** Оставить ручные массивы и синхронизировать их вручную; тикать core по `requestAnimationFrame` напрямую; интерполировать snapshot по времени; перенести локальный core в отдельный worker сразу.
+
+**Trade-off:** Появляется presentation-слой projection и debug-контракт, который нужно поддерживать, а client временно владеет simulation instance. Зато browser E2E может проверять gameplay детерминированно, а будущий server layer заменит источник snapshots, не трогая projection.
