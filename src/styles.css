@@ -535,10 +535,15 @@ h1 {
   background: rgba(22, 48, 55, 0.54);
 }
 
+/* The palette holds a content-based width floor, so a panel added to the dock cannot take the tower
+   name away from the surface the player builds on. The floor comes from the labels themselves — a
+   longer name in content raises it instead of being cut — and the read-only panels beside the cards
+   are what absorb the difference. */
 .build-section {
   flex: 1.5;
   display: grid;
   gap: 8px;
+  min-width: min-content;
 }
 
 .dock-heading {
@@ -574,12 +579,15 @@ h1 {
 
 .build-list {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(min-content, 1fr));
   gap: 8px;
 }
 
+/* The floor is the name, not the role line under it. `min-width: 0` is what let a card report a
+   minimum narrower than the label it has to show, and the shorter role wraps instead of widening the
+   whole palette. */
 .build-card {
-  min-width: 0;
+  min-width: min-content;
   gap: 8px;
   padding: 8px;
   border: 1px solid rgba(143, 184, 184, 0.13);
@@ -621,14 +629,14 @@ h1 {
 .build-card > span:last-child {
   display: grid;
   gap: 2px;
-  min-width: 0;
 }
 
+/* The name is never shortened. An ellipsis is what would make a clipped name look deliberate, and
+   `overflow: hidden` is also what makes the label report a minimum width of zero, which would leave
+   the floor above a number that fits nothing. */
 .build-card strong {
-  overflow: hidden;
   font-size: 0.68rem;
   font-weight: 650;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -773,7 +781,9 @@ h1 {
 }
 
 /* The kicker and the slot state stack instead of sharing a row: the state carries a tick and a
-   command count, and beside the kicker it was cut off rather than shortened. */
+   command count, and beside the kicker it was cut off rather than shortened. The state itself is
+   never shortened either — a narrow panel wraps it to a second line, because a tick and a count
+   the player cannot read are worse than one more line of chrome. */
 .save-heading {
   display: grid;
   gap: 2px;
@@ -781,12 +791,10 @@ h1 {
 }
 
 .save-heading strong {
-  overflow: hidden;
   color: #e7f4ef;
   font-size: 0.72rem;
   font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .save-heading strong[data-state="ready"] {
@@ -833,6 +841,20 @@ h1 {
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Five panels stop fitting on one row a little above 900 px, and the row cannot be squeezed to fit:
+   the palette holds the width its names need, so below that it takes a row of its own instead of
+   letting the row run past the edge of the window. The stacked layout for narrow windows is the
+   900 px block below, which already declares the same two rules. */
+@media (max-width: 1024px) {
+  .command-dock {
+    flex-wrap: wrap;
+  }
+
+  .build-section {
+    flex-basis: 100%;
+  }
 }
 
 @media (max-width: 900px) {

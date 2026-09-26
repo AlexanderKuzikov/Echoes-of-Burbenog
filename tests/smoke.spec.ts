@@ -563,6 +563,62 @@ const expectRefusalFullyReadable = async (page: Page) => {
   return measured;
 };
 
+// The dock has to show the whole label, not a shortened one: a tower name and the slot state are the
+// two pieces of text in it that carry information the player cannot guess. Both are measured by
+// glyph rects against the padding box of the box that shows them, because an ellipsis, a shortened
+// string and a clipped overflow all leave the box exactly the size it was.
+const expectDockLabelsVisible = async (page: Page) => {
+  const measured = await page.evaluate(() => {
+    const readLabel = (label: Element, container: Element) => {
+      const containerStyle = getComputedStyle(container);
+      const labelStyle = getComputedStyle(label);
+      const containerBox = container.getBoundingClientRect();
+      const range = document.createRange();
+      range.selectNodeContents(label);
+      return {
+        text: label.textContent ?? '',
+        textOverflow: labelStyle.textOverflow,
+        clipped: label.scrollWidth > label.clientWidth + 1,
+        box: { left: containerBox.left, right: containerBox.right, top: containerBox.top, bottom: containerBox.bottom },
+        padding: {
+          top: parseFloat(containerStyle.paddingTop),
+          right: parseFloat(containerStyle.paddingRight),
+          bottom: parseFloat(containerStyle.paddingBottom),
+          left: parseFloat(containerStyle.paddingLeft),
+        },
+        glyphs: [...range.getClientRects()].map((rect) => ({
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
+        })),
+      };
+    };
+    return {
+      names: [...document.querySelectorAll('.build-card')].map((card) =>
+        readLabel(card.querySelector('strong') as Element, card),
+      ),
+      slot: readLabel(document.querySelector('[data-testid="save-slot"]') as Element, document.querySelector('.save-heading') as Element),
+    };
+  });
+
+  expect(measured.names.length).toBeGreaterThan(0);
+  for (const label of [...measured.names, measured.slot]) {
+    expect(label.glyphs.length, `${label.text} produced no measurable glyphs`).toBeGreaterThan(0);
+    expect(label.textOverflow, `${label.text} is shortened with an ellipsis`).not.toBe('ellipsis');
+    expect(label.clipped, `${label.text} does not fit the box that shows it`).toBe(false);
+    const inside = label.glyphs.every(
+      (glyph) =>
+        glyph.x >= label.box.left + label.padding.left - 1 &&
+        glyph.x + glyph.width <= label.box.right - label.padding.right + 1 &&
+        glyph.y >= label.box.top + label.padding.top - 1 &&
+        glyph.y + glyph.height <= label.box.bottom - label.padding.bottom + 1,
+    );
+    expect(inside, `${label.text} has a glyph outside the box that shows it`).toBe(true);
+  }
+  return measured;
+};
+
 const emptyEventCounts = (): Record<SimulationEvent['type'], number> => ({
   towerPlaced: 0,
   preparationEnded: 0,
@@ -617,7 +673,25 @@ test('renders the first 3D-ready scene and accepts build selection', async ({ pa
   await expect(page.getByTestId('selection-status')).toHaveText('Grove Lens ready');
   await expect(page.getByRole('button', { name: 'Grove Lens' })).toHaveAttribute('aria-pressed', 'true');
 
+  // The dock is a fixed QA viewport, and at it the palette has to show the whole tower name and the
+  // save panel the whole slot state: a panel added to the dock may not be able to take either away.
+  const dock = await expectDockLabelsVisible(page);
+
   await page.screenshot({ path: 'test-results/bootstrap.png', fullPage: true });
+
+  // The same claim on the narrow layout, where the palette takes a row of its own and the save panel
+  // gets one too. Both are measured, not looked at, so the responsive path is held to the same
+  // standard as the QA viewport.
+  await page.setViewportSize({ width: 560, height: 900 });
+  const narrow = await expectDockLabelsVisible(page);
+
+  console.log(
+    `dock: ${dock.names.map((entry) => entry.text).join(' / ')} at ` +
+      `${dock.names.map((entry) => entry.glyphs[0]!.width.toFixed(1)).join(', ')}px of glyphs, ` +
+      `slot "${dock.slot.text}" at ${dock.slot.glyphs[0]!.width.toFixed(1)}px; ` +
+      `narrow: ${narrow.names.map((entry) => entry.glyphs[0]!.width.toFixed(1)).join(', ')}px, ` +
+      `slot ${narrow.slot.glyphs.map((glyph) => glyph.width.toFixed(1)).join('+')}px over ${narrow.slot.glyphs.length} line(s)`,
+  );
 });
 
 test('drives presentation from MatchSnapshot without duplicated state', async ({ page }) => {

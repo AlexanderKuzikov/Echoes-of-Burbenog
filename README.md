@@ -26,7 +26,7 @@
 | Середина волны | Победа | Replay с тем же seed | Восстановление после перезагрузки |
 |:-:|:-:|:-:|:-:|
 | ![Середина волны](docs/screenshots/wave-combat-midwave.png) | ![Победа](docs/screenshots/wave-combat-victory.png) | ![Replay](docs/screenshots/vertical-slice-replay-reset.png) | ![Загруженный матч](docs/screenshots/vertical-slice-match-load.png) |
-| Route, build pads, combat log и HUD — проекция `MatchSnapshot` | Terminal state, `Sector secured`, `restart repeats this run exactly` | Тот же матч перезапускается по command log: `REPLAY · 0 / 4 COMMANDS`, палитра и Start Wave заблокированы | Тот же матч после настоящей перезагрузки страницы: слот хранит seed, content, тик и log, а `Load` пересимулирует его до тика 61 |
+| Route, build pads, combat log и HUD — проекция `MatchSnapshot` | Terminal state, `Sector secured`, `restart repeats this run exactly` | Тот же матч перезапускается по command log: `REPLAY · 0 / 4 COMMANDS`, палитра и Start Wave заблокированы | Тот же матч после настоящей перезагрузки страницы: слот хранит seed, content, тик и log, а `Load` пересимулирует его до сохранённого тика |
 
 Снимки — копии `test-results/`, которые снимает E2E-сьютка. Обновляются на приёмке задачи, меняющей картинку.
 
