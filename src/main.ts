@@ -56,6 +56,24 @@ type MatchReport = {
   eventCounts: Record<SimulationEvent['type'], number>;
 };
 
+// A rebuilt run, read inside the page on the tick the rebuild stopped on. A loaded match is live
+// again the moment it has been rebuilt, so the state it arrived at cannot be read from outside the
+// page without landing on a later tick — the same reason a terminal report is captured in
+// `applySnapshot` rather than polled by a test.
+type RebuildReading = {
+  // The tick the slot asked for and the tick the rebuild reached. They are the same number, or the
+  // claim "the same match" is not met.
+  requestedTick: number;
+  tick: number;
+  snapshot: MatchSnapshot;
+  eventCounts: Record<SimulationEvent['type'], number>;
+  commandCount: number;
+  replayIndex: number;
+  replaying: boolean;
+  matchReports: MatchReport[];
+  poses: Array<{ entityId: number; towerId: string; clip: TowerClipReading | null }>;
+};
+
 type DebugState = {
   ready: boolean;
   renderer: string;
@@ -84,6 +102,9 @@ type DebugState = {
   readonly replayIndex: number;
   readonly commandCount: number;
   readonly matchReports: MatchReport[];
+  // The run a rebuild arrived at, captured in the page on the tick it stopped on, and `null` until
+  // a Load in this page session has finished one.
+  readonly lastRebuild: RebuildReading | null;
   // The frame clock, and the seam that puts a fat frame on purpose. `null` is the product's only
   // mode: measure the real frame. An armed value goes through the same clamp a real frame does, so
   // a test cannot ask for a frame the product would never produce.
@@ -264,6 +285,11 @@ const pauseToggle = document.querySelector<HTMLButtonElement>('[data-testid="pau
 const restartButton = document.querySelector<HTMLButtonElement>('[data-testid="restart-match"]');
 const sceneReport = document.querySelector<HTMLElement>('[data-testid="scene-report"]');
 const sceneReportReason = document.querySelector<HTMLElement>('[data-testid="scene-report-reason"]');
+const saveSlotLabel = document.querySelector<HTMLElement>('[data-testid="save-slot"]');
+const saveFeedback = document.querySelector<HTMLElement>('[data-testid="save-feedback"]');
+const saveButton = document.querySelector<HTMLButtonElement>('[data-testid="save-match"]');
+const loadButton = document.querySelector<HTMLButtonElement>('[data-testid="load-match"]');
+const newMatchButton = document.querySelector<HTMLButtonElement>('[data-testid="new-match"]');
 
 if (
   !sceneMount ||
@@ -287,7 +313,12 @@ if (
   !pauseToggle ||
   !restartButton ||
   !sceneReport ||
-  !sceneReportReason
+  !sceneReportReason ||
+  !saveSlotLabel ||
+  !saveFeedback ||
+  !saveButton ||
+  !loadButton ||
+  !newMatchButton
 ) {
   throw new Error('Bootstrap DOM is incomplete');
 }
@@ -1437,6 +1468,9 @@ const syncHud = () => {
   objectiveDetail.textContent = objectiveSummary(snapshot);
   startWaveButton.disabled = snapshot.status !== 'preparation' || replaying;
   restartButton.disabled = commandLog.length === 0;
+  // A log under replay names commands the rebuilt run has not reached yet, so the slot cannot be
+  // written from the middle of one. New match stays available throughout: it is the way out.
+  saveButton.disabled = replaying;
   pauseToggle.textContent = paused ? 'Resume' : 'Pause';
   pauseToggle.setAttribute('aria-pressed', String(paused));
   viewportShell.dataset.paused = String(paused);
@@ -1613,18 +1647,37 @@ const resetEventPresentations = () => {
   }
 };
 
-// Client-side QA restart: a new core from the same seed and content, with the recorded
-// commands re-applied at their original ticks by the frame loop. No persistence involved,
-// and the pause state stays as the player left it, so a frozen clock stays frozen.
-const restartMatch = () => {
+// The tick a rebuild stops on, or `null` when the run it rebuilt is free to continue. It answers a
+// different question from `replaying`, which is "commands are locked": a match that recorded no
+// command still has a tick to rebuild, and in that case there is nothing to lock in the first place.
+let rebuildStopTick: number | null = null;
+
+// The rebuild that has to be recorded, and the recording of the last one. The capture happens at the
+// end of the frame that arrived, not inside the arrival, so the reading belongs to the same tick as
+// the presentation around it.
+let pendingRebuild: { requestedTick: number; tick: number } | null = null;
+let lastRebuild: RebuildReading | null = null;
+
+// The one way this page rebuilds a run: a new core from the same seed and content, the recorded
+// commands re-applied at their original ticks by the frame loop, and presentation state put back
+// afterwards from the snapshot — exactly what a restart has always been. Restart is this with no
+// stop, Load is this with a tick to stop on, New match is this with an empty log. A saved match is
+// therefore not restored by a second path of its own; it is the replay that already exists, stopped
+// on a tick. The pause state stays as the player left it, so a frozen clock stays frozen.
+const beginRecordedRun = (stopTick: number | null) => {
   simulation = createSimulation(config);
   terminalReported = false;
   accumulator = 0;
   resetEventPresentations();
   replayIndex = 0;
   replaying = commandLog.length > 0;
+  rebuildStopTick = stopTick;
   setFeedback('idle', replaying ? 'Replaying recorded commands' : 'Nothing recorded yet · place a module first');
   applySnapshot(simulation.getSnapshot());
+};
+
+const restartMatch = () => {
+  beginRecordedRun(null);
 };
 
 const applyReplayPlan = () => {
@@ -1657,6 +1710,295 @@ const eventCounts: Record<SimulationEvent['type'], number> = {
 };
 const recentEvents: SimulationEvent[] = [];
 const eventFeedEntries: EventFeedEntry[] = [];
+
+// --- Match persistence ---------------------------------------------------------------------
+// The slot holds the input of a match, not its state: seed, content version, schema version, the
+// tick and the tick-ordered command log. A snapshot is a function of exactly those, so Load rebuilds
+// a match by replaying the log to the saved tick on the path Restart already uses, and the only
+// thing a reload has to carry is the input. Nothing below decides anything about a match: the
+// validator checks the shape and the versions of a local artifact, and every change of state still
+// goes through `Simulation`. A payload that fails validation is left where it is, so the player can
+// read the reason and decide what to do with the slot.
+
+const MATCH_SAVE_KEY = 'echoes-of-burbenog:match:v1';
+const MATCH_SAVE_SCHEMA = 1;
+
+// Content is versioned separately from the runtime code, and the training scenario carries no
+// version of its own, so the client declares the content it was built against. A slot written by a
+// build with other content describes a match this client cannot reproduce, and is refused rather
+// than replayed into something it never said.
+const TRAINING_CONTENT_VERSION = 1;
+
+// The slot is a local artifact that a player, an extension or a stray script can edit, so the number
+// of commands it may claim is bounded before anything is replayed. The training match records six.
+const MAX_SAVED_COMMANDS = 512;
+
+type SavedCommandEntry = {
+  tick: number;
+  command: Command;
+};
+
+type MatchSavePayload = {
+  schemaVersion: number;
+  contentVersion: number;
+  seed: number;
+  tick: number;
+  log: SavedCommandEntry[];
+};
+
+type SaveSlotReading =
+  | { state: 'empty' }
+  | { state: 'ready'; payload: MatchSavePayload }
+  | { state: 'refused'; reason: string; message: string };
+
+const refuseSlot = (reason: string, message: string): SaveSlotReading => ({ state: 'refused', reason, message });
+
+// The command shapes of the current contract, and nothing else: a slot may only claim a command
+// this build knows how to hand to the core. Whether the command would be accepted is not decided
+// here — that is the core's answer, and it is recorded per command in the log either way.
+const isKnownCommand = (value: unknown): value is Command => {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const candidate = value as { type?: unknown; padId?: unknown; towerId?: unknown };
+  if (candidate.type === 'startWave') {
+    return true;
+  }
+  return (
+    candidate.type === 'placeTower' &&
+    typeof candidate.padId === 'string' &&
+    typeof candidate.towerId === 'string'
+  );
+};
+
+const readSaveSlot = (): SaveSlotReading => {
+  let raw: string | null;
+  try {
+    raw = window.localStorage.getItem(MATCH_SAVE_KEY);
+  } catch {
+    return refuseSlot('save-slot-unreadable', 'This browser context cannot read the save slot');
+  }
+  if (raw === null) {
+    return { state: 'empty' };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return refuseSlot('save-slot-unreadable', 'Save slot is not readable JSON · slot left untouched');
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return refuseSlot('save-payload-shape', 'Save slot is not a save payload · slot left untouched');
+  }
+
+  const candidate = parsed as Partial<Record<keyof MatchSavePayload, unknown>>;
+  if (candidate.schemaVersion !== MATCH_SAVE_SCHEMA) {
+    return refuseSlot(
+      'save-schema-version',
+      `Save format v${String(candidate.schemaVersion)} is not the v${MATCH_SAVE_SCHEMA} this build reads · slot left untouched`,
+    );
+  }
+  if (candidate.contentVersion !== TRAINING_CONTENT_VERSION) {
+    return refuseSlot(
+      'save-content-version',
+      `Save holds content v${String(candidate.contentVersion)} · this build runs v${TRAINING_CONTENT_VERSION} · slot left untouched`,
+    );
+  }
+  if (candidate.seed !== config.seed) {
+    return refuseSlot(
+      'save-seed-mismatch',
+      `Save holds seed ${String(candidate.seed)} · this build runs ${config.seed} · slot left untouched`,
+    );
+  }
+  const tick = candidate.tick;
+  if (typeof tick !== 'number' || !Number.isInteger(tick) || tick < 0) {
+    return refuseSlot(
+      'save-tick-invalid',
+      `Save tick ${String(tick)} is not a whole tick count · slot left untouched`,
+    );
+  }
+  if (!Array.isArray(candidate.log)) {
+    return refuseSlot('save-log-invalid', 'Save holds no command log · slot left untouched');
+  }
+  if (candidate.log.length > MAX_SAVED_COMMANDS) {
+    return refuseSlot(
+      'save-log-invalid',
+      `Save claims ${candidate.log.length} commands · limit is ${MAX_SAVED_COMMANDS} · slot left untouched`,
+    );
+  }
+
+  const log: SavedCommandEntry[] = [];
+  let previousTick = 0;
+  for (const [index, entry] of candidate.log.entries()) {
+    if (typeof entry !== 'object' || entry === null) {
+      return refuseSlot('save-entry-shape', `Save command ${index} is not a record · slot left untouched`);
+    }
+    const { tick: entryTick, command } = entry as { tick?: unknown; command?: unknown };
+    if (typeof entryTick !== 'number' || !Number.isInteger(entryTick) || entryTick < 0 || entryTick > tick) {
+      return refuseSlot(
+        'save-entry-tick-out-of-range',
+        `Save command ${index} claims tick ${String(entryTick)} outside [0, ${tick}] · slot left untouched`,
+      );
+    }
+    // The replay applies a command on the tick it names and can only move forward, so a log that
+    // goes back in time is not a run this client could rebuild. This is a property of the artifact.
+    if (index > 0 && entryTick < previousTick) {
+      return refuseSlot(
+        'save-entry-out-of-order',
+        `Save command ${index} claims tick ${entryTick} after tick ${previousTick} · slot left untouched`,
+      );
+    }
+    if (!isKnownCommand(command)) {
+      return refuseSlot(
+        'save-command-unknown',
+        `Save command ${index} is not a command this build knows · slot left untouched`,
+      );
+    }
+    log.push({ tick: entryTick, command });
+    previousTick = entryTick;
+  }
+
+  return {
+    state: 'ready',
+    payload: {
+      schemaVersion: MATCH_SAVE_SCHEMA,
+      contentVersion: TRAINING_CONTENT_VERSION,
+      seed: config.seed,
+      tick,
+      log,
+    },
+  };
+};
+
+const setSaveFeedback = (result: 'idle' | 'saved' | 'loaded' | 'refused' | 'cleared', message: string, reason?: string) => {
+  saveFeedback.textContent = message;
+  saveFeedback.dataset.result = result;
+  if (reason) {
+    saveFeedback.setAttribute('data-reason', reason);
+  } else {
+    saveFeedback.removeAttribute('data-reason');
+  }
+};
+
+// The slot is read on boot and after every action that touches it, so a slot that exists is visible
+// before anything is loaded from it and there is no state in which a match is restored behind the
+// player's back. An unreadable slot keeps Load available: the player asked for the reason, and New
+// match is what clears it.
+const refreshSaveSlot = (): SaveSlotReading => {
+  const reading = readSaveSlot();
+  if (reading.state === 'empty') {
+    saveSlotLabel.textContent = 'No save slot';
+    saveSlotLabel.dataset.state = 'empty';
+    loadButton.disabled = true;
+    return reading;
+  }
+  if (reading.state === 'refused') {
+    saveSlotLabel.textContent = 'Save unreadable';
+    saveSlotLabel.dataset.state = 'unreadable';
+    loadButton.disabled = false;
+    return reading;
+  }
+  const commands = reading.payload.log.length;
+  saveSlotLabel.textContent = `Save · tick ${reading.payload.tick} · ${commands} ${commands === 1 ? 'command' : 'commands'}`;
+  saveSlotLabel.dataset.state = 'ready';
+  loadButton.disabled = false;
+  return reading;
+};
+
+// Save writes the input of the run as it stands. It reads the snapshot and the log and touches
+// nothing else, so saving cannot change the match it saved.
+const saveMatch = () => {
+  if (replaying) {
+    // A log under replay still holds commands the rebuilt run has not reached, so a save taken now
+    // would claim entries past its own tick — a payload its own validator would refuse.
+    setSaveFeedback('refused', 'The recorded run is being rebuilt · save when the replay finishes', 'save-blocked-during-replay');
+    return;
+  }
+  const payload: MatchSavePayload = {
+    schemaVersion: MATCH_SAVE_SCHEMA,
+    contentVersion: TRAINING_CONTENT_VERSION,
+    seed: config.seed,
+    tick: snapshot.tick,
+    log: commandLog.map((entry) => ({ tick: entry.tick, command: entry.command })),
+  };
+  try {
+    window.localStorage.setItem(MATCH_SAVE_KEY, JSON.stringify(payload));
+  } catch {
+    setSaveFeedback('refused', 'This browser context refused to write the save slot', 'save-write-failed');
+    return;
+  }
+  refreshSaveSlot();
+  setSaveFeedback('saved', `Saved · tick ${payload.tick}`);
+};
+
+const loadMatch = () => {
+  const reading = refreshSaveSlot();
+  if (reading.state === 'refused') {
+    setSaveFeedback('refused', reading.message, reading.reason);
+    return;
+  }
+  if (reading.state === 'empty') {
+    setSaveFeedback('refused', 'There is no save to load', 'save-slot-missing');
+    return;
+  }
+  // The slot becomes the log of the run that is about to be rebuilt: the log is the whole input of
+  // a match, so this is the one place where a load replaces what the page remembered.
+  commandLog.length = 0;
+  for (const entry of reading.payload.log) {
+    commandLog.push({ tick: entry.tick, appliedTick: null, command: entry.command });
+  }
+  beginRecordedRun(reading.payload.tick);
+  setSaveFeedback('idle', `Rebuilding to tick ${reading.payload.tick}`);
+};
+
+// New match is a different action from Restart and means something else: the slot goes away and the
+// recorded run is not replayed at all, so the next match starts from a preparation of its own.
+const newMatch = () => {
+  let clearFailure: string | null = null;
+  try {
+    window.localStorage.removeItem(MATCH_SAVE_KEY);
+  } catch {
+    clearFailure = 'This browser context refused to clear the save slot';
+  }
+  refreshSaveSlot();
+  commandLog.length = 0;
+  beginRecordedRun(null);
+  setFeedback('idle', 'New match · fresh preparation, nothing recorded');
+  setSaveFeedback(
+    clearFailure === null ? 'cleared' : 'refused',
+    clearFailure ?? 'Slot cleared',
+    clearFailure === null ? undefined : 'save-clear-failed',
+  );
+};
+
+// The tick of the slot has been reached, so the rebuilt run is the saved match and the clock may run
+// on. The reading is left to the end of the frame, where the presentation of this tick is in place.
+const settleRebuild = () => {
+  if (rebuildStopTick === null || snapshot.tick < rebuildStopTick) {
+    return;
+  }
+  pendingRebuild = { requestedTick: rebuildStopTick, tick: snapshot.tick };
+  rebuildStopTick = null;
+  setSaveFeedback('loaded', `Loaded · tick ${snapshot.tick}`);
+  syncHud();
+};
+
+const readRebuildReading = (arrival: { requestedTick: number; tick: number }): RebuildReading => ({
+  requestedTick: arrival.requestedTick,
+  tick: arrival.tick,
+  snapshot,
+  eventCounts: { ...eventCounts },
+  commandCount: commandLog.length,
+  replayIndex,
+  replaying,
+  matchReports: matchReports.map((report) => ({ ...report, eventCounts: { ...report.eventCounts } })),
+  poses: Array.from(towerViews, ([entityId, view]) => ({
+    entityId,
+    towerId: view.towerId,
+    clip: view.clip === null ? null : readTowerClip(view.clip),
+  })),
+});
 
 const towerName = (towerId: string) => towerDefinitions.get(towerId)?.name ?? towerId;
 const enemyName = (enemyId: string) => enemyDefinitions.get(enemyId)?.name ?? enemyId;
@@ -1897,6 +2239,9 @@ pauseToggle.addEventListener('click', () => {
   setPaused(!paused);
 });
 restartButton.addEventListener('click', restartMatch);
+saveButton.addEventListener('click', saveMatch);
+loadButton.addEventListener('click', loadMatch);
+newMatchButton.addEventListener('click', newMatch);
 reducedMotionQuery.addEventListener('change', (event) => {
   reducedMotion = event.matches;
   if (!reducedMotion) {
@@ -1917,6 +2262,10 @@ reducedMotionQuery.addEventListener('change', (event) => {
 syncSelection();
 setFeedback('idle', 'Left click a build pad to place');
 applySnapshot(snapshot);
+// The slot is looked at, not loaded: a match is only ever restored because the player asked for it,
+// and the indicator says whether there is anything to ask about.
+refreshSaveSlot();
+setSaveFeedback('idle', 'Local slot · this browser');
 void bootAssets();
 
 let accumulator = 0;
@@ -2086,6 +2435,9 @@ window.__ECHOES_DEBUG__ = {
   get matchReports() {
     return matchReports.map((report) => ({ ...report, eventCounts: { ...report.eventCounts } }));
   },
+  get lastRebuild() {
+    return lastRebuild;
+  },
   get motion() {
     const clips = Array.from(towerViews.values(), (view) => view.clip);
     return {
@@ -2160,10 +2512,15 @@ const renderFrame = (timestamp: number) => {
     // dropped to make up ground.
     const pending = pendingCommandTick();
     // `snapshot` is the projection of the core and is in sync with it here, because every path that
-    // touches the core — `step`, `dispatch` and `restartMatch` — refreshes the projection.
+    // touches the core — `step`, `dispatch` and `beginRecordedRun` — refreshes the projection.
     const tickCeiling = pending === null ? Infinity : pending - snapshot.tick;
+    // A rebuild adds the same kind of deadline from the other side: the frame may not step past the
+    // tick the slot named either, or it would arrive late by up to one frame of ticks and the loaded
+    // match would start from a tick its save never had.
+    const stopCeiling = rebuildStopTick === null ? Infinity : rebuildStopTick - snapshot.tick;
+    const ceiling = Math.min(tickCeiling, stopCeiling);
     let steps = 0;
-    while (steps < tickCeiling && accumulator >= STEP_SECONDS) {
+    while (steps < ceiling && accumulator >= STEP_SECONDS) {
       simulation.step();
       accumulator -= STEP_SECONDS;
       steps += 1;
@@ -2175,6 +2532,7 @@ const renderFrame = (timestamp: number) => {
     if (replaying) {
       applyReplayPlan();
     }
+    settleRebuild();
   }
 
   elapsed += frameDelta;
@@ -2244,6 +2602,12 @@ const renderFrame = (timestamp: number) => {
   coreCrystal.rotation.y += ambientDelta * 0.6;
   coreRing.rotation.z += ambientDelta * 0.25;
   particles.rotation.y += ambientDelta * 0.08;
+  // The arrival of a rebuild is recorded here, at the end of the frame that got there, so the
+  // reading belongs to the same tick as the presentation around it and not to the frame before.
+  if (pendingRebuild !== null) {
+    lastRebuild = readRebuildReading(pendingRebuild);
+    pendingRebuild = null;
+  }
   renderer.render(scene, camera);
   sampleSceneBudget();
   requestAnimationFrame(renderFrame);

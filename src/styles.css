@@ -765,6 +765,66 @@ h1 {
   color: #ffe2ae;
 }
 
+.save-section {
+  flex: 0.95;
+  display: grid;
+  align-content: center;
+  gap: 6px;
+}
+
+/* The kicker and the slot state stack instead of sharing a row: the state carries a tick and a
+   command count, and beside the kicker it was cut off rather than shortened. */
+.save-heading {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.save-heading strong {
+  overflow: hidden;
+  color: #e7f4ef;
+  font-size: 0.72rem;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.save-heading strong[data-state="ready"] {
+  color: #6ee2cf;
+}
+
+.save-heading strong[data-state="unreadable"] {
+  color: #ff9a8c;
+}
+
+.save-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.save-actions > :last-child {
+  grid-column: 1 / -1;
+}
+
+/* A reason to refuse a save is a sentence, so this line is not uppercased like the short statuses
+   around it: it has to be readable at a glance, and it has to be able to grow to say what it found. */
+.save-feedback {
+  color: #789495;
+  font-size: 0.62rem;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.save-feedback[data-result="saved"],
+.save-feedback[data-result="loaded"] {
+  color: #74e0b4;
+}
+
+.save-feedback[data-result="refused"] {
+  color: #ff9a8c;
+}
+
 .status-section strong,
 .objective-section strong {
   overflow: hidden;
@@ -811,6 +871,10 @@ h1 {
   }
 
   .wave-section {
+    flex: 1 1 220px;
+  }
+
+  .save-section {
     flex: 1 1 220px;
   }
 }

@@ -1,6 +1,6 @@
 # 0015 — Сохранение матча по command log: один слот в localStorage
 
-> Статус: выдана кодовой сессии
+> Статус: сдана кодовой сессией, на проверке штаба
 > Приоритет: P0
 > Фаза: 5 — Offline singleplayer
 > Следующая приёмка: `0016`; фаза 5 начата
@@ -102,3 +102,117 @@ npm test
 - `EOB-010` — session-level replay и restore из snapshot: после появления локального слота вопрос «что хранит сервер» решается на чистой основе.
 - `0016` — полный E2E от меню до victory/defeat, которому понадобится экран входа и решение про автозагрузку.
 - `EOB-011` — закрыт в `0013`, здесь не повторяется.
+
+## Отчёт сессии
+
+### Изменённые файлы
+
+| Файл | Почему |
+|------|--------|
+| `index.html` | Секция `save-section` в command dock: индикатор слота `save-slot` с `data-state`, три контрола `save-match` / `load-match` / `new-match`, строка состояния `save-feedback` с `data-result`. Всё по образцу существующих контролов, с `data-testid` и `title`. |
+| `src/styles.css` | Только состояния новой секции: раскладка действий (Save/Load в одну строку, New match во всю ширину), заголовок с индикатором в две строки, чтобы тик и число команд не обрезались, и три цвета строки состояния. Плюс правило для `.save-section` в breakpoint 900px. |
+| `src/main.ts` | Формат payload и его валидация, чтение/запись/очистка слота, единая точка пересборки `beginRecordedRun(stopTick)`, потолок stepping-цикла по тику слота, отметка прибытия пересборки и чтение `lastRebuild` для seam, три слушателя кнопок и индикатор слота на boot. |
+| `tests/smoke.spec.ts` | Четыре сценария, тип `RebuildReading` и `lastRebuild` в читателе seam, хелперы чтения и записи слота. |
+| `docs/ARCHITECTURE.md` | Раздел «Match persistence» с форматом payload как контрактом, списком причин отказа, механикой `stopCeiling` и замером внутри страницы; Restart в разделе Client переписан через `beginRecordedRun`; `lastRebuild` добавлен в описание seam. |
+| `docs/DECISIONS.md` | Новое append-only решение с контекстом, механизмом, отказами и trade-off. |
+| `docs/PLAN.md`, `docs/CONTEXT.md`, этот файл, `docs/screenshots/` | Статус, evidence и снимки. |
+| `README.md` | Снимок восстановления добавлен в таблицу, поправлен раздел «Статус». |
+
+Запрещённые файлы не тронуты: `src/game-core/*`, content, `scripts/*`, `src/asset-budgets.ts`, `src/asset-registry.ts`. Новых зависимостей нет.
+
+### Формат payload
+
+```json
+{
+  "schemaVersion": 1,
+  "contentVersion": 1,
+  "seed": 1337,
+  "tick": 61,
+  "log": [
+    { "tick": 0, "command": { "type": "placeTower", "padId": "pad-east", "towerId": "pulse-spire" } },
+    { "tick": 4, "command": { "type": "placeTower", "padId": "pad-north", "towerId": "grove-lens" } },
+    { "tick": 7, "command": { "type": "placeTower", "padId": "pad-south", "towerId": "frost-relay" } },
+    { "tick": 9, "command": { "type": "startWave" } }
+  ]
+}
+```
+
+Ключ слота — `echoes-of-burbenog:match:v1`, версия схемы едет и в ключе, и в поле. `contentVersion` объявлен клиентом (`TRAINING_CONTENT_VERSION = 1`): content версионируется отдельно от runtime-кода, а training scenario своей версии не несёт, поэтому версию content, под которую собран клиент, объявляет он сам. `log` — tick-упорядоченный, в исходном порядке, без `appliedTick` (это чтение replay'а, а не часть входа).
+
+Причины отказа валидатора: `save-slot-unreadable`, `save-payload-shape`, `save-schema-version`, `save-content-version`, `save-seed-mismatch`, `save-tick-invalid`, `save-log-invalid`, `save-entry-shape`, `save-entry-tick-out-of-range`, `save-entry-out-of-order`, `save-command-unknown`, плюс `save-slot-missing`, `save-write-failed`, `save-clear-failed` и `save-blocked-during-replay` — последние четыре не отказ валидатора, а отказ действия. Каждая причина называет найденное значение (`Save holds content v7`, `claims tick 17 outside [0, 12]`, `Save tick undefined is not a whole tick count`) и, кроме случая, когда `localStorage` недоступен целиком, заканчивается словами о том, что слот не тронут. Валидатор не решает, примет ли core команду: команды, которые core отклонил, попадают в log с её причиной и replay'ятся так же.
+
+### Механизм Load
+
+`beginRecordedRun(stopTick)` — единственная точка пересборки: новый `Simulation` из того же `config`, `commandLog` заново проигрывается тем же `dispatchCommand` на исходных тиках, presentation собирается из snapshot. Restart вызывает её с `null`, Load — с тиком слота, New match — с `null` и пустым log. Второй ветки инициализации нет.
+
+**Продолжение механизма `0014`.** Тик слота добавлен в потолок stepping-цикла тем же способом, каким тик ожидающей команды: `ceiling = min(tickCeiling, stopCeiling)`, где `stopCeiling = rebuildStopTick - snapshot.tick`. Без этого кадр, которому clamp (0.25 с = пять тиков) разрешает прошагать пять тиков, приходил на сохранённый тик позже. Перебор времени, как и в `0014`, остаётся в accumulator.
+
+**Замер внутри страницы.** Загруженный матч снова живой, поэтому чтение состояния извне приземляется на более поздний тик. Seam публикует `lastRebuild` — состояние, снятое в конце кадра, на котором пересборка остановилась: `requestedTick` и `tick` рядом, полный `snapshot`, `eventCounts`, `commandCount`, `replayIndex`, `replaying`, `matchReports` и позы клипов.
+
+### Измерения
+
+Сценарий восстановления делает **настоящий `page.reload()`**, и Load запускается на странице, которая ничего не помнит, кроме слота.
+
+| Что | До сохранения | После перезагрузки | После Load |
+|-----|---------------|--------------------|------------|
+| `snapshot.tick` | 61 | 1 (свежая preparation) | 61 — ровно запрошенный |
+| `snapshot.status` | `wave` | `preparation` | `wave` |
+| `snapshot.gold` | 66 | 220 | 66 |
+| `snapshot.pads` | три занятых | три пустых | три занятых, те же id и towerId |
+| `snapshot.towers` / `enemies` | 3 башни, 13 врагов | 0 / 0 | 3 / 13 |
+| `eventCounts` | 10 типов | нули | те же числа |
+| `commandCount` | 4 | 0 | 4 |
+| поза `pulse-spire` | `time 0.3000s`, `[0, 0, 0.027, 0.9996]` | — | `time 0.3000s`, `[0, 0, 0.027, 0.9996]` |
+
+Сравнение выполняется `toEqual` по полному `MatchSnapshot` (он покрывает tick, gold, pads, towers, enemies, status, waveIndex, waveTick, coreHealth, rngState, lastWaveRoll, preparationTicksLeft, leaksThisWave), отдельно по `eventCounts` и `commandCount`; поза сравнивается с точностью 1e-6, потому что клип продвигается тем, что сделал кадр, и это единственное чтение из двух, которое не является чистой функцией входа. Каждая команда пересборки применилась на своём тике: `placeTower@14->14 placeTower@21->21 placeTower@23->23 startWave@25->25` в одном из прогонов.
+
+Активная волна после Load — та же: `status wave`, `waveTick` совпал с сохранённым, счётчик hostiles в HUD показывает тех же врагов, и страница затем доказывает, что матч снова живой (`snapshot.tick > rebuild.tick`). Клип после Load играет с того же presentation clock: поза на тике 61 та же, а не «примерно такая же». Guard не ослаблен: после Load Restart поднимает `replay-in-progress`, и инъекция через seam получает `{ accepted: false, reason: 'replay-in-progress' }`.
+
+Побеждённый матч: save на терминальном тике (319), reload, Load — `status victory`, полный `snapshot` совпал, `matchReports` содержит ровно один отчёт, равный исходному (`victory`, tick 319, gold 229, `enemyKilled 16`, `coreDamaged 0`). Core останавливает часы на terminal, поэтому загруженный матч стоит и читается дважды без гонки. Restart после Load повторил тот же матч (второй отчёт равен первому), New match очистил слот (`localStorage` пуст, индикатор `empty`, Load disabled) и дал preparation тика 0 с 220 золота, пустыми pads и Restart disabled.
+
+Пересборка сохранения без единой команды (пустой log, preparation на тике 12) — `requestedTick = tick = 12`, `snapshot` совпал, `commandCount 0`, `replaying false`: тик пересборки не зависит от того, есть ли что replay'ить, и в этом случае команды не блокируются.
+
+### Красные проги
+
+| Что снято | Что стало красным |
+|-----------|--------------------|
+| Проверка `tick` в валидаторе | Payload без `tick` принят как `ready` вместо `save-tick-invalid` — тест падает на кейсе «no tick at all»: индикатор слота `ready` вместо `unreadable` |
+| Проверка диапазона `[0, tick]` для записи | Запись на тике 17 при сохранённом 12 принята как `ready` — тест падает на кейсе «a command past the saved tick» |
+| `stopCeiling` из потолка stepping-цикла | Rebuild прибыл на тик 44 вместо сохранённого 43: строка состояния `Loaded · tick 44`, и сравнение тиков красное |
+
+Все три — подмена кода, а не «ошибка была раньше».
+
+### Подтверждения
+
+- **Load не создал второй путь инициализации.** `beginRecordedRun(stopTick)` — единственное место, где создаётся новый `Simulation`; Restart, Load и New match отличаются только аргументом и log. Тест проверяет, что после Load активна та же инфраструктура replay: `replayIndex` дошёл до конца log, `commandCount` совпал, каждая команда применилась на своём тике, guard `replay-in-progress` на месте.
+- **Core не тронут.** `src/game-core/*` не входит в diff; `npm run test:core` даёт те же `status victory, tick 323, gold 229`; артефакт `pulse-spire.glb` побайтово прежний — 20 044 байта, 580 треугольников, `sha256:32befa7a…`.
+- **Никаких игровых правил в client.** Валидатор не знает про стоимости, волны и экономику: он проверяет JSON, версии и порядок. Всё, что меняет состояние, идёт через `Simulation`.
+
+### Команды
+
+```text
+npm run typecheck   → ok
+npm run build       → ok
+npm test            → test:core ok (tick 323, gold 229), test:assets ok (те же 11 красных проверок),
+                      25 Playwright passed (1.0 min)
+npx playwright test --workers=6                 → 25 passed (1.0 min)
+npx playwright test --repeat-each=2 --workers=4 (новые сценарии) → 8 passed
+git status после npm test → чистый, кроме файлов задачи
+```
+
+Playwright шёл через `PLAYWRIGHT_EXECUTABLE_PATH` на установленный Chromium (версия браузера в `ms-playwright` в этом окружении старше, чем требует текущий `@playwright/test`); путь в проекте не сохранён.
+
+### Screenshots
+
+- `docs/screenshots/vertical-slice-match-load.png` — новый: восстановленный матч в середине волны, индикатор `Save · tick 61 · 4 commands`, строка `Loaded · tick 61`.
+- Пересняты под новый dock: `wave-combat-midwave.png`, `wave-combat-victory.png`, `vertical-slice-replay-reset.png`.
+
+### Остаток и что уходит в `0016`
+
+- `EOB-020` заведён: у тика в слоте нет верхней границы, потому что content её не задаёт. Правдоподобный, но огромный тик даёт долгую пересборку вместо отказа; это видно по идущему тику и badge прогресса, `New match` прерывает в любой момент. Решение принимается вместе с экраном входа.
+- `EOB-010` не тронут и остаётся отдельным: serialize `MatchSnapshot` и restore в core не делались, и локальный слот на command log + seed теперь есть та точка отсчёта, от которой этот вопрос решается на чистой основе.
+- В `0016` уходят: экран входа, решение про автозагрузку (сейчас её нет, и индикатор слота показывает, что слот есть), и полный E2E от меню до victory/defeat.
+
+### Статус
+
+Задача **на проверке**. В `docs/PLAN.md` остаётся без `[x]`.

@@ -102,6 +102,21 @@ const costOf = (towerId: string) => scenario.towers.find((tower) => tower.id ===
 
 type MatchReport = NonNullable<typeof window.__ECHOES_DEBUG__>['matchReports'][number];
 
+// A rebuilt run as the page read it on the tick the rebuild stopped on. It exists because a loaded
+// match is live again by the time anything outside the page could ask, so the state it arrived at
+// is captured where it happened — the same reason `matchReports` is captured in the page.
+type RebuildReading = {
+  requestedTick: number;
+  tick: number;
+  snapshot: NonNullable<typeof window.__ECHOES_DEBUG__>['snapshot'];
+  eventCounts: Record<SimulationEvent['type'], number>;
+  commandCount: number;
+  replayIndex: number;
+  replaying: boolean;
+  matchReports: MatchReport[];
+  poses: Array<{ entityId: number; towerId: string; clip: ClipReading | null }>;
+};
+
 type AssetBudgetsReading = NonNullable<typeof window.__ECHOES_DEBUG__>['assetBudgets'];
 
 type DebugReading = {
@@ -128,6 +143,7 @@ type DebugReading = {
   replayIndex: number;
   commandCount: number;
   matchReports: MatchReport[];
+  lastRebuild: RebuildReading | null;
   motion: { reducedMotion: boolean; combatBursts: number; enemyBob: number; clips: number; clipsPlaying: number };
   assets: { status: string; models: string[]; error: string | null };
   probe: {
@@ -227,6 +243,7 @@ const readDebug = (page: Page) =>
       replayIndex: debug.replayIndex,
       commandCount: debug.commandCount,
       matchReports: debug.matchReports,
+      lastRebuild: debug.lastRebuild,
       motion: debug.motion,
       assets: debug.assets,
       probe: debug.probe,
@@ -2322,5 +2339,542 @@ test('gives the refusal a block of its own and puts the budgets behind the dev f
   // Neither the block nor the diagnostics may cost the caption its readability.
   await expectNoChromeOverlap(page);
   await page.screenshot({ path: 'test-results/scene-chrome-dev-refusal.png', fullPage: true });
+  expect(pageErrors).toEqual([]);
+});
+
+// --- Match persistence ----------------------------------------------------------------------
+
+// The slot is a local artifact and the client is its only reader, so the test writes and reads it
+// the same way. The key carries its schema version on purpose: a payload of a different shape
+// belongs to a different key, and a payload of a different content version has to be refused by the
+// validator instead of silently ignored.
+const MATCH_SAVE_KEY = 'echoes-of-burbenog:match:v1';
+const MATCH_SAVE_SCHEMA = 1;
+const TRAINING_CONTENT_VERSION = 1;
+const SAVE_COMMANDS = placements.length + 1;
+
+const readSlot = (page: Page) => page.evaluate((key) => window.localStorage.getItem(key), MATCH_SAVE_KEY);
+
+const writeSlot = (page: Page, value: string) =>
+  page.evaluate(({ key, raw }) => window.localStorage.setItem(key, raw), { key: MATCH_SAVE_KEY, raw: value });
+
+// The pose is the one reading of the two that is not a pure function of the input: the clip is
+// advanced by whatever the frame did, so two runs of the same tick agree to floating point and not
+// bit for bit. Everything else is compared exactly.
+const expectSamePose = (loaded: ClipReading | null, saved: ClipReading | null) => {
+  expect(loaded, 'the rebuilt run has a clip to compare').not.toBeNull();
+  expect(loaded?.phase).toBeCloseTo(saved?.phase ?? Number.NaN, 6);
+  expect(loaded?.time).toBeCloseTo(saved?.time ?? Number.NaN, 6);
+  loaded?.pose.forEach((component, index) => {
+    expect(component).toBeCloseTo(saved?.pose[index] ?? Number.NaN, 6);
+  });
+};
+
+test('restores the same match from a real page reload', async ({ page }) => {
+  test.setTimeout(180_000);
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await page.goto('/');
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await waitForAssetsReady(page);
+  await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'empty');
+  await expect(page.getByTestId('load-match')).toBeDisabled();
+
+  // Mid-wave is where "the same match" is a real claim: gold, towers, enemies, the RNG and the pose
+  // of the model all differ from anything a fresh preparation can show. The clock is frozen first,
+  // so the state that is saved is a state with a known tick rather than one still moving.
+  await armDefendedWave(page);
+  await page.getByTestId('start-wave').click();
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.enemies.length ?? 0) >= 6, undefined, {
+    timeout: 60_000,
+  });
+  await page.getByTestId('pause-toggle').click();
+  const marks = await readClockMarks(page);
+  expect(findMark(marks, 'pause').tick).toBe((await readDebugOrThrow(page)).snapshot.tick);
+
+  const saved = await readDebugOrThrow(page);
+  expect(saved.paused).toBe(true);
+  expect(saved.snapshot.status).toBe('wave');
+  expect(saved.snapshot.enemies.length).toBeGreaterThanOrEqual(6);
+  expect(saved.eventCounts.towerFired).toBeGreaterThan(0);
+  expect(saved.commandCount).toBe(SAVE_COMMANDS);
+  expect(saved.lastRebuild).toBeNull();
+  const savedTick = saved.snapshot.tick;
+  const savedSpire = saved.towerModels.find((view) => view.modelId === 'pulse-spire');
+  expect(savedSpire?.clip).not.toBeNull();
+
+  await page.getByTestId('save-match').click();
+  await expect(page.getByTestId('save-feedback')).toHaveAttribute('data-result', 'saved');
+  await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'ready');
+  await expect(page.getByTestId('save-slot')).toHaveText(`Save · tick ${savedTick} · ${SAVE_COMMANDS} commands`);
+
+  // The payload is the input of the match and nothing else: schema version, content version, seed,
+  // the tick and the tick-ordered log. No snapshot, no entity, no position.
+  const raw = await readSlot(page);
+  expect(raw).not.toBeNull();
+  const payload = JSON.parse(raw ?? 'null') as {
+    schemaVersion: number;
+    contentVersion: number;
+    seed: number;
+    tick: number;
+    log: Array<{ tick: number; command: { type: string; padId?: string; towerId?: string } }>;
+  };
+  expect(Object.keys(payload).sort()).toEqual(['contentVersion', 'log', 'schemaVersion', 'seed', 'tick']);
+  expect(payload.schemaVersion).toBe(MATCH_SAVE_SCHEMA);
+  expect(payload.contentVersion).toBe(TRAINING_CONTENT_VERSION);
+  expect(payload.seed).toBe(scenario.seed);
+  expect(payload.tick).toBe(savedTick);
+  expect(payload.log).toHaveLength(SAVE_COMMANDS);
+  expect(payload.log.map((entry) => entry.command.type)).toEqual([
+    'placeTower',
+    'placeTower',
+    'placeTower',
+    'startWave',
+  ]);
+  const savedPlan = await readCommandPlan(page);
+  expect(payload.log.map((entry) => entry.tick)).toEqual(savedPlan?.map((entry) => entry.tick));
+  // Saving reads the match and writes the slot; it does not change the match.
+  const afterSave = await readDebugOrThrow(page);
+  expect(afterSave.snapshot).toEqual(saved.snapshot);
+  expect(afterSave.eventCounts).toEqual(saved.eventCounts);
+  expect(afterSave.commandCount).toBe(saved.commandCount);
+
+  // A real reload, not a call into the page: everything the page knew has to come back from the slot.
+  await page.reload();
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  const reloaded = await readDebugOrThrow(page);
+  expect(reloaded.commandCount).toBe(0);
+  expect(reloaded.snapshot.status).toBe('preparation');
+  expect(reloaded.snapshot.towers).toEqual([]);
+  expect(reloaded.snapshot.tick).toBeLessThan(savedTick);
+  expect(reloaded.lastRebuild).toBeNull();
+  // The slot is visible before anything is loaded from it, and nothing was loaded by itself.
+  await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'ready');
+  await expect(page.getByTestId('save-slot')).toHaveText(`Save · tick ${savedTick} · ${SAVE_COMMANDS} commands`);
+  await expect(page.getByTestId('load-match')).toBeEnabled();
+  await expect(page.getByTestId('save-feedback')).toHaveAttribute('data-result', 'idle');
+  await expect(page.getByTestId('match-phase')).toHaveAttribute('data-phase', 'preparation');
+
+  // The rebuild runs on the frame loop like any replay, so it is sped up with the same clamp a real
+  // frame goes through: five ticks per frame is the product's own maximum.
+  await setFrameDelta(page, 0.25);
+  await waitForAssetsReady(page);
+  await page.getByTestId('load-match').click();
+  await expect(page.getByTestId('save-feedback')).toHaveAttribute('data-result', 'loaded', { timeout: 60_000 });
+  await expect(page.getByTestId('save-feedback')).toHaveText(`Loaded · tick ${savedTick}`);
+
+  const loaded = await readDebugOrThrow(page);
+  const rebuild = loaded.lastRebuild;
+  if (!rebuild) {
+    throw new Error('the rebuild did not record the tick it arrived on');
+  }
+  // The claim under test, compared and not observed: the rebuild arrived on the saved tick, and the
+  // state it carries there is the state the player saved. `snapshot` covers tick, gold, pads, towers,
+  // enemies, the RNG and the phase; the rest is the machinery around the core.
+  expect(rebuild.requestedTick).toBe(savedTick);
+  expect(rebuild.tick).toBe(savedTick);
+  expect(rebuild.snapshot).toEqual(saved.snapshot);
+  expect(rebuild.eventCounts).toEqual(saved.eventCounts);
+  expect(rebuild.commandCount).toBe(saved.commandCount);
+  expect(rebuild.replayIndex).toBe(rebuild.commandCount);
+  expect(rebuild.replaying).toBe(false);
+  expect(rebuild.matchReports).toEqual([]);
+
+  // Load went through the replay and not beside it: the log is the one the slot carried, every
+  // command reached the core on the tick it was recorded on, and the guard is still armed.
+  const loadedPlan = await readCommandPlan(page);
+  expect(loadedPlan).toHaveLength(SAVE_COMMANDS);
+  loadedPlan?.forEach((entry, index) => {
+    expect(entry.appliedTick, `command ${index} of the rebuild landed on tick ${entry.appliedTick}`).toBe(entry.tick);
+  });
+  expect(loaded.commandCount).toBe(SAVE_COMMANDS);
+  expect(loaded.replaying).toBe(false);
+  expect(loaded.replayIndex).toBe(SAVE_COMMANDS);
+  // The presentation that came out of the rebuild is the projection of its state, like any other.
+  expectProjectionMatchesSnapshot(loaded);
+  expectSamePose(
+    rebuild.poses.find((entry) => entry.towerId === 'pulse-spire')?.clip ?? null,
+    savedSpire?.clip ?? null,
+  );
+  // The wave is still the wave that was saved, and the match is live again: a loaded match is not a
+  // frozen screenshot of one.
+  expect(rebuild.snapshot.status).toBe('wave');
+  expect(rebuild.snapshot.waveIndex).toBe(saved.snapshot.waveIndex);
+  expect(rebuild.snapshot.waveTick).toBe(saved.snapshot.waveTick);
+  expect(rebuild.snapshot.enemies.length).toBeGreaterThanOrEqual(6);
+  await page.waitForFunction((tick) => (window.__ECHOES_DEBUG__?.snapshot.tick ?? 0) > tick, rebuild.tick, {
+    timeout: 30_000,
+  });
+  expect(await readSlot(page)).toBe(raw);
+
+  await expect(page.getByTestId('viewport')).toHaveAttribute('data-replay', 'idle');
+  await expect(page.getByTestId('match-phase')).toHaveAttribute('data-phase', 'wave');
+  await expect(page.getByTestId('save-match')).toBeEnabled();
+  await expect(page.getByTestId('state-badge')).toBeHidden();
+  await page.screenshot({ path: 'test-results/vertical-slice-match-load.png', fullPage: true });
+
+  // The guard the load ran behind is the guard a restart arms, and a load did not weaken it. The
+  // clock is frozen first, so the restarted run can be read at its very first tick.
+  await page.getByTestId('pause-toggle').click();
+  await page.getByTestId('restart-match').click();
+  const restarted = await readDebugOrThrow(page);
+  expect(restarted.paused).toBe(true);
+  expect(restarted.replaying).toBe(true);
+  expect(restarted.replayIndex).toBe(0);
+  expect(restarted.snapshot.tick).toBe(0);
+  const injected = await page.evaluate(() =>
+    window.__ECHOES_DEBUG__?.dispatch({ type: 'placeTower', padId: 'pad-core', towerId: 'pulse-spire' }),
+  );
+  expect(injected).toEqual({ accepted: false, reason: 'replay-in-progress' });
+  expect(pageErrors).toEqual([]);
+  console.log(
+    `reload: saved tick ${savedTick} with ${SAVE_COMMANDS} commands, rebuild arrived on ` +
+      `${rebuild.tick} (requested ${rebuild.requestedTick}), status ${rebuild.snapshot.status}, ` +
+      `gold ${rebuild.snapshot.gold}, ${rebuild.snapshot.enemies.length} enemies, ` +
+      `plan ${describePlan(loadedPlan ?? [])}\n` +
+      `pose saved   : time ${(savedSpire?.clip?.time ?? 0).toFixed(4)}s phase ${savedSpire?.clip?.phase ?? 0} ` +
+      `pose [${(savedSpire?.clip?.pose ?? []).map(round4)}]\n` +
+      `pose rebuilt : time ${(rebuild.poses[0]?.clip?.time ?? 0).toFixed(4)}s phase ${rebuild.poses[0]?.clip?.phase ?? 0} ` +
+      `pose [${(rebuild.poses[0]?.clip?.pose ?? []).map(round4)}]`,
+  );
+});
+
+test('keeps a won match won after a load and clears the slot on a new match', async ({ page }) => {
+  test.setTimeout(180_000);
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await page.goto('/');
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await waitForAssetsReady(page);
+
+  await armDefendedWave(page);
+  await page.getByTestId('start-wave').click();
+  await page.waitForFunction(() => window.__ECHOES_DEBUG__?.snapshot.status === 'victory', undefined, {
+    timeout: 90_000,
+  });
+
+  const first = await readDebugOrThrow(page);
+  expect(first.matchReports).toHaveLength(1);
+  const firstReport = first.matchReports[0];
+  expect(firstReport?.status).toBe('victory');
+  expect(firstReport?.gold).toBe(victoryGold);
+  const terminalTick = firstReport?.tick ?? 0;
+  expect(first.snapshot.tick).toBe(terminalTick);
+
+  await page.getByTestId('save-match').click();
+  await expect(page.getByTestId('save-feedback')).toHaveAttribute('data-result', 'saved');
+  await expect(page.getByTestId('save-slot')).toHaveText(`Save · tick ${terminalTick} · ${SAVE_COMMANDS} commands`);
+
+  await page.reload();
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  const reloaded = await readDebugOrThrow(page);
+  expect(reloaded.snapshot.status).toBe('preparation');
+  expect(reloaded.matchReports).toEqual([]);
+  expect(reloaded.lastRebuild).toBeNull();
+  await expect(page.getByTestId('match-result')).toBeHidden();
+
+  await setFrameDelta(page, 0.25);
+  await waitForAssetsReady(page);
+  await page.getByTestId('load-match').click();
+  await expect(page.getByTestId('save-feedback')).toHaveAttribute('data-result', 'loaded', { timeout: 60_000 });
+
+  const loaded = await readDebugOrThrow(page);
+  const rebuild = loaded.lastRebuild;
+  if (!rebuild) {
+    throw new Error('the rebuild did not record the tick it arrived on');
+  }
+  // A terminal state is saved as it is: the rebuild does not turn a won match into a new
+  // preparation, and the report it writes is the report the run that was saved wrote.
+  expect(rebuild.requestedTick).toBe(terminalTick);
+  expect(rebuild.tick).toBe(terminalTick);
+  expect(rebuild.snapshot.status).toBe('victory');
+  expect(rebuild.snapshot).toEqual(first.snapshot);
+  expect(rebuild.eventCounts).toEqual(first.eventCounts);
+  expect(rebuild.matchReports).toEqual([firstReport]);
+  expect(rebuild.replaying).toBe(false);
+  expect(rebuild.replayIndex).toBe(rebuild.commandCount);
+  await expect(page.getByTestId('match-result')).toBeVisible();
+  await expect(page.getByTestId('match-result')).toHaveText('Sector secured');
+  await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'terminal');
+  await expect(page.getByTestId('command-feedback')).toHaveText('Sector secured · restart repeats this run exactly');
+  await expect(page.getByTestId('save-match')).toBeEnabled();
+  await expect(page.getByTestId('gold-value')).toHaveText(String(victoryGold));
+
+  // The core's own clock is stopped on a terminal state, so the loaded match holds still and can be
+  // read twice without a race between the two readings.
+  const settled = await readDebugOrThrow(page);
+  expect(settled.snapshot).toEqual(first.snapshot);
+  expect(settled.matchReports).toEqual([firstReport]);
+  await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'ready');
+
+  // Restart is the other action and keeps the recorded run: it repeats this match exactly. The clock
+  // is frozen across the restart, so the repeated run can be read at its first tick instead of
+  // wherever a sped-up replay happened to be.
+  await page.getByTestId('pause-toggle').click();
+  await page.getByTestId('restart-match').click();
+  const restarted = await readDebugOrThrow(page);
+  expect(restarted.paused).toBe(true);
+  expect(restarted.snapshot.tick).toBe(0);
+  expect(restarted.snapshot.gold).toBe(startingGold);
+  expect(restarted.commandCount).toBe(SAVE_COMMANDS);
+  expect(restarted.replaying).toBe(true);
+  expect(restarted.replayIndex).toBe(0);
+  await page.getByTestId('pause-toggle').click();
+  await page.waitForFunction(() => window.__ECHOES_DEBUG__?.snapshot.status === 'victory', undefined, {
+    timeout: 90_000,
+  });
+  const rerun = await readDebugOrThrow(page);
+  expect(rerun.matchReports).toHaveLength(2);
+  expect(rerun.matchReports[1]).toEqual(firstReport);
+  expect(rerun.snapshot.gold).toBe(victoryGold);
+
+  // New match is not a restart: the slot goes away and the recorded run is not replayed at all.
+  // The clock is frozen first so the new preparation can be read without the round-trip in it.
+  await page.getByTestId('pause-toggle').click();
+  await page.getByTestId('new-match').click();
+
+  const cleared = await readDebugOrThrow(page);
+  expect(cleared.snapshot.status).toBe('preparation');
+  expect(cleared.snapshot.tick).toBe(0);
+  expect(cleared.snapshot.gold).toBe(startingGold);
+  expect(cleared.snapshot.preparationTicksLeft).toBe(firstWavePrepTicks);
+  expect(cleared.snapshot.pads['pad-east']).toBeNull();
+  expect(cleared.snapshot.towers).toEqual([]);
+  expect(cleared.snapshot.enemies).toEqual([]);
+  expect(cleared.commandCount).toBe(0);
+  expect(cleared.replaying).toBe(false);
+  expect(cleared.rendered.towers).toBe(0);
+  expect(cleared.eventCounts).toEqual(emptyEventCounts());
+  expect(cleared.matchReports).toHaveLength(2);
+  expect(await readSlot(page)).toBeNull();
+  await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'empty');
+  await expect(page.getByTestId('save-slot')).toHaveText('No save slot');
+  await expect(page.getByTestId('load-match')).toBeDisabled();
+  await expect(page.getByTestId('save-feedback')).toHaveAttribute('data-result', 'cleared');
+  await expect(page.getByTestId('command-feedback')).toHaveText('New match · fresh preparation, nothing recorded');
+  await expect(page.getByTestId('match-result')).toBeHidden();
+  await expect(page.getByTestId('restart-match')).toBeDisabled();
+  const hud = await readHud(page);
+  if (!hud) {
+    throw new Error('HUD contract missing');
+  }
+  expect(hud.restartDisabled).toBe(true);
+  expect(hud.phase).toBe('preparation');
+  expect(hud.status).toBe('preparation');
+  expect(hud.snapshotGold).toBe(startingGold);
+  expect(pageErrors).toEqual([]);
+});
+
+test('refuses a save that does not match the contract and leaves the slot untouched', async ({ page }) => {
+  test.setTimeout(120_000);
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await page.goto('/');
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await waitForAssetsReady(page);
+
+  const log = [
+    { tick: 0, command: { type: 'placeTower', padId: 'pad-east', towerId: 'pulse-spire' } },
+    { tick: 0, command: { type: 'startWave' } },
+  ];
+  const savePayload = (overrides: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      schemaVersion: MATCH_SAVE_SCHEMA,
+      contentVersion: TRAINING_CONTENT_VERSION,
+      seed: scenario.seed,
+      tick: 12,
+      log,
+      ...overrides,
+    });
+
+  // Every case is a local artifact this build cannot rebuild, and each one is refused by form or by
+  // version — none of them is a question about the rules of a match. A slot is read on boot, on save
+  // and on load, so a substituted payload reaches the validator the way a slot left behind by
+  // another build does: the page looks at it.
+  const cases: Array<{ name: string; raw: string; reason: string; text: string }> = [
+    {
+      name: 'a schema version this build does not read',
+      raw: savePayload({ schemaVersion: MATCH_SAVE_SCHEMA + 1 }),
+      reason: 'save-schema-version',
+      text: 'Save format v2 is not the v1 this build reads',
+    },
+    {
+      name: 'another content version',
+      raw: savePayload({ contentVersion: TRAINING_CONTENT_VERSION + 6 }),
+      reason: 'save-content-version',
+      text: 'Save holds content v7',
+    },
+    {
+      name: 'a seed this build does not run',
+      raw: savePayload({ seed: scenario.seed + 1 }),
+      reason: 'save-seed-mismatch',
+      text: `Save holds seed ${scenario.seed + 1}`,
+    },
+    {
+      name: 'no tick at all',
+      raw: JSON.stringify({ schemaVersion: MATCH_SAVE_SCHEMA, contentVersion: TRAINING_CONTENT_VERSION, seed: scenario.seed, log }),
+      reason: 'save-tick-invalid',
+      text: 'Save tick undefined is not a whole tick count',
+    },
+    {
+      name: 'a command past the saved tick',
+      raw: savePayload({ log: [{ tick: 17, command: { type: 'startWave' } }] }),
+      reason: 'save-entry-tick-out-of-range',
+      text: 'claims tick 17 outside [0, 12]',
+    },
+    {
+      name: 'a command no build knows',
+      raw: savePayload({ log: [{ tick: 0, command: { type: 'placeKeep' } }] }),
+      reason: 'save-command-unknown',
+      text: 'is not a command this build knows',
+    },
+    {
+      name: 'a log that walks back in time',
+      raw: savePayload({
+        log: [
+          { tick: 4, command: { type: 'startWave' } },
+          { tick: 2, command: { type: 'startWave' } },
+        ],
+      }),
+      reason: 'save-entry-out-of-order',
+      text: 'claims tick 2 after tick 4',
+    },
+    {
+      name: 'text where a payload belongs',
+      raw: 'not a payload at all',
+      reason: 'save-slot-unreadable',
+      text: 'Save slot is not readable JSON',
+    },
+  ];
+
+  // The first refusal happens on a page that is playing: the artifact is left alone and the match in
+  // front of the player does not move, which is the property the version check exists for.
+  const incompatible = cases[1];
+  if (!incompatible) {
+    throw new Error('the content version case is missing');
+  }
+  await writeSlot(page, incompatible.raw);
+  await page.reload();
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'unreadable');
+  await expect(page.getByTestId('load-match')).toBeEnabled();
+  await waitForAssetsReady(page);
+
+  await armDefendedWave(page);
+  await page.getByTestId('start-wave').click();
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.enemies.length ?? 0) > 0, undefined, {
+    timeout: 60_000,
+  });
+  // Frozen, so that a refusal which moved the match would be visible and not a matter of timing.
+  await page.getByTestId('pause-toggle').click();
+  const frozen = await readDebugOrThrow(page);
+  expect(frozen.paused).toBe(true);
+  expect(frozen.snapshot.status).toBe('wave');
+
+  await page.getByTestId('load-match').click();
+  await expect(page.getByTestId('save-feedback')).toHaveAttribute('data-result', 'refused');
+  await expect(page.getByTestId('save-feedback')).toHaveAttribute('data-reason', incompatible.reason);
+  await expect(page.getByTestId('save-feedback')).toContainText('slot left untouched');
+  expect(await readSlot(page), 'the slot was rewritten').toBe(incompatible.raw);
+  const refused = await readDebugOrThrow(page);
+  expect(refused.snapshot, 'the match moved').toEqual(frozen.snapshot);
+  expect(refused.eventCounts).toEqual(frozen.eventCounts);
+  expect(refused.commandCount).toBe(frozen.commandCount);
+  expect(refused.replaying).toBe(false);
+  expect(refused.lastRebuild, 'a rebuild ran anyway').toBeNull();
+  await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'unreadable');
+  await expect(page.getByTestId('match-phase')).toHaveAttribute('data-phase', 'wave');
+  await expect(page.getByTestId('save-match')).toBeEnabled();
+
+  for (const refusal of cases) {
+    if (refusal.name === incompatible.name) {
+      continue;
+    }
+    await writeSlot(page, refusal.raw);
+    await page.reload();
+    await expect(page.getByTestId('scene-canvas')).toBeVisible();
+    await expect(page.getByTestId('save-slot'), refusal.name).toHaveAttribute('data-state', 'unreadable');
+    await expect(page.getByTestId('load-match'), refusal.name).toBeEnabled();
+    await page.getByTestId('load-match').click();
+    await expect(page.getByTestId('save-feedback'), refusal.name).toHaveAttribute('data-result', 'refused');
+    await expect(page.getByTestId('save-feedback'), refusal.name).toHaveAttribute('data-reason', refusal.reason);
+    await expect(page.getByTestId('save-feedback'), refusal.name).toContainText(refusal.text);
+    await expect(page.getByTestId('save-feedback'), refusal.name).toContainText('slot left untouched');
+    // The refusal is the whole outcome: the artifact stays byte for byte as it was, and a page that
+    // refused it has no run of its own that the slot touched.
+    expect(await readSlot(page), `${refusal.name}: the slot was rewritten`).toBe(refusal.raw);
+    const after = await readDebugOrThrow(page);
+    expect(after.lastRebuild, `${refusal.name}: a rebuild ran anyway`).toBeNull();
+    expect(after.commandCount, `${refusal.name}: the log was taken`).toBe(0);
+    expect(after.snapshot.status, `${refusal.name}: the match was replaced`).toBe('preparation');
+    expect(after.snapshot.towers).toEqual([]);
+    expect(after.snapshot.gold).toBe(startingGold);
+  }
+
+  // A slot nothing can read is still cleared by an explicit action, and only by that one. The clock
+  // is frozen first so the new preparation can be read without the round-trip in it.
+  await page.getByTestId('pause-toggle').click();
+  await page.getByTestId('new-match').click();
+  expect(await readSlot(page)).toBeNull();
+  await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'empty');
+  await expect(page.getByTestId('load-match')).toBeDisabled();
+  const cleared = await readDebugOrThrow(page);
+  expect(cleared.snapshot.tick).toBe(0);
+  expect(cleared.commandCount).toBe(0);
+  expect(pageErrors).toEqual([]);
+});
+
+test('rebuilds a preparation-only save to its tick with nothing to replay', async ({ page }) => {
+  test.setTimeout(120_000);
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await page.goto('/');
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await waitForAssetsReady(page);
+  await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'empty');
+
+  // A preparation with no command recorded is still a save: the match has a tick, and that tick is
+  // all a load has to bring back, because the log that produced it is empty. The tick of a rebuild
+  // is therefore not a property of the replay — there is no replay here.
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.tick ?? 0) >= 10, undefined, { timeout: 30_000 });
+  await page.getByTestId('pause-toggle').click();
+  const prepared = await readDebugOrThrow(page);
+  expect(prepared.snapshot.status).toBe('preparation');
+  expect(prepared.commandCount).toBe(0);
+  expect(prepared.snapshot.towers).toEqual([]);
+  const preparedTick = prepared.snapshot.tick;
+  expect(prepared.snapshot.preparationTicksLeft).toBe(Math.max(0, firstWavePrepTicks - preparedTick));
+
+  await page.getByTestId('save-match').click();
+  await expect(page.getByTestId('save-feedback')).toHaveAttribute('data-result', 'saved');
+  await expect(page.getByTestId('save-slot')).toHaveText(`Save · tick ${preparedTick} · 0 commands`);
+
+  await page.reload();
+  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await setFrameDelta(page, 0.25);
+  await waitForAssetsReady(page);
+  await page.getByTestId('load-match').click();
+  await expect(page.getByTestId('save-feedback')).toHaveAttribute('data-result', 'loaded', { timeout: 30_000 });
+
+  const loaded = await readDebugOrThrow(page);
+  const rebuild = loaded.lastRebuild;
+  if (!rebuild) {
+    throw new Error('the rebuild did not record the tick it arrived on');
+  }
+  expect(rebuild.requestedTick).toBe(preparedTick);
+  expect(rebuild.tick).toBe(preparedTick);
+  expect(rebuild.snapshot).toEqual(prepared.snapshot);
+  expect(rebuild.eventCounts).toEqual(prepared.eventCounts);
+  expect(rebuild.commandCount).toBe(0);
+  expect(rebuild.replayIndex).toBe(0);
+  // Nothing was recorded, so nothing was locked: a rebuilt run that has no replay is not a replay.
+  expect(rebuild.replaying).toBe(false);
+  expect(loaded.replaying).toBe(false);
+  expect(rebuild.poses).toEqual([]);
+  expect(rebuild.matchReports).toEqual([]);
+  await expect(page.getByTestId('match-phase')).toHaveAttribute('data-phase', 'preparation');
+  await expect(page.getByTestId('save-match')).toBeEnabled();
+  await expect(page.getByTestId('restart-match')).toBeDisabled();
+  await expect(page.getByTestId('state-badge')).toBeHidden();
   expect(pageErrors).toEqual([]);
 });
