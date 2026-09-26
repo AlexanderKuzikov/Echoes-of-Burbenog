@@ -90,6 +90,8 @@ button {
 .scene-caption span,
 .map-legend,
 .wave-chip,
+.scene-report-kicker,
+.scene-diagnostics-kicker,
 .state-badge {
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -333,7 +335,9 @@ h1 {
 .scene-caption,
 .selection-card,
 .map-legend,
-.wave-chip {
+.wave-chip,
+.scene-report,
+.scene-diagnostics {
   position: absolute;
   z-index: 2;
   pointer-events: none;
@@ -388,6 +392,68 @@ h1 {
   border-radius: 50%;
   background: #6ee2cf;
   box-shadow: 0 0 0 4px rgba(110, 226, 207, 0.12), 0 0 14px #6ee2cf;
+}
+
+/* The refusal gets its own block under the caption instead of a longer chip: the one line stays one
+   line, and the reason that could not fit into it is shown in full. The block wraps instead of
+   scrolling or ellipsising, so a 64-character digest is readable without opening the seam. */
+.scene-report {
+  top: 104px;
+  left: 22px;
+  display: grid;
+  gap: 5px;
+  max-width: min(440px, 52%);
+  padding: 11px 14px;
+  border-left: 2px solid #ff9a8c;
+  border-radius: 0 10px 10px 0;
+  background: linear-gradient(90deg, rgba(31, 13, 13, 0.92), rgba(31, 13, 13, 0.55));
+}
+
+.scene-report[hidden] {
+  display: none;
+}
+
+.scene-report-kicker {
+  color: #ff9a8c;
+  font-size: 0.58rem;
+  font-weight: 750;
+}
+
+.scene-report-reason {
+  margin: 0;
+  color: #f4dcd8;
+  font-size: 0.66rem;
+  font-weight: 600;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* Created by `main.ts` only when the `dev` query flag is present, so it needs no hidden state. */
+.scene-diagnostics {
+  top: 62px;
+  right: 20px;
+  display: grid;
+  gap: 3px;
+  max-width: min(330px, 42%);
+  padding: 10px 12px;
+  border: 1px solid rgba(143, 184, 184, 0.2);
+  border-radius: 10px;
+  background: rgba(6, 18, 24, 0.84);
+  color: #9bb4b2;
+  font-size: 0.55rem;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.scene-diagnostics p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.scene-diagnostics-kicker {
+  color: #6ee2cf;
+  font-size: 0.55rem;
+  font-weight: 750;
 }
 
 .map-legend {
@@ -777,6 +843,19 @@ h1 {
     bottom: 58px;
     left: 12px;
     width: min(220px, 60%);
+  }
+
+  .scene-report,
+  .scene-diagnostics {
+    max-width: calc(100% - 44px);
+  }
+
+  .scene-report {
+    left: 12px;
+  }
+
+  .scene-diagnostics {
+    right: 12px;
   }
 
   .map-legend {

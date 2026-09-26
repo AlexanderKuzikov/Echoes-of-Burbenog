@@ -238,6 +238,8 @@ const stateBadge = document.querySelector<HTMLElement>('[data-testid="state-badg
 const startWaveButton = document.querySelector<HTMLButtonElement>('[data-testid="start-wave"]');
 const pauseToggle = document.querySelector<HTMLButtonElement>('[data-testid="pause-toggle"]');
 const restartButton = document.querySelector<HTMLButtonElement>('[data-testid="restart-match"]');
+const sceneReport = document.querySelector<HTMLElement>('[data-testid="scene-report"]');
+const sceneReportReason = document.querySelector<HTMLElement>('[data-testid="scene-report-reason"]');
 
 if (
   !sceneMount ||
@@ -259,10 +261,46 @@ if (
   !stateBadge ||
   !startWaveButton ||
   !pauseToggle ||
-  !restartButton
+  !restartButton ||
+  !sceneReport ||
+  !sceneReportReason
 ) {
   throw new Error('Bootstrap DOM is incomplete');
 }
+
+// Diagnostics are a developer surface, not a HUD control, so the flag is a query parameter and the
+// element is created only when it is asked for. Without the flag there is nothing in the DOM to
+// hide, which is what makes "no diagnostics in the screenshot" true by construction instead of by
+// a stylesheet rule that a screenshot can outvote.
+const devFlag = new URLSearchParams(window.location.search).get('dev');
+const devDiagnosticsOn = devFlag !== null && devFlag !== '0' && devFlag !== 'false';
+
+type DevDiagnostics = {
+  rows: Record<string, HTMLElement>;
+};
+
+// One row per reading, each with a stable `data-diag` key, so a test compares the block against the
+// seam instead of against a formatted string nobody can parse.
+const createDevDiagnostics = (): DevDiagnostics => {
+  const element = document.createElement('div');
+  element.className = 'scene-diagnostics';
+  element.dataset.testid = 'scene-diagnostics';
+  const kicker = document.createElement('span');
+  kicker.className = 'scene-diagnostics-kicker';
+  kicker.textContent = 'Dev diagnostics · ?dev';
+  element.append(kicker);
+  const rows: Record<string, HTMLElement> = {};
+  for (const key of ['scene', 'model', 'registry', 'checks']) {
+    const row = document.createElement('p');
+    row.dataset.diag = key;
+    element.append(row);
+    rows[key] = row;
+  }
+  viewportShell.append(element);
+  return { rows };
+};
+
+const devDiagnostics = devDiagnosticsOn ? createDevDiagnostics() : null;
 
 const config = createTrainingScenario();
 let simulation = createSimulation(config);
@@ -1001,24 +1039,74 @@ const loadModel = async (entry: ModelManifestEntry): Promise<LoadedModel> => {
 // exact value to compare.
 const viewportRefusal = (reason: string): string => reason.replace(/(sha256:)([0-9a-f]{8})[0-9a-f]+/gi, '$1$2…');
 
-const applyAssetStatus = () => {
+// Two surfaces, one source. What a player reads is the state of the match, the models that came
+// with it and whether the artifact was checked; every number this machine measured — scene budgets,
+// renderer counters, load time, which checks ran — is developer information. A budget is measured
+// on the build machine and is not a promise to a player on a slow connection, so printing it in
+// the status line would be a false alarm dressed as a trustworthy status.
+const gameplayStatus = (): string => {
   const status = assetRegistry.status;
-  viewportShell.dataset.assets = status;
   if (status === 'ready') {
     // Which checks ran is part of the message, not a detail of the debug seam: without it a
     // skipped hash verification is indistinguishable from a passed one.
     const integrity = assetRegistry.checks.performed.contentHash
       ? 'integrity checked'
       : `content hash not checked (${assetRegistry.modelChecks.find((check) => check.contentHash.skippedReason)?.contentHash.skippedReason ?? 'no reason given'})`;
-    const overBudget = sceneBudgetFailures.length > 0 ? ` · scene over budget: ${describeFailures(sceneBudgetFailures)}` : '';
-    statusLabel.textContent = `Scene online · models ready (${assetRegistry.modelIds.join(', ')}) · ${integrity}${overBudget}`;
-    return;
+    return `Scene online · models ready (${assetRegistry.modelIds.join(', ')}) · ${integrity}`;
   }
   if (status === 'error') {
-    statusLabel.textContent = `Scene online · model registry failed: ${viewportRefusal(assetRegistry.error ?? 'unknown reason')}`;
+    return `Scene online · model registry failed: ${viewportRefusal(assetRegistry.error ?? 'unknown reason')}`;
+  }
+  return 'Scene online · loading models';
+};
+
+// The refusal has its own place because the one-line chip is not allowed to grow: a digest that
+// does not fit is exactly the case this block exists for. It is never shortened here, and the
+// reason is also written to `data-reason`, so the exact string can be read without parsing text.
+const applyAssetRefusal = (status: AssetStatus) => {
+  const reason = status === 'error' ? assetRegistry.error ?? 'unknown reason' : null;
+  sceneReport.hidden = reason === null;
+  sceneReportReason.dataset.reason = reason ?? '';
+  sceneReportReason.textContent = reason ?? '';
+};
+
+const paintDevDiagnostics = () => {
+  if (!devDiagnostics) {
     return;
   }
-  statusLabel.textContent = 'Scene online · loading models';
+  const { performed, models, registry, scene } = assetRegistry.checks;
+  const [model] = models;
+  const rig = model?.skeleton ?? null;
+  const modelLine = model
+    ? `Model ${model.modelId} ${model.actualBytes}/${MODEL_BUDGET.bytes} B · ${model.triangles}/${MODEL_BUDGET.triangles} tris · ${rig?.bones ?? 0}/${MODEL_BUDGET.bones} bones · ${rig?.animationClips ?? 0}/${MODEL_BUDGET.animationClips} clips`
+    : `Model — / ${MODEL_BUDGET.bytes} B · — / ${MODEL_BUDGET.triangles} tris · — / ${MODEL_BUDGET.bones} bones · — / ${MODEL_BUDGET.animationClips} clips`;
+  devDiagnostics.rows.scene!.textContent = scene
+    ? `Scene ${scene.drawCalls}/${SCENE_BUDGET.drawCalls} calls · ${scene.renderedTriangles}/${SCENE_BUDGET.renderedTriangles} tris · ${scene.shaderPrograms}/${SCENE_BUDGET.shaderPrograms} programs · ${Math.round(scene.assetLoadMs)}/${SCENE_BUDGET.assetLoadMs} ms load`
+    : 'Scene not measured yet';
+  devDiagnostics.rows.model!.textContent = modelLine;
+  devDiagnostics.rows.registry!.textContent = registry
+    ? `Registry ${registry.models}/${REGISTRY_BUDGET.models} models · ${registry.bytes}/${REGISTRY_BUDGET.bytes} B · ${registry.triangles}/${REGISTRY_BUDGET.triangles} tris`
+    : 'Registry not measured yet';
+  // A check that did not run is stated as such, and a hash that was skipped carries its reason: a
+  // green reading must never be producible by not looking.
+  const skippedHash = model?.contentHash.skippedReason;
+  devDiagnostics.rows.checks!.textContent = [
+    `bytes ${performed.bytes ? '✓' : 'not run'}`,
+    `content hash ${performed.contentHash ? '✓' : skippedHash ? `skipped (${skippedHash})` : 'not run'}`,
+    `node types ${performed.nodeTypes ? '✓' : 'not run'}`,
+    `model budget ${performed.modelBudget ? '✓' : 'not run'}`,
+    `registry budget ${performed.registryBudget ? '✓' : 'not run'}`,
+    `scene budget ${performed.sceneBudget ? '✓' : 'not run'}`,
+  ].join(' · ');
+};
+
+const applyAssetStatus = () => {
+  const status = assetRegistry.status;
+  viewportShell.dataset.assets = status;
+  viewportShell.dataset.diagnostics = devDiagnosticsOn ? 'on' : 'off';
+  statusLabel.textContent = gameplayStatus();
+  applyAssetRefusal(status);
+  paintDevDiagnostics();
 };
 
 // Two-phase swap. A view built before the registry answered keeps rendering, and once the model
@@ -1842,6 +1930,10 @@ const sampleSceneBudget = () => {
     failures.length !== sceneBudgetFailures.length ||
     failures.some((failure, index) => failure.reason !== sceneBudgetFailures[index]?.reason);
   sceneBudgetFailures = failures;
+  // The diagnostics block follows the measurement, not the verdict: without this the block could
+  // keep an older reading while the seam already publishes a newer one, and a test comparing the
+  // two would be comparing two moments. The game line is rewritten only when the verdict changes.
+  paintDevDiagnostics();
   if (changed) {
     applyAssetStatus();
   }

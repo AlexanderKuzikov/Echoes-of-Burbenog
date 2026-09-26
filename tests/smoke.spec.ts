@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createTrainingScenario } from '../src/game-core/index.ts';
 import type { SimulationEvent } from '../src/game-core/index.ts';
-import { MODEL_BUDGET } from '../src/asset-budgets.ts';
+import { MODEL_BUDGET, SCENE_BUDGET } from '../src/asset-budgets.ts';
 
 const GLB_MODEL_PATH = 'public/models/pulse-spire.glb';
 const IDENTITY_MATRIX = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
@@ -369,17 +369,33 @@ const waitForClip = async (page: Page, pastTime: number, awayFrom?: readonly num
   return (await handle.jsonValue()) as ClipSample;
 };
 
-// The refusal reason and the sector caption share one strip of viewport chrome, so "the sector
-// label is still readable" is measurable as "the chip covers none of its text". The comparison is
-// over the glyph rects of every caption line, because the caption is a grid and its boxes are
-// stretched wider than the words in them.
+// `EOB-019`: the default 5 s expect timeout is a statement about how fast an assertion resolves, not
+// a statement about how long a boot may take. A negative asset scenario fetches the manifest,
+// downloads the model, compiles shaders, and then shares the machine with the other workers of the
+// suite, so the wait has to fit that. Only the patience changes here — the assertion is the same
+// one every negative scenario has always made.
+const ASSET_TERMINAL_TIMEOUT = 30_000;
+
+const expectAssetRefused = async (page: Page) => {
+  await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'error', {
+    timeout: ASSET_TERMINAL_TIMEOUT,
+  });
+};
+
+// The sector caption and the rest of the viewport chrome share one strip of screen, so "the sector
+// label is still readable" is measurable as "no other chrome box covers any of its glyphs". The
+// comparison is over the glyph rects of every caption line, because the caption is a grid and its
+// boxes are stretched wider than the words in them; the boxes on the other side are the chrome that
+// is actually on screen, so a hidden or unplaced block cannot fail the check by accident.
+const VIEWPORT_CHROME = '.wave-chip, .scene-report, .scene-diagnostics, .result-banner, .state-badge, .combat-log, .map-legend, .selection-card';
+
 const expectNoChromeOverlap = async (page: Page) => {
-  const chip = await page.locator('.wave-chip').boundingBox();
-  if (!chip) {
-    throw new Error('viewport chrome has no layout box');
-  }
-  const lines = await page.locator('.scene-caption > *').evaluateAll((nodes) =>
-    nodes.flatMap((node) => {
+  const measured = await page.evaluate((selector) => {
+    const caption = document.querySelector('.scene-caption');
+    if (!caption) {
+      throw new Error('scene caption has no layout box');
+    }
+    const glyphs = Array.from(caption.children).flatMap((node) => {
       const range = document.createRange();
       range.selectNodeContents(node);
       return [...range.getClientRects()].map((rect) => ({
@@ -389,16 +405,88 @@ const expectNoChromeOverlap = async (page: Page) => {
         width: rect.width,
         height: rect.height,
       }));
-    }),
+    });
+    const boxes = Array.from(document.querySelectorAll(selector))
+      .filter((node) => !(node instanceof HTMLElement) || !node.hidden)
+      .map((node) => {
+        const rect = node.getBoundingClientRect();
+        return { name: node.getAttribute('data-testid') ?? node.className, x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+      })
+      .filter((box) => box.width > 0 && box.height > 0);
+    return { glyphs, boxes };
+  }, VIEWPORT_CHROME);
+
+  if (measured.glyphs.length === 0 || measured.boxes.length === 0) {
+    throw new Error('viewport chrome produced no measurable rectangles');
+  }
+  const covered = measured.glyphs.flatMap((line) =>
+    measured.boxes
+      .filter(
+        (box) =>
+          line.x < box.x + box.width &&
+          box.x < line.x + line.width &&
+          line.y < box.y + box.height &&
+          box.y < line.y + line.height,
+      )
+      .map((box) => `${box.name} over ${line.text}`),
   );
-  const covered = lines.filter(
-    (line) =>
-      line.x < chip.x + chip.width &&
-      chip.x < line.x + line.width &&
-      line.y < chip.y + chip.height &&
-      chip.y < line.y + line.height,
+  expect(covered).toEqual([]);
+};
+
+// "The reason is readable" is measured, not looked at: every glyph rect of the reason has to sit
+// inside the padding box of the block that is meant to show it. A shortened digest, an ellipsis or a
+// clipped overflow all keep the block the same size and shrink the text inside it, so the box alone
+// proves nothing — the glyph rects are what carry the evidence.
+const expectRefusalFullyReadable = async (page: Page) => {
+  const measured = await page.getByTestId('scene-report-reason').evaluate((node) => {
+    const block = node.closest<HTMLElement>('[data-testid="scene-report"]');
+    if (!block) {
+      throw new Error('refusal reason is not inside a refusal block');
+    }
+    const blockStyle = getComputedStyle(block);
+    const textStyle = getComputedStyle(node);
+    const blockBox = block.getBoundingClientRect();
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    return {
+      text: node.textContent ?? '',
+      reason: node.getAttribute('data-reason') ?? '',
+      textOverflow: textStyle.textOverflow,
+      overflow: `${blockStyle.overflowX} ${blockStyle.overflowY}`,
+      clipped:
+        block.scrollHeight > block.clientHeight + 1 || block.scrollWidth > block.clientWidth + 1,
+      block: { x: blockBox.x, y: blockBox.y, width: blockBox.width, height: blockBox.height },
+      padding: {
+        top: parseFloat(blockStyle.paddingTop),
+        right: parseFloat(blockStyle.paddingRight),
+        bottom: parseFloat(blockStyle.paddingBottom),
+        left: parseFloat(blockStyle.paddingLeft),
+      },
+      rects: [...range.getClientRects()].map((rect) => ({
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+      })),
+    };
+  });
+
+  expect(measured.rects.length).toBeGreaterThan(0);
+  expect(measured.block.height).toBeGreaterThan(0);
+  expect(measured.clipped).toBe(false);
+  // Neither an ellipsis nor a scroll container: a reason that needs either is a reason that was not
+  // given a place of its own.
+  expect(measured.textOverflow).not.toBe('ellipsis');
+  expect(measured.overflow).not.toMatch(/hidden|scroll|auto/);
+  const inside = measured.rects.every(
+    (rect) =>
+      rect.x >= measured.block.x + measured.padding.left - 1 &&
+      rect.x + rect.width <= measured.block.x + measured.block.width - measured.padding.right + 1 &&
+      rect.y >= measured.block.y + measured.padding.top - 1 &&
+      rect.y + rect.height <= measured.block.y + measured.block.height - measured.padding.bottom + 1,
   );
-  expect(covered.map((line) => line.text)).toEqual([]);
+  expect(inside).toBe(true);
+  return measured;
 };
 
 const emptyEventCounts = (): Record<SimulationEvent['type'], number> => ({
@@ -1601,7 +1689,7 @@ test('refuses a model whose skeleton carries more bones than the budget allows',
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
   await page.goto('/');
-  await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'error');
+  await expectAssetRefused(page);
 
   // A skeleton is allowed now, so the refusal has to name the number that broke the budget rather
   // than the feature.
@@ -1642,7 +1730,7 @@ test('refuses a model whose skeleton carries more bones than the budget allows',
   expect(started.towerModels[0]?.clip).toBeNull();
   expect(started.motion.clips).toBe(0);
   expect(started.snapshot.status).toBe('wave');
-  await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'error');
+  await expectAssetRefused(page);
   await expectNoChromeOverlap(page);
   await page.screenshot({ path: 'test-results/asset-refused-bone-budget.png', fullPage: true });
   expect(pageErrors).toEqual([]);
@@ -1657,7 +1745,7 @@ test('keeps the match playable and names the failure when the model registry is 
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
   await page.goto('/');
-  await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'error');
+  await expectAssetRefused(page);
 
   // Fail-fast is visible, not silent: the reason is in the viewport, not in a console warning.
   const status = page.getByTestId('scene-status');
@@ -1682,7 +1770,7 @@ test('keeps the match playable and names the failure when the model registry is 
   const started = await readDebugOrThrow(page);
   expect(started.snapshot.status).toBe('wave');
   expect(started.eventCounts.waveStarted).toBe(1);
-  await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'error');
+  await expectAssetRefused(page);
   // A contract failure must not surface as an unhandled rejection either.
   expect(pageErrors).toEqual([]);
 });
@@ -1798,7 +1886,7 @@ test('refuses a model whose content hash the manifest does not match', async ({ 
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
   await page.goto('/');
-  await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'error');
+  await expectAssetRefused(page);
 
   // The refusal is loud and it names the model and the reason: a tampered distribution is
   // something an operator has to be able to read, not a warning in a console nobody opens.
@@ -1843,7 +1931,7 @@ test('refuses a model whose content hash the manifest does not match', async ({ 
   expect(started.snapshot.pads['pad-east']).toBe('pulse-spire');
   expect(started.towerModels[0]?.source).toBe('procedural');
   expect(started.snapshot.status).toBe('wave');
-  await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'error');
+  await expectAssetRefused(page);
   await page.screenshot({ path: 'test-results/asset-refused-content-hash.png', fullPage: true });
   expect(pageErrors).toEqual([]);
 });
@@ -1869,7 +1957,7 @@ test('refuses a model whose manifest claims more triangles than the model budget
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
   await page.goto('/');
-  await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'error');
+  await expectAssetRefused(page);
 
   // The refusal names the model, the measured value and the limit it broke, because "the registry
   // failed" is not something an operator can act on.
@@ -1912,8 +2000,165 @@ test('refuses a model whose manifest claims more triangles than the model budget
   expect(started.towerModels[0]?.source).toBe('procedural');
   expect(started.snapshot.status).toBe('wave');
   expect(started.eventCounts.waveStarted).toBe(1);
-  await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'error');
+  await expectAssetRefused(page);
   await expectNoChromeOverlap(page);
   await page.screenshot({ path: 'test-results/asset-refused-model-budget.png', fullPage: true });
+  expect(pageErrors).toEqual([]);
+});
+
+test('keeps the gameplay status free of dev-machine numbers and the DOM free of diagnostics', async ({ page }) => {
+  test.setTimeout(60_000);
+  const requested: string[] = [];
+  page.on('request', (request) => requested.push(request.url()));
+  const consoleErrors: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'error') {
+      consoleErrors.push(message.text());
+    }
+  });
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+
+  await page.goto('/');
+  await waitForAssetsReady(page);
+
+  // Without the flag there is no diagnostics element to hide: it is not in the document, it is not
+  // an empty one, and there is nothing a screenshot could show either.
+  await expect(page.getByTestId('scene-diagnostics')).toHaveCount(0);
+  await expect(page.getByTestId('viewport')).toHaveAttribute('data-diagnostics', 'off');
+  // A load that succeeded has no reason to report, so the error block stays out of the way.
+  await expect(page.getByTestId('scene-report')).toBeHidden();
+
+  const status = page.getByTestId('scene-status');
+  await expect(status).toHaveText('Scene online · models ready (pulse-spire) · integrity checked');
+
+  // The check is by key, not by eye: every scene budget value and every number this machine
+  // measured has to be absent from the line a player reads. A budget is computed on the build
+  // machine, so printing it here would be a false alarm on a slow connection wearing the costume
+  // of a trustworthy status.
+  const finished = await readDebugOrThrow(page);
+  const scene = finished.assetBudgets.checks.scene;
+  if (!scene) {
+    throw new Error('scene budget reading missing');
+  }
+  const text = (await status.textContent()) ?? '';
+  const forbidden: Array<[string, string]> = [
+    ...Object.values(SCENE_BUDGET).map((value) => ['scene budget', String(value)] as [string, string]),
+    ['measured draw calls', String(scene.drawCalls)],
+    ['measured triangles', String(scene.renderedTriangles)],
+    ['measured programs', String(scene.shaderPrograms)],
+    ['measured load', `${Math.round(scene.assetLoadMs)} ms`],
+  ];
+  for (const [what, value] of forbidden) {
+    expect(text, `${what} ${value} must not appear in the gameplay status`).not.toContain(value);
+  }
+  expect(text).not.toMatch(/over budget/i);
+
+  // `EOB-011`: the icon is declared inline, so the browser has no file to ask for and no 404 to
+  // print. A missing `/favicon.ico` reaches the console as a bare "Failed to load resource ... 404"
+  // with no URL in the text, so the check that can actually see it is the silence of the boot: the
+  // favicon 404 was the only error-level message a clean load produced.
+  expect(consoleErrors).toEqual([]);
+  const icon = await page.locator('link[rel~="icon"]').getAttribute('href');
+  expect(icon).toMatch(/^data:image\/svg\+xml,/);
+  expect(requested.filter((url) => /favicon/i.test(url))).toEqual([]);
+  expect(pageErrors).toEqual([]);
+
+  await expectNoChromeOverlap(page);
+  await page.screenshot({ path: 'test-results/viewport-chrome-player.png', fullPage: true });
+});
+
+test('gives the refusal a block of its own and puts the budgets behind the dev flag', async ({ page }) => {
+  test.setTimeout(60_000);
+  // The same tampered manifest the digest scenario uses, so the reason that has to fit somewhere is
+  // a full 64-character digest — the case a one-line chip could never hold.
+  await page.route('**/models/manifest.json', async (route) => {
+    const response = await route.fetch();
+    const manifest = (await response.json()) as { models: Array<{ contentHash: string }> };
+    for (const model of manifest.models) {
+      model.contentHash = `sha256:${'0'.repeat(64)}`;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(manifest),
+    });
+  });
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+
+  await page.goto('/?dev=1');
+  await expectAssetRefused(page);
+  await expect(page.getByTestId('viewport')).toHaveAttribute('data-diagnostics', 'on');
+
+  // Both forms of the reason are true at once: short in the one line, whole in the block. The line
+  // stays one line, and the value an operator has to compare is not behind an ellipsis any more.
+  const status = page.getByTestId('scene-status');
+  const shortLine = (await status.textContent()) ?? '';
+  expect(shortLine).toMatch(/sha256:[0-9a-f]{8}…/i);
+  expect(shortLine).not.toMatch(/[0-9a-f]{32,}/i);
+
+  const digest = `sha256:${'0'.repeat(64)}`;
+  const failed = await readDebugOrThrow(page);
+  const reason = failed.assets.error;
+  if (reason === null) {
+    throw new Error('refusal reason missing');
+  }
+  expect(reason).toContain(digest);
+  await expect(page.getByTestId('scene-report')).toBeVisible();
+  await expect(page.getByTestId('scene-report-reason')).toContainText(digest);
+  // The attribute carries the exact string, so the value can be compared without parsing a sentence.
+  expect(await page.getByTestId('scene-report-reason').getAttribute('data-reason')).toBe(reason);
+
+  const measured = await expectRefusalFullyReadable(page);
+  expect(measured.text).toBe(reason);
+  expect(measured.text).not.toContain('…');
+
+  // The diagnostics block and the seam are read in one task, because a frame between two
+  // evaluations could repaint one of them and the comparison would be of two moments.
+  const dev = await page.evaluate(() => {
+    const debug = window.__ECHOES_DEBUG__;
+    if (!debug) {
+      return null;
+    }
+    const rows = Object.fromEntries(
+      Array.from(document.querySelectorAll('[data-testid="scene-diagnostics"] [data-diag]')).map((node) => [
+        (node as HTMLElement).dataset.diag ?? '',
+        node.textContent ?? '',
+      ]),
+    );
+    return { rows, budgets: debug.assetBudgets };
+  });
+  if (!dev) {
+    throw new Error('debug contract missing');
+  }
+  const reading = dev.budgets.checks.scene;
+  const registry = dev.budgets.checks.registry;
+  if (!reading || !registry) {
+    throw new Error('dev diagnostics are missing a measurement the seam already has');
+  }
+  // What the block prints is what the seam measured, next to the budget it was measured against.
+  expect(dev.rows.scene).toContain(`${reading.drawCalls}/${SCENE_BUDGET.drawCalls}`);
+  expect(dev.rows.scene).toContain(`${reading.renderedTriangles}/${SCENE_BUDGET.renderedTriangles}`);
+  expect(dev.rows.scene).toContain(`${reading.shaderPrograms}/${SCENE_BUDGET.shaderPrograms}`);
+  expect(dev.rows.scene).toContain(`${Math.round(reading.assetLoadMs)}/${SCENE_BUDGET.assetLoadMs}`);
+  expect(dev.rows.registry).toContain(`${registry.models}/${dev.budgets.budgets.registry.models}`);
+  expect(dev.rows.model).toContain(`${registry.bytes}/${dev.budgets.budgets.model.bytes}`);
+  // A check that did not run is stated as such, so a green reading cannot be produced by not looking.
+  expect(dev.rows.checks).toBe(
+    [
+      `bytes ${dev.budgets.checks.performed.bytes ? '✓' : 'not run'}`,
+      'content hash ✓',
+      `node types ${dev.budgets.checks.performed.nodeTypes ? '✓' : 'not run'}`,
+      `model budget ${dev.budgets.checks.performed.modelBudget ? '✓' : 'not run'}`,
+      `registry budget ${dev.budgets.checks.performed.registryBudget ? '✓' : 'not run'}`,
+      `scene budget ${dev.budgets.checks.performed.sceneBudget ? '✓' : 'not run'}`,
+    ].join(' · '),
+  );
+  await expect(page.getByTestId('scene-diagnostics')).toBeVisible();
+
+  // Neither the block nor the diagnostics may cost the caption its readability.
+  await expectNoChromeOverlap(page);
+  await page.screenshot({ path: 'test-results/scene-chrome-dev-refusal.png', fullPage: true });
   expect(pageErrors).toEqual([]);
 });

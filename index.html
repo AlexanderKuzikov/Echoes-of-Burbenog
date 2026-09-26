@@ -4,6 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#09131c">
+    <!-- Inline icon: without a declared icon the browser asks for /favicon.ico on its own, and a
+         missing file is a 404 in the console of every run (`EOB-011`). A data URL needs no request
+         and no extra file. -->
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b1820'/%3E%3Cpath d='M16 5 L27 27 H5 Z' fill='%236ee2cf'/%3E%3C/svg%3E">
     <title>Echoes of Burbenog — First Contact</title>
   </head>
   <body>
@@ -44,6 +48,10 @@
           <div class="wave-chip">
             <span class="pulse-dot"></span>
             <span data-testid="scene-status">Scene online</span>
+          </div>
+          <div class="scene-report" data-testid="scene-report" role="status" hidden>
+            <span class="scene-report-kicker">Asset refusal</span>
+            <p class="scene-report-reason" data-testid="scene-report-reason" data-reason=""></p>
           </div>
           <div class="result-banner" data-testid="match-result" data-result="none" role="status" hidden>Sector secured</div>
           <div class="state-badge" data-testid="state-badge" data-state="idle" role="status" hidden>Paused</div>
