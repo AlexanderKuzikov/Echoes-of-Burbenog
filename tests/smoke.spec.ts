@@ -120,6 +120,11 @@ type RebuildReading = {
 
 type AssetBudgetsReading = NonNullable<typeof window.__ECHOES_DEBUG__>['assetBudgets'];
 
+// A rebuild with no tick to stop on — Restart in solo, New match — is the same reading without the tick
+// a slot asked for, and it is read for the same reason: the fresh preparation is running again before
+// anything outside the page could ask about it, so where it started is only readable where it was built.
+type FreshRunReading = Omit<RebuildReading, 'requestedTick'>;
+
 // What the page says about the session it is in. In solo it is `local` and there is nothing to join; in
 // a room it names the room, the connection and the versions both sides agreed on, and it carries the
 // room's own sentence about anything it refused.
@@ -167,6 +172,7 @@ type DebugReading = {
   commandCount: number;
   matchReports: MatchReport[];
   lastRebuild: RebuildReading | null;
+  lastFreshRun: FreshRunReading | null;
   entry: { open: boolean; mode: string; armed: boolean; continuing: 'slot' | 'match' | null };
   session: SessionReading;
   frameLog: FrameLogReading[];
@@ -271,6 +277,7 @@ const readDebug = (page: Page) =>
       commandCount: debug.commandCount,
       matchReports: debug.matchReports,
       lastRebuild: debug.lastRebuild,
+      lastFreshRun: debug.lastFreshRun,
       entry: debug.entry,
       session: debug.session,
       frameLog: debug.frameLog,
@@ -3230,9 +3237,14 @@ test('refuses a save that does not match the contract and leaves the slot untouc
 
   // A slot nothing can read is still cleared by an explicit action, and only by that one — and from
   // the entry that means a second press, because the slot is the one thing the game cannot bring back.
-  // The frame clock is put on a lattice where a tick cannot arrive inside a round-trip, so the fresh
-  // preparation is read on the tick it started on.
-  await setFrameDelta(page, QA_FROZEN_FRAME_SECONDS);
+  //
+  // The fresh preparation is read from the mark the page left where it built the run. The entry closes
+  // on the second press and the clock is free from that instant, so a reading taken from out here lands
+  // on whatever tick the round trip took to arrive: one tick under six workers, with the product right.
+  // The frame clock is not put on a lattice to hold that reading still any more — a lattice no tick can
+  // fit into is a claim about how long this page takes to answer, and under load one frame of it is
+  // wider than the lattice. This is the `EOB-021` shape: where a rebuild arrived belongs to the page
+  // that arrived, which is what `lastRebuild` already does for a load a few hundred lines up.
   await page.getByTestId('entry-new-match').click();
   await expect(page.getByTestId('entry-screen')).toHaveAttribute('data-entry', 'confirm');
   expect(await readSlot(page), 'the first press erased the slot').toBe(cases[cases.length - 1]?.raw);
@@ -3241,10 +3253,26 @@ test('refuses a save that does not match the contract and leaves the slot untouc
   expect(await readSlot(page)).toBeNull();
   await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'empty');
   await expect(page.getByTestId('load-match')).toBeDisabled();
-  const cleared = await readDebugOrThrow(page);
-  expect(cleared.snapshot.tick).toBe(0);
+  const live = await readDebugOrThrow(page);
+  const cleared = live.lastFreshRun;
+  if (!cleared) {
+    throw new Error('the fresh preparation recorded no tick to be read on');
+  }
+  expect(cleared.tick, 'the fresh preparation did not start on its own first tick').toBe(0);
+  expect(cleared.snapshot.status).toBe('preparation');
   expect(cleared.snapshot.preparationTicksLeft).toBe(firstWavePrepTicks);
+  expect(cleared.snapshot.gold).toBe(startingGold);
+  expect(cleared.snapshot.pads['pad-east']).toBeNull();
+  expect(cleared.snapshot.towers).toEqual([]);
+  expect(cleared.snapshot.enemies).toEqual([]);
+  expect(cleared.snapshot.rngState).toBe(scenario.seed);
   expect(cleared.commandCount).toBe(0);
+  expect(cleared.replaying).toBe(false);
+  expect(cleared.eventCounts).toEqual(emptyEventCounts());
+  // What the page is on now is the run that mark named, and clearing a slot rebuilt nothing.
+  expect(live.snapshot.status).toBe('preparation');
+  expect(live.commandCount).toBe(0);
+  expect(live.lastRebuild, 'clearing a slot rebuilt it').toBeNull();
   expect(pageErrors).toEqual([]);
 });
 
@@ -4832,7 +4860,17 @@ test('hands the same seat back after a dropped stream, whole, from the tick the 
   const lost = await readSession(page);
   expect(lost?.refusal?.reason).toBe('stream-refused');
   expect(lost?.seatRole).toBe('owner');
-
+  // The last frame this client held, read after the stream is gone so that it is the last frame that
+  // existed and not the last one a reading happened to catch. This and the frame the returning client is
+  // given are the two ends the comparison below is made on: a page read taken before the break and a page
+  // read taken after the return are two live readings of a room that ran on between them, and the totals it
+  // keeps move while nobody is watching — `preparationEnded` changes from 0 to 1 across that interval, and
+  // comparing the two is how a correct product goes red.
+  const heldLog = await readFrameLog(page);
+  const lastSeen = heldLog?.[heldLog.length - 1];
+  if (!lastSeen) {
+    throw new Error('the client published no frame before the stream was dropped');
+  }
   await expect(page.getByTestId('entry-screen')).toBeVisible();
   await expect(page.getByTestId('entry-hint')).toContainText('Continue goes back in as the same seat');
   // The action the entry offers is the one that carries the seat, and it says so.
@@ -4883,17 +4921,34 @@ test('hands the same seat back after a dropped stream, whole, from the tick the 
   expect(after.session.seatRole).toBe('owner');
   expect(Number.isFinite(after.session.connect.handshakeMs)).toBe(true);
   expect(Number.isFinite(after.session.connect.firstFrameMs)).toBe(true);
-  // Same match: the log, the pads, the event totals and the command count are the room's, whole and
-  // unchanged, which a delta could not have carried.
+  // Same match: the log, the pads and the purse are the room's, whole and unchanged, which a delta could
+  // not have carried. They are compared on the two frames — the last one this client held and the one
+  // that opened the stream on its return — because the room went on between them, and a command is the
+  // only thing that can change any of the three.
   expect(after.commandCount).toBe(1);
   expect(afterLog.every((entry) => entry.commandCount === 1)).toBe(true);
   expect(await readCommandPlan(page)).toEqual(plan);
-  expect(after.eventCounts).toEqual(before.eventCounts);
-  expect(after.snapshot.pads).toEqual(before.snapshot.pads);
-  expect(after.snapshot.gold).toBe(startingGold - costOf('pulse-spire'));
+  expect(opening.commandCount).toBe(lastSeen.commandCount);
+  expect(opening.pads).toEqual(lastSeen.pads);
+  expect(opening.gold).toBe(startingGold - costOf('pulse-spire'));
   expect(after.rendered.towers).toBe(1);
+  // The event totals are the one thing that legitimately grew: the room ran the ticks the client was not
+  // there for, and its totals are cumulative. So they are checked as what they are — the same run carried
+  // forward and never rewound. A room rebuilt underneath the returning client would hand back zeroed
+  // totals, which is the failure this catches and not a comparison of two moving readings.
+  const grew = (Object.keys(opening.eventCounts) as Array<keyof typeof opening.eventCounts>).filter(
+    (type) => opening.eventCounts[type] !== lastSeen.eventCounts[type],
+  );
+  for (const type of Object.keys(opening.eventCounts) as Array<keyof typeof opening.eventCounts>) {
+    expect(opening.eventCounts[type], `${type} went backwards across the reconnect`).toBeGreaterThanOrEqual(
+      lastSeen.eventCounts[type],
+    );
+  }
   // Same place in time: the room stood still, so the client comes back where the room is, not where the
-  // frames it missed would have put it and not at the end of a catch-up.
+  // frames it missed would have put it and not at the end of a catch-up. The client left on a tick the
+  // room had already passed, because the room keeps going for the moment it takes to notice a closed
+  // connection — that interval is the whole reason the two ends of the comparison are frames.
+  expect(lastSeen.tick).toBeLessThanOrEqual(standing);
   expect(opening.tick).toBeGreaterThanOrEqual(standing);
   expect(opening.tick).toBeLessThanOrEqual(standing + 2);
   // The owner came back as the owner, which is the whole point of a token instead of a fresh seat.
@@ -4920,7 +4975,9 @@ test('hands the same seat back after a dropped stream, whole, from the tick the 
     `reconnect ${roomId}: the room stood at tick ${standing} with 0 players for 1.5 s, the returning client ` +
       `handshaked again (${after.session.connect.handshakeMs?.toFixed(1)}ms) and got a whole ${opening.kind} ` +
       `frame of ${opening.tick} — first frame ${after.session.connect.firstFrameMs?.toFixed(1)}ms, its delivery ` +
-      `${opening.deliveryMs}ms, worst in the reconnected stream ${worst}ms, seat back as ${after.session.seatRole}`,
+      `${opening.deliveryMs}ms, worst in the reconnected stream ${worst}ms, seat back as ${after.session.seatRole}; ` +
+      `the frame before the break was ${lastSeen.tick} with the same ${opening.commandCount} command and the same ` +
+      `board, totals moved by ${grew.length === 0 ? 'nothing' : grew.join(', ')}`,
   );
 
 });
@@ -5073,6 +5130,11 @@ test('lets a late client build at once and says the aether is shared', async ({ 
   }
 });
 
+// The window the steady-state delay is read over. It is a number in one place because the sample's shape
+// is now asserted against it: the frames in the window have to cover the window, and a floor on the sample
+// is derived from it and the room's own declared rate.
+const DELAY_WINDOW_SECONDS = 10;
+
 test('measures the steady-state frame delay on two warm clients', async ({ page, browser }) => {
   test.setTimeout(180_000);
   const roomId = roomName('delay');
@@ -5094,26 +5156,58 @@ test('measures the steady-state frame delay on two warm clients', async ({ page,
     const shared = commonFrame(logA ?? [], logB ?? []);
     const from = shared.a.seq;
     const step = (await readDebugOrThrow(page)).tickRate;
-    await page.waitForTimeout(10_000);
+    await page.waitForTimeout(DELAY_WINDOW_SECONDS * 1000);
 
     const [warmA, warmB] = await Promise.all([readFrameLog(page), readFrameLog(second)]);
+    // Nothing from before the window is in the numbers, and both sides are measured the same way.
     const a = (warmA ?? []).filter((entry) => entry.seq > from);
     const b = (warmB ?? []).filter((entry) => entry.seq > from);
-    // Nothing from before the window is in the numbers, and both sides have a sample a tail can exist in.
-    expect(a.length).toBeGreaterThan(120);
-    expect(b.length).toBeGreaterThan(120);
-
     expect(a.every((entry) => entry.seq > shared.a.seq)).toBe(true);
     expect(b.every((entry) => entry.seq > shared.b.seq)).toBe(true);
+    // What the sample has to be able to carry is a tail, and that is a property of the window rather
+    // than of the machine. `expect(a.length).toBeGreaterThan(120)` said it as a count, which is a claim
+    // about how many ticks the room held in ten seconds on this host: it holds 16/s idle and was measured
+    // at 11/s under six workers (`EOB-026`), so the same number passed and failed depending on the load
+    // and never said anything about a tail. So the rate is reported and not asserted, and the sample is
+    // required to cover the window it was taken in — a room running slowly still fills ten seconds of
+    // page clock, it just delivers fewer frames into them.
+    const measured = (sample: FrameLogReading[], label: string) => {
+      const stats = deliveryPercentiles(sample.map((entry) => entry.deliveryMs));
+      const spanSeconds = (sample[sample.length - 1]!.at - sample[0]!.at) / 1000;
+      return { label, stats, spanSeconds, framesPerSecond: spanSeconds > 0 ? stats.count / spanSeconds : 0 };
+    };
+    // A floor rather than a target: a quarter of what the room declares for this window. It says the
+    // sample is not degenerate and it admits a room well below its declared rate, which is a number the
+    // room is measured at rather than one this test may hold it to.
+    const minimum = Math.floor((step * DELAY_WINDOW_SECONDS) / 4);
+    const first = measured(a, 'a');
+    const secondStats = measured(b, 'b');
+    for (const [reading, sample] of [
+      [first, a],
+      [secondStats, b],
+    ] as const) {
+      const { label, stats, spanSeconds } = reading;
+      expect(spanSeconds, `client ${label} covered ${spanSeconds.toFixed(2)}s of the ${DELAY_WINDOW_SECONDS}s window`).toBeGreaterThanOrEqual(
+        DELAY_WINDOW_SECONDS * 0.9,
+      );
+      expect(stats.count, `client ${label} holds ${stats.count} frames, below the ${minimum} the declared rate puts in this window`).toBeGreaterThanOrEqual(
+        minimum,
+      );
+      // Every number in the ladder is a delivery this client actually received, in order.
+      expect(sample.every((entry) => Number.isFinite(entry.deliveryMs) && entry.deliveryMs >= 0)).toBe(true);
+      expect(stats.p50).toBeLessThanOrEqual(stats.p95);
+      expect(stats.p95).toBeLessThanOrEqual(stats.p99);
+      expect(stats.p99).toBeLessThanOrEqual(stats.max);
+    }
     // Each client's delays are its own: two windows do not render on the same schedule, and a single
     // shared figure would be a number about neither of them.
-    const first = deliveryPercentiles(a.map((entry) => entry.deliveryMs));
-    const secondStats = deliveryPercentiles(b.map((entry) => entry.deliveryMs));
     console.log(
       `frame delay ${roomId}: window opens at seq ${from} with both clients attached, room step ${step} ticks/s — ` +
-        `client a ${first.count} frames p50 ${first.p50}ms p95 ${first.p95}ms p99 ${first.p99}ms max ${first.max}ms; ` +
-        `client b ${secondStats.count} frames p50 ${secondStats.p50}ms p95 ${secondStats.p95}ms ` +
-        `p99 ${secondStats.p99}ms max ${secondStats.max}ms`,
+        `client a ${first.stats.count} frames over ${first.spanSeconds.toFixed(2)}s (${first.framesPerSecond.toFixed(1)}/s) ` +
+        `p50 ${first.stats.p50}ms p95 ${first.stats.p95}ms p99 ${first.stats.p99}ms max ${first.stats.max}ms; ` +
+        `client b ${secondStats.stats.count} frames over ${secondStats.spanSeconds.toFixed(2)}s ` +
+        `(${secondStats.framesPerSecond.toFixed(1)}/s) p50 ${secondStats.stats.p50}ms p95 ${secondStats.stats.p95}ms ` +
+        `p99 ${secondStats.stats.p99}ms max ${secondStats.stats.max}ms; floor for a non-degenerate sample ${minimum} frames`,
     );
   } finally {
     await other.close();

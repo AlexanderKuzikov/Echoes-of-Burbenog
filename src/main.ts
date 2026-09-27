@@ -98,6 +98,12 @@ type RebuildReading = {
   poses: Array<{ entityId: number; towerId: string; clip: TowerClipReading | null }>;
 };
 
+// A rebuild with no tick to stop on — Restart in solo, New match — is the same reading without the
+// asked-for tick, because there is no slot behind it that asked for anything. It exists because a fresh
+// preparation is running again before anything outside the page can ask about it, and its arrival is
+// only readable where it happened: `EOB-021` closed the same hole for a load.
+type FreshRunReading = Omit<RebuildReading, 'requestedTick'>;
+
 // Which of the two things Continue acts on the entry screen, and what the entry is offering right
 // now. `live` is the entry MENU opened over a match the player is in the middle of; the rest are
 // states of the slot. `confirm` is not a state of the slot but of the button: the first New match
@@ -194,6 +200,10 @@ type DebugState = {
   // The run a rebuild arrived at, captured in the page on the tick it stopped on, and `null` until
   // a Load in this page session has finished one.
   readonly lastRebuild: RebuildReading | null;
+  // The same reading for a rebuild with no tick to stop on — Restart in solo, New match — captured on
+  // the tick the new core was built at rather than polled, because the clock that rebuild started is
+  // already running by the time a round trip would have answered.
+  readonly lastFreshRun: FreshRunReading | null;
   // The entry screen as the page sees it. `continuing` names the one thing the Continue button will
   // do, which is the difference between a restore and a resume and therefore the claim that the
   // entry did not grow a second implementation of Load.
@@ -1923,6 +1933,10 @@ let rebuildStopTick: number | null = null;
 // the presentation around it.
 let pendingRebuild: { requestedTick: number; tick: number } | null = null;
 let lastRebuild: RebuildReading | null = null;
+// The last rebuild that had no tick to stop on, read on the tick it was built at. It is a separate mark
+// rather than another state of `lastRebuild`, because `lastRebuild` means "a slot was loaded here" and
+// twenty-odd assertions read that meaning.
+let lastFreshRun: FreshRunReading | null = null;
 
 // The one way this page rebuilds a run: a new core from the same seed and content, the recorded
 // commands re-applied at their original ticks by the frame loop, and presentation state put back
@@ -1940,6 +1954,12 @@ const beginRecordedRun = (stopTick: number | null) => {
   rebuildStopTick = stopTick;
   setFeedback('idle', replaying ? 'Replaying recorded commands' : 'Nothing recorded yet · place a module first');
   applySnapshot(simulation.getSnapshot());
+  // A rebuild with a tick to stop on is recorded when it arrives, at the end of the frame that got
+  // there. A rebuild with none has nothing to wait for and no frame that could hold still for it: the
+  // clock is free again the moment this returns, so the state the new core was built from is read here
+  // and now. Read from outside, it would name a later tick and say nothing about the arrival — which is
+  // what a test asserting "the fresh preparation is on tick 0" was measuring instead.
+  lastFreshRun = readRunState(snapshot.tick);
 };
 
 // Restart is one verb and two owners of the match. In solo it rebuilds the run on the core this page
@@ -3045,9 +3065,11 @@ const settleRebuild = () => {
   syncHud();
 };
 
-const readRebuildReading = (arrival: { requestedTick: number; tick: number }): RebuildReading => ({
-  requestedTick: arrival.requestedTick,
-  tick: arrival.tick,
+// The run as it stands, read on a named tick. Both rebuild readings are this: the slot one adds the
+// tick the slot asked for, because a load that stopped on the wrong tick is the failure it exists to
+// catch, and a fresh one has no asked-for tick behind it at all.
+const readRunState = (tick: number): FreshRunReading => ({
+  tick,
   snapshot,
   eventCounts: { ...eventCounts },
   commandCount: commandLog.length,
@@ -3059,6 +3081,11 @@ const readRebuildReading = (arrival: { requestedTick: number; tick: number }): R
     towerId: view.towerId,
     clip: view.clip === null ? null : readTowerClip(view.clip),
   })),
+});
+
+const readRebuildReading = (arrival: { requestedTick: number; tick: number }): RebuildReading => ({
+  requestedTick: arrival.requestedTick,
+  ...readRunState(arrival.tick),
 });
 
 const towerName = (towerId: string) => towerDefinitions.get(towerId)?.name ?? towerId;
@@ -3548,6 +3575,9 @@ window.__ECHOES_DEBUG__ = {
   },
   get lastRebuild() {
     return lastRebuild;
+  },
+  get lastFreshRun() {
+    return lastFreshRun;
   },
   get entry() {
     return {
