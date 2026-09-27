@@ -81,6 +81,31 @@ $env:PLAYWRIGHT_EXECUTABLE_PATH='C:\Users\alexa\AppData\Local\ms-playwright\chro
 npx playwright test
 ```
 
+## Команда запуска новой сессии
+
+Вставлять в новую сессию как есть:
+
+```
+Echoes of Burbenog. Рабочий каталог: D:\GitHub\Echoes-of-Burbenog.
+Прочитай HANDOFF.md в корне, затем docs/PLAN.md. Больше ничего открывать не
+надо: PLAN самодостаточен.
+
+Делаем игру, а не задачи. Новые задачи, файлы задач, номера и планы не
+заводить — владелец это запретил, и предыдущая сессия на этом сожгла кучу
+времени. Код пишешь сам, в этой сессии. Первым делом: показать владельцу
+играбельный результат в браузере, а не отчёт.
+
+Playwright идёт через
+PLAYWRIGHT_EXECUTABLE_PATH='C:\Users\alexa\AppData\Local\ms-playwright\chromium-1208\chrome-win64\chrome.exe'
+(в проекте путь не хранится). Проверки: npm run typecheck, npm run build,
+npm test. Играть: npm run dev -> http://localhost:5173.
+
+Перед коммитом git status, коммить только свои файлы поимённо, git add -A
+запрещён, ветка main. Push делать можно.
+
+Прочитав, удали этот HANDOFF.md отдельным коммитом удаления и продолжай.
+```
+
 ## Следующий шаг
 
 Dev-сервер может быть ещё поднят на 5173. Начать с карты-коридора: переписать маршрут, стены и пять
