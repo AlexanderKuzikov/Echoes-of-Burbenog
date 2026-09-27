@@ -28,13 +28,13 @@
 | ![Р’С…РѕРґ](docs/screenshots/entry-screen-slot.png) | ![РЎРµСЂРµРґРёРЅР° РІРѕР»РЅС‹](docs/screenshots/wave-combat-midwave.png) | ![РџРѕР±РµРґР°](docs/screenshots/wave-combat-victory.png) | ![Replay](docs/screenshots/vertical-slice-replay-reset.png) | ![Р—Р°РіСЂСѓР¶РµРЅРЅС‹Р№ РјР°С‚С‡](docs/screenshots/vertical-slice-match-load.png) |
 | РЎС‚СЂР°РЅРёС†Р° РѕС‚РєСЂС‹РІР°РµС‚СЃСЏ РЅР° РІС…РѕРґРµ, Р° РЅРµ РІ preparation: СЃР»РѕС‚ РЅР°Р·РІР°РЅ С‚РёРєРѕРј Рё С‡РёСЃР»РѕРј РєРѕРјР°РЅРґ, СЂРµС€РµРЅРёРµ РѕСЃС‚Р°С‘С‚СЃСЏ Р·Р° РёРіСЂРѕРєРѕРј, РјР°С‚С‡ Р·Р° РѕРІРµСЂР»РµРµРј РЅРµ РёРґС‘С‚ | Route, build pads, combat log Рё HUD вЂ” РїСЂРѕРµРєС†РёСЏ `MatchSnapshot` | Terminal state, `Sector secured`, `restart repeats this run exactly` | РўРѕС‚ Р¶Рµ РјР°С‚С‡ РїРµСЂРµР·Р°РїСѓСЃРєР°РµС‚СЃСЏ РїРѕ command log: `REPLAY В· 0 / 4 COMMANDS`, РїР°Р»РёС‚СЂР° Рё Start Wave Р·Р°Р±Р»РѕРєРёСЂРѕРІР°РЅС‹ | РўРѕС‚ Р¶Рµ РјР°С‚С‡ РїРѕСЃР»Рµ РЅР°СЃС‚РѕСЏС‰РµР№ РїРµСЂРµР·Р°РіСЂСѓР·РєРё СЃС‚СЂР°РЅРёС†С‹: СЃР»РѕС‚ С…СЂР°РЅРёС‚ seed, content, С‚РёРє Рё log, Р° `Continue` РїРµСЂРµСЃРёРјСѓР»РёСЂСѓРµС‚ РµРіРѕ РґРѕ СЃРѕС…СЂР°РЅС‘РЅРЅРѕРіРѕ С‚РёРєР° |
 
-РћСЃС‚Р°Р»СЊРЅС‹Рµ СЃРѕСЃС‚РѕСЏРЅРёСЏ РІС…РѕРґР° вЂ” `entry-screen-empty.png` (РїСѓСЃС‚РѕР№ СЃР»РѕС‚, РµРґРёРЅСЃС‚РІРµРЅРЅРѕРµ РґРµР№СЃС‚РІРёРµ), `entry-screen-menu.png` (`MENU` РїРѕРІРµСЂС… РёРґСѓС‰РµРіРѕ РјР°С‚С‡Р°), `entry-screen-confirm.png` (РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ СЃС‚РёСЂР°РЅРёСЏ СЃР»РѕС‚Р° РІС‚РѕСЂС‹Рј РЅР°Р¶Р°С‚РёРµРј), `entry-screen-narrow.png` (560 px) Рё `entry-to-victory.png` (РїРѕР»РЅС‹Р№ РїСѓС‚СЊ РѕС‚ РІС…РѕРґР° РґРѕ РїРѕР±РµРґС‹). Четыре кадра сессии лежат рядом: `session-room-entry.png` (вход в комнату), `session-room-live.png` (матч в комнате: полоса сессии и пустая панель MATCH SAVE), `session-room-menu.png` (MENU поверх комнаты) и `session-room-narrow.png` (560 px).
+РћСЃС‚Р°Р»СЊРЅС‹Рµ СЃРѕСЃС‚РѕСЏРЅРёСЏ РІС…РѕРґР° вЂ” `entry-screen-empty.png` (РїСѓСЃС‚РѕР№ СЃР»РѕС‚, РµРґРёРЅСЃС‚РІРµРЅРЅРѕРµ РґРµР№СЃС‚РІРёРµ), `entry-screen-menu.png` (`MENU` РїРѕРІРµСЂС… РёРґСѓС‰РµРіРѕ РјР°С‚С‡Р°), `entry-screen-confirm.png` (РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ СЃС‚РёСЂР°РЅРёСЏ СЃР»РѕС‚Р° РІС‚РѕСЂС‹Рј РЅР°Р¶Р°С‚РёРµРј), `entry-screen-narrow.png` (560 px) Рё `entry-to-victory.png` (РїРѕР»РЅС‹Р№ РїСѓС‚СЊ РѕС‚ РІС…РѕРґР° РґРѕ РїРѕР±РµРґС‹). Р§РµС‚С‹СЂРµ РєР°РґСЂР° СЃРµСЃСЃРёРё Р»РµР¶Р°С‚ СЂСЏРґРѕРј: `session-room-entry.png` (РІС…РѕРґ РІ РєРѕРјРЅР°С‚Сѓ), `session-room-live.png` (РјР°С‚С‡ РІ РєРѕРјРЅР°С‚Рµ: РїРѕР»РѕСЃР° СЃРµСЃСЃРёРё Рё РїСѓСЃС‚Р°СЏ РїР°РЅРµР»СЊ MATCH SAVE), `session-room-menu.png` (MENU РїРѕРІРµСЂС… РєРѕРјРЅР°С‚С‹) Рё `session-room-narrow.png` (560 px).
 
 РЎРЅРёРјРєРё вЂ” РєРѕРїРёРё `test-results/`, РєРѕС‚РѕСЂС‹Рµ СЃРЅРёРјР°РµС‚ E2E-СЃСЊСЋС‚РєР°. РћР±РЅРѕРІР»СЏСЋС‚СЃСЏ РЅР° РїСЂРёС‘РјРєРµ Р·Р°РґР°С‡Рё, РјРµРЅСЏСЋС‰РµР№ РєР°СЂС‚РёРЅРєСѓ.
 
 ## Р‘С‹СЃС‚СЂС‹Р№ СЃС‚Р°СЂС‚
 
-Реализовано и проверено следующее: 3D-ready сцена, schematic build pads, placement, combat presentation, pause/resume, replay по seed, локальный слот матча (вход симуляции, а не snapshot; Load — пересимуляция до тика слота), экран входа (Continue из слота или из идущего матча, подтверждение стирания, `MENU` без потери матча), первая authoritative session на Node (комната владеет `Simulation`, транспорт SSE плюс POST без новых зависимостей, версионированный handshake до первого тика, причина отказа команды принадлежит серверу, solo остаётся режимом по умолчанию) плюс asset pipeline: собственная генерация GLB и budgets, per-material IBL, скелетная анимация. Проверено: `test:core`, `test:assets` и 39 зелёных E2E, включая одну комнату на двух настоящих browser context.
+Р РµР°Р»РёР·РѕРІР°РЅРѕ Рё РїСЂРѕРІРµСЂРµРЅРѕ СЃР»РµРґСѓСЋС‰РµРµ: 3D-ready СЃС†РµРЅР°, schematic build pads, placement, combat presentation, pause/resume, replay РїРѕ seed, Р»РѕРєР°Р»СЊРЅС‹Р№ СЃР»РѕС‚ РјР°С‚С‡Р° (РІС…РѕРґ СЃРёРјСѓР»СЏС†РёРё, Р° РЅРµ snapshot; Load вЂ” РїРµСЂРµСЃРёРјСѓР»СЏС†РёСЏ РґРѕ С‚РёРєР° СЃР»РѕС‚Р°), СЌРєСЂР°РЅ РІС…РѕРґР° (Continue РёР· СЃР»РѕС‚Р° РёР»Рё РёР· РёРґСѓС‰РµРіРѕ РјР°С‚С‡Р°, РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ СЃС‚РёСЂР°РЅРёСЏ, `MENU` Р±РµР· РїРѕС‚РµСЂРё РјР°С‚С‡Р°), РїРµСЂРІР°СЏ authoritative session РЅР° Node (РєРѕРјРЅР°С‚Р° РІР»Р°РґРµРµС‚ `Simulation`, С‚СЂР°РЅСЃРїРѕСЂС‚ SSE РїР»СЋСЃ POST Р±РµР· РЅРѕРІС‹С… Р·Р°РІРёСЃРёРјРѕСЃС‚РµР№, РІРµСЂСЃРёРѕРЅРёСЂРѕРІР°РЅРЅС‹Р№ handshake РґРѕ РїРµСЂРІРѕРіРѕ С‚РёРєР°, РїСЂРёС‡РёРЅР° РѕС‚РєР°Р·Р° РєРѕРјР°РЅРґС‹ РїСЂРёРЅР°РґР»РµР¶РёС‚ СЃРµСЂРІРµСЂСѓ, solo РѕСЃС‚Р°С‘С‚СЃСЏ СЂРµР¶РёРјРѕРј РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ) РїР»СЋСЃ asset pipeline: СЃРѕР±СЃС‚РІРµРЅРЅР°СЏ РіРµРЅРµСЂР°С†РёСЏ GLB Рё budgets, per-material IBL, СЃРєРµР»РµС‚РЅР°СЏ Р°РЅРёРјР°С†РёСЏ. РџСЂРѕРІРµСЂРµРЅРѕ: `test:core`, `test:assets` Рё 39 Р·РµР»С‘РЅС‹С… E2E, РІРєР»СЋС‡Р°СЏ РѕРґРЅСѓ РєРѕРјРЅР°С‚Сѓ РЅР° РґРІСѓС… РЅР°СЃС‚РѕСЏС‰РёС… browser context.
 
 ```bash
 git clone https://github.com/AlexanderKuzikov/Echoes-of-Burbenog.git
@@ -50,11 +50,11 @@ npx playwright install chromium
 npm test
 ```
 
-Проверка поднимает и Vite, и сервер сессий сама. Для ручной игры вдвоём в одной комнате:
+РџСЂРѕРІРµСЂРєР° РїРѕРґРЅРёРјР°РµС‚ Рё Vite, Рё СЃРµСЂРІРµСЂ СЃРµСЃСЃРёР№ СЃР°РјР°. Р”Р»СЏ СЂСѓС‡РЅРѕР№ РёРіСЂС‹ РІРґРІРѕС‘Рј РІ РѕРґРЅРѕР№ РєРѕРјРЅР°С‚Рµ:
 
 ```bash
-npm run server   # в соседнем терминале; порт из src/protocol/index.ts
-# затем в двух окнах: http://127.0.0.1:5173/?room=<имя-комнаты>
+npm run server   # РІ СЃРѕСЃРµРґРЅРµРј С‚РµСЂРјРёРЅР°Р»Рµ; РїРѕСЂС‚ РёР· src/protocol/index.ts
+# Р·Р°С‚РµРј РІ РґРІСѓС… РѕРєРЅР°С…: http://127.0.0.1:5173/?room=<РёРјСЏ-РєРѕРјРЅР°С‚С‹>
 ```
 
 ## Р”РѕРєСѓРјРµРЅС‚Р°С†РёСЏ
@@ -73,13 +73,13 @@ npm run server   # в соседнем терминале; порт из src/protocol/index.ts
 | Development | Vite | verified |
 | Simulation | TypeScript core | verified |
 | QA | Playwright + core check + asset validator | verified |
-| Server | Node.js, сессии и комнаты (SSE + POST), dedicated server на Go | in work |
+| Server | Node.js, СЃРµСЃСЃРёРё Рё РєРѕРјРЅР°С‚С‹ (SSE + POST), dedicated server РЅР° Go | in work |
 | Desktop | Wails + Go | deferred |
 | Assets | glTF/GLB, СЃРІРѕР№ РіРµРЅРµСЂР°С‚РѕСЂ, budgets | verified |
 
 ## РЎС‚Р°С‚СѓСЃ
 
-**v0.1.0-alpha** — browser bootstrap, pure deterministic core, snapshot projection, placement, combat presentation, pause/resume, seed replay, локальный слот матча, экран входа (Continue из слота или из идущего матча, подтверждение стирания, `MENU` без потери матча), первая authoritative session на Node: комната владеет `Simulation`, транспорт SSE плюс POST, версионированный handshake, причина отказа команды принадлежит серверу, solo остаётся режимом по умолчанию, а presentation и правила матча — тот же код и тот же core. Плюс asset pipeline: собственная генерация GLB, budgets, per-material IBL и скелетная анимация. Проверено: `test:core`, `test:assets` и 39 зелёных E2E. Следующий шаг фазы 6: `0018` — permissions, reconnect и late join как политика.
+**v0.1.0-alpha** вЂ” browser bootstrap, pure deterministic core, snapshot projection, placement, combat presentation, pause/resume, seed replay, Р»РѕРєР°Р»СЊРЅС‹Р№ СЃР»РѕС‚ РјР°С‚С‡Р°, СЌРєСЂР°РЅ РІС…РѕРґР° (Continue РёР· СЃР»РѕС‚Р° РёР»Рё РёР· РёРґСѓС‰РµРіРѕ РјР°С‚С‡Р°, РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ СЃС‚РёСЂР°РЅРёСЏ, `MENU` Р±РµР· РїРѕС‚РµСЂРё РјР°С‚С‡Р°), РїРµСЂРІР°СЏ authoritative session РЅР° Node: РєРѕРјРЅР°С‚Р° РІР»Р°РґРµРµС‚ `Simulation`, С‚СЂР°РЅСЃРїРѕСЂС‚ SSE РїР»СЋСЃ POST, РІРµСЂСЃРёРѕРЅРёСЂРѕРІР°РЅРЅС‹Р№ handshake, РїСЂРёС‡РёРЅР° РѕС‚РєР°Р·Р° РєРѕРјР°РЅРґС‹ РїСЂРёРЅР°РґР»РµР¶РёС‚ СЃРµСЂРІРµСЂСѓ, solo РѕСЃС‚Р°С‘С‚СЃСЏ СЂРµР¶РёРјРѕРј РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ, Р° presentation Рё РїСЂР°РІРёР»Р° РјР°С‚С‡Р° вЂ” С‚РѕС‚ Р¶Рµ РєРѕРґ Рё С‚РѕС‚ Р¶Рµ core. РџР»СЋСЃ asset pipeline: СЃРѕР±СЃС‚РІРµРЅРЅР°СЏ РіРµРЅРµСЂР°С†РёСЏ GLB, budgets, per-material IBL Рё СЃРєРµР»РµС‚РЅР°СЏ Р°РЅРёРјР°С†РёСЏ. РџСЂРѕРІРµСЂРµРЅРѕ: `test:core`, `test:assets` Рё 39 Р·РµР»С‘РЅС‹С… E2E. РЎР»РµРґСѓСЋС‰РёР№ С€Р°Рі С„Р°Р·С‹ 6: `0018` вЂ” permissions, reconnect Рё late join РєР°Рє РїРѕР»РёС‚РёРєР°.
 
 ## Р›РёС†РµРЅР·РёСЏ
 
