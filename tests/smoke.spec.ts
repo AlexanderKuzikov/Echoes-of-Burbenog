@@ -3338,11 +3338,6 @@ test('rebuilds a preparation-only save to its tick with nothing to replay', asyn
 
 // --- Entry screen ---------------------------------------------------------------------------
 
-// The QA frame clock at its quietest: one tick needs a second of frames, so no round-trip can land
-// inside a tick. It is how a fresh preparation is read on the tick it started on instead of on
-// whatever tick the tool came back on — the same reason `0014` and `0015` measure inside the page.
-const QA_FROZEN_FRAME_SECONDS = 0.001;
-
 // Whether the middle of an element's own box belongs to a given surface. Three claims in this section
 // are about stacking — the entry over the shell, and the entry over the dev diagnostics — and stacking
 // is not something a screenshot has to be believed about. `elementFromPoint` skips a `pointer-events:
@@ -3723,28 +3718,38 @@ test('clears the slot only after a confirmed New match on the entry screen', asy
   expect((await readDebugOrThrow(page)).snapshot, 'the match ran behind the armed entry').toEqual(parked.snapshot);
   await page.screenshot({ path: 'test-results/entry-screen-confirm.png', fullPage: true });
 
-  // The second press destroys it and starts over. The frame clock is put on a lattice where a tick
-  // cannot arrive inside a round-trip, so the fresh preparation is read on the tick it started on.
-  await setFrameDelta(page, QA_FROZEN_FRAME_SECONDS);
+  // The second press destroys it and starts over. The fresh preparation is read from the mark the page
+  // left where it built the run, for the same reason a loaded match is read from `lastRebuild`: the entry
+  // closes on the second press and the clock is free from that instant, so a reading taken from out here
+  // lands on whatever tick the round trip took to arrive. The frame clock is no longer put on a lattice
+  // to hold that reading still — a lattice no tick can fit into is a claim about how long this page takes
+  // to answer, and under load one frame of it is wider than the lattice.
   await page.getByTestId('entry-new-match').click();
   await expect(page.getByTestId('entry-screen')).toBeHidden();
   expect(await readSlot(page)).toBeNull();
 
   const fresh = await readDebugOrThrow(page);
+  const arrival = fresh.lastFreshRun;
+  if (!arrival) {
+    throw new Error('the fresh preparation recorded no tick to be read on');
+  }
+  expect(arrival.tick, 'the fresh preparation did not start on its own first tick').toBe(0);
+  expect(arrival.snapshot.status).toBe('preparation');
+  expect(arrival.snapshot.preparationTicksLeft).toBe(firstWavePrepTicks);
+  expect(arrival.snapshot.gold).toBe(startingGold);
+  expect(arrival.snapshot.pads['pad-east']).toBeNull();
+  expect(arrival.snapshot.towers).toEqual([]);
+  expect(arrival.snapshot.enemies).toEqual([]);
+  expect(arrival.snapshot.rngState).toBe(scenario.seed);
+  expect(arrival.commandCount).toBe(0);
+  expect(arrival.replaying).toBe(false);
+  expect(arrival.replayIndex).toBe(0);
+  expect(arrival.eventCounts).toEqual(emptyEventCounts());
+  // What the page is on now is the run that mark named, and clearing a slot rebuilt nothing.
   expect(fresh.snapshot.status).toBe('preparation');
-  expect(fresh.snapshot.tick).toBe(0);
-  expect(fresh.snapshot.preparationTicksLeft).toBe(firstWavePrepTicks);
-  expect(fresh.snapshot.gold).toBe(startingGold);
-  expect(fresh.snapshot.pads['pad-east']).toBeNull();
-  expect(fresh.snapshot.towers).toEqual([]);
-  expect(fresh.snapshot.enemies).toEqual([]);
-  expect(fresh.snapshot.rngState).toBe(scenario.seed);
   expect(fresh.commandCount).toBe(0);
-  expect(fresh.replaying).toBe(false);
-  expect(fresh.replayIndex).toBe(0);
   expect(fresh.rendered.towers).toBe(0);
-  expect(fresh.eventCounts).toEqual(emptyEventCounts());
-  expect(fresh.lastRebuild).toBeNull();
+  expect(fresh.lastRebuild, 'clearing a slot rebuilt it').toBeNull();
   expectProjectionMatchesSnapshot(fresh);
   await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'empty');
   await expect(page.getByTestId('save-slot')).toHaveText('No save slot');
@@ -3754,8 +3759,8 @@ test('clears the slot only after a confirmed New match on the entry screen', asy
   await expect(page.getByTestId('restart-match')).toBeDisabled();
   expect(pageErrors).toEqual([]);
   console.log(
-    `entry confirm: armed at tick ${parked.snapshot.tick} with "${armed.slot}", second press gave ` +
-      `preparation tick ${fresh.snapshot.tick} and slot ${await readSlot(page)}`,
+    `entry confirm: armed at tick ${parked.snapshot.tick} with "${armed.slot}", second press built ` +
+      `preparation on tick ${arrival.tick} (live tick ${fresh.snapshot.tick}) and slot ${await readSlot(page)}`,
   );
 });
 
@@ -4555,6 +4560,14 @@ test('refuses a guest both room verbs by name and changes nothing at all', async
     await page.getByRole('button', { name: 'Pulse Spire' }).click();
     await clickPad(page, 'pad-east');
     await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
+    // The flag and the log are two different facts arriving on two different connections: the flag is
+    // written from the room's answer to the POST, the log reaches this page in a frame. The room happens to
+    // send that frame before its answer, so on a quiet machine a read right behind the flag usually sees the
+    // log already there — but that is the room's ordering, not this test's right to assume it. So the log
+    // is waited for, and what follows is the log as it arrived.
+    await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.session.commandCount ?? 0) >= 1, undefined, {
+      timeout: 20_000,
+    });
     const settled = await readDebugOrThrow(page);
     const roomBefore = await readRoom(request, roomId);
     expect(settled.commandCount).toBe(1);
@@ -5100,30 +5113,51 @@ test('lets a late client build at once and says the aether is shared', async ({ 
       });
     }
 
+    // One purse, one log, one board — said at one moment, on a frame both clients applied. Two live
+    // readings would compare two instants of a room that is running a wave and paying out in between, so
+    // what they agreed about would be the round trip, not the match. The shared frame is one moment with
+    // two witnesses, and the room's own log sits behind it as a third.
+    const [logA, logB] = await Promise.all([readFrameLog(page), readFrameLog(late)]);
+    if (!logA || !logB) {
+      throw new Error('a client in a room published no frame log');
+    }
+    const { a, b } = commonFrame(logA, logB);
+    expect(a.seq).toBe(b.seq);
+    expect(a.tick).toBe(b.tick);
+    expect(a.gold).toBe(b.gold);
+    expect(a.pads).toEqual(b.pads);
+    expect(a.commandCount).toBe(b.commandCount);
+    expect(a.eventCounts).toEqual(b.eventCounts);
+    expect(a.status).toBe(b.status);
+    // And the frame they agree on is the match both of them are in, not two copies of an empty screen: a
+    // build from each seat, the wave they started, gold already spent. The exact gold is deliberately
+    // still not asserted — the wave pays bounty and rewards while this runs, so a number computed here
+    // would be a bound on the wall clock rather than on the rule. The rule is the agreement, and it now
+    // holds at a single instant.
+    expect(a.status).toBe('wave');
+    expect(a.commandCount).toBe(3);
+    expect(a.pads['pad-east']).toBe('pulse-spire');
+    expect(a.pads['pad-south']).toBe('frost-relay');
+    expect(a.gold).toBeLessThan(startingGold);
+    // Each window has the frame applied, so the second tower is on both boards: that is a claim about the
+    // projection of one frame, not a comparison of two readings of a moving room.
     const [owner, guest] = await Promise.all([readDebugOrThrow(page), readDebugOrThrow(late)]);
-    // One purse: both windows show the same gold, the same three entries in the room's log and the same
-    // two towers. What is deliberately *not* asserted is an exact gold number — the wave pays bounty and
-    // rewards while this runs, so a bound computed here would be a bound on the wall clock, not on the
-    // rule. The rule is the agreement: two clients, one number, and a second tower on the board.
-    expect(guest.snapshot.gold).toBe(owner.snapshot.gold);
-    expect(owner.snapshot.gold).toBeLessThan(startingGold);
     expect(owner.rendered.towers).toBe(2);
     expect(guest.rendered.towers).toBe(2);
     expect(owner.commandCount).toBe(3);
     expect(guest.commandCount).toBe(3);
-    expect(owner.snapshot.pads['pad-south']).toBe('frost-relay');
-    expect(guest.snapshot.pads).toEqual(owner.snapshot.pads);
-    expect(owner.eventCounts).toEqual(guest.eventCounts);
     const room = await readRoom(request, roomId);
     expect(room.commands).toBe(3);
     expect(room.players).toBe(2);
     expect(room.status).toBe('wave');
+    expect(room.tick).toBeGreaterThanOrEqual(a.tick);
 
     await late.screenshot({ path: 'test-results/session-room-shared.png', fullPage: true });
     expect(pageErrors).toEqual([]);
     console.log(
       `shared aether ${roomId}: a guest joined at tick ${openingLog?.[0]?.tick} built on pad-south at once, ` +
-        `and both clients settled on gold ${owner.snapshot.gold} with ${room.commands} commands in one log`,
+        `and both clients applied frame ${a.seq} at tick ${a.tick} with gold ${a.gold}, ` +
+        `${room.commands} commands in one log and ${room.players} clients`,
     );
   } finally {
     await other.close();
