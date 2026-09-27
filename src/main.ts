@@ -242,7 +242,15 @@ type DebugState = {
   // Frames this page has drawn. A page that is alive but not ticking is the whole claim behind "the
   // room owns the clock in remote mode", and it cannot be told apart from a frozen picture without it.
   readonly frames: number;
-  readonly motion: { reducedMotion: boolean; combatBursts: number; enemyBob: number; clips: number; clipsPlaying: number };
+  readonly motion: {
+    reducedMotion: boolean;
+    combatBursts: number;
+    shotTraces: number;
+    shotsFired: number;
+    enemyBob: number;
+    clips: number;
+    clipsPlaying: number;
+  };
   readonly assets: { status: AssetStatus; models: string[]; error: string | null };
   // The environment probe sits on the scene at full strength, so what dims it is a property of
   // each material. The seam publishes every standard material of the live scene with the weight it
@@ -267,6 +275,13 @@ type FeedbackState = 'idle' | 'accepted' | 'rejected' | 'terminal';
 
 type CombatBurst = {
   mesh: THREE.Mesh;
+  started: number;
+  duration: number;
+};
+
+type ShotTrace = {
+  beam: THREE.Mesh;
+  flash: THREE.Mesh;
   started: number;
   duration: number;
 };
@@ -996,6 +1011,68 @@ const removeCombatBurst = (burst: CombatBurst) => {
   (burst.mesh.material as THREE.Material).dispose();
 };
 
+// One shared geometry for every beam and every flash; only the materials belong to a shot, and they
+// are disposed with it. A shot allocates two small meshes and gives them back within
+// `shotTraceSeconds`, so the ceiling exists to survive a burst of fire, not to grow.
+const shotBeamGeometry = new THREE.BoxGeometry(1, 1, 1);
+const shotFlashGeometry = new THREE.SphereGeometry(0.18, 10, 8);
+const shotTraces: ShotTrace[] = [];
+let shotTraceCount = 0;
+const shotForward = new THREE.Vector3(0, 0, 1);
+const shotDirection = new THREE.Vector3();
+const shotMuzzle = new THREE.Vector3();
+const shotImpact = new THREE.Vector3();
+
+const removeShotTrace = (trace: ShotTrace) => {
+  scene.remove(trace.beam);
+  scene.remove(trace.flash);
+  (trace.beam.material as THREE.Material).dispose();
+  (trace.flash.material as THREE.Material).dispose();
+};
+
+const spawnShotTrace = (from: THREE.Vector3, to: THREE.Vector3) => {
+  shotDirection.copy(to).sub(from);
+  const length = shotDirection.length();
+  if (!(length > 0.05)) {
+    return;
+  }
+  shotDirection.multiplyScalar(1 / length);
+  const beam = new THREE.Mesh(
+    shotBeamGeometry,
+    new THREE.MeshBasicMaterial({
+      color: shotBeamColor,
+      transparent: true,
+      opacity: 0.85,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    }),
+  );
+  beam.scale.set(shotBeamThickness, shotBeamThickness, length);
+  beam.position.copy(from).addScaledVector(shotDirection, length * 0.5);
+  beam.quaternion.setFromUnitVectors(shotForward, shotDirection);
+  const flash = new THREE.Mesh(
+    shotFlashGeometry,
+    new THREE.MeshBasicMaterial({
+      color: shotFlashColor,
+      transparent: true,
+      opacity: 0.9,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    }),
+  );
+  flash.position.copy(to);
+  scene.add(beam);
+  scene.add(flash);
+  shotTraces.push({ beam, flash, started: elapsed, duration: shotTraceSeconds });
+  shotTraceCount += 1;
+  while (shotTraces.length > MAX_SHOT_TRACES) {
+    const stale = shotTraces.shift();
+    if (stale) {
+      removeShotTrace(stale);
+    }
+  }
+};
+
 const core = new THREE.Group();
 core.position.set(config.map.corePosition.x, 0.3, config.map.corePosition.z);
 core.name = 'core';
@@ -1544,6 +1621,20 @@ const combatBurstSeconds = 0.55;
 const EVENT_FEED_LIMIT = 5;
 const RECENT_EVENT_LIMIT = 16;
 const MAX_COMBAT_BURSTS = 14;
+
+// A shot is the whole point of a tower: without a visible line from the muzzle to the target, a
+// placement reads as nothing happening until an enemy stops existing. The trace is presentation
+// state only — it is not in the snapshot, not in the command log and not in the room, so two
+// clients watching the same match each draw their own from the same event.
+const shotTraceSeconds = 0.2;
+const shotBeamThickness = 0.07;
+const MAX_SHOT_TRACES = 18;
+const shotBeamColor = new THREE.Color(0xbff6e6);
+const shotFlashColor = new THREE.Color(0xffffff);
+// Where a shot leaves a tower and where it lands on a body. Both are presentation constants, and
+// both are read from the views at the moment of the event rather than recomputed from content.
+const towerMuzzleHeight = 0.92;
+const enemyImpactHeight = 0.3;
 
 let elapsed = 0;
 let enemyBobOffset = 0;
@@ -3166,6 +3257,11 @@ const applyEventPresentation = (event: SimulationEvent) => {
         -(target.group.position.z - view.group.position.z),
         target.group.position.x - view.group.position.x,
       );
+      // The shot itself, from the muzzle to where the target is standing on the tick the event
+      // describes. Without it the only evidence of a tower working is the target's disappearance.
+      shotMuzzle.set(view.group.position.x, view.group.position.y + towerMuzzleHeight, view.group.position.z);
+      shotImpact.set(target.group.position.x, target.group.position.y + enemyImpactHeight, target.group.position.z);
+      spawnShotTrace(shotMuzzle, shotImpact);
     }
     return;
   }
@@ -3594,6 +3690,11 @@ window.__ECHOES_DEBUG__ = {
     return {
       reducedMotion,
       combatBursts: combatBursts.length,
+      // Shots drawn right now, and shots drawn since boot. The live count is what a screenshot can
+      // never prove — a trace lives a fraction of a second — so the total is what says a tower is
+      // actually firing something, and it grows on the same `towerFired` event the core reports.
+      shotTraces: shotTraces.length,
+      shotsFired: shotTraceCount,
       enemyBob: enemyBobOffset,
       // One mixer per animated view and no more: a tower that was removed or upgraded in place must
       // not leave a second animation running against the same skeleton.
@@ -3754,6 +3855,26 @@ const renderFrame = (timestamp: number) => {
     }
     (burst.mesh.material as THREE.MeshBasicMaterial).opacity = 0.85 * (1 - progress);
     burst.mesh.scale.setScalar(1 + progress * 1.9);
+  }
+  for (let index = shotTraces.length - 1; index >= 0; index -= 1) {
+    const trace = shotTraces[index];
+    if (!trace) {
+      continue;
+    }
+    const progress = (elapsed - trace.started) / trace.duration;
+    if (progress >= 1) {
+      removeShotTrace(trace);
+      shotTraces.splice(index, 1);
+      continue;
+    }
+    // The beam thins out and the impact flash collapses: a shot that stays at full width reads as
+    // a solid rod, not as light crossing a distance.
+    const fade = 1 - progress;
+    (trace.beam.material as THREE.MeshBasicMaterial).opacity = 0.85 * fade;
+    trace.beam.scale.x = shotBeamThickness * (0.35 + 0.65 * fade);
+    trace.beam.scale.y = trace.beam.scale.x;
+    (trace.flash.material as THREE.MeshBasicMaterial).opacity = 0.9 * fade;
+    trace.flash.scale.setScalar(0.5 + progress * 0.9);
   }
   // The terminal state wins over the transient damage pulse, and reduced motion keeps
   // the readable colour change without the scale pulse.
