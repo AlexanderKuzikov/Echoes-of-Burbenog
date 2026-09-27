@@ -17,6 +17,7 @@
     "test:core": "tsx scripts/check-simulation.ts",
     "test:assets": "tsx scripts/build-assets.ts --test",
     "test:e2e": "playwright test",
+    "server": "tsx scripts/serve-session.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

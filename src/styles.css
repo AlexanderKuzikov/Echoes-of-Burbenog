@@ -116,6 +116,47 @@ h1 {
   gap: 8px;
 }
 
+/* Who owns the match, in one read-only chip next to the resources. It is a line and not a control
+   because it describes the session and does not change it: the room is chosen on the entry and the
+   address names it, so there is nothing here to press and nothing here to get out of sync with. */
+.session-strip {
+  display: grid;
+  gap: 2px;
+  min-width: 156px;
+  padding: 8px 12px;
+  border: 1px solid rgba(143, 184, 184, 0.16);
+  border-left: 2px solid rgba(143, 184, 184, 0.34);
+  border-radius: 10px;
+  background: rgba(16, 35, 43, 0.72);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.session-strip[data-mode="remote"] {
+  border-left-color: #6ee2cf;
+  background: rgba(20, 61, 62, 0.78);
+}
+
+.session-strip[data-state="refused"] {
+  border-left-color: #ff9a8c;
+}
+
+.session-strip[data-state="offline"] {
+  border-left-color: #ffc56b;
+}
+
+.session-strip strong {
+  color: #f3faf4;
+  font-size: 0.95rem;
+  font-weight: 650;
+}
+
+.session-detail {
+  color: #85a3a5;
+  font-size: 0.58rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
 .resource-card {
   min-width: 94px;
   padding: 8px 12px;
@@ -919,6 +960,69 @@ h1 {
   color: #ffc56b;
 }
 
+/* The room block, in the same language as the slot line above it: what the session is, and the one
+   action that changes it. The input wraps the row rather than the row squeezing the button, because a
+   room name a player cannot read is a room they cannot join. */
+.entry-room {
+  display: grid;
+  gap: 7px;
+  padding: 10px 12px;
+  border: 1px solid rgba(143, 184, 184, 0.2);
+  border-radius: 11px;
+  background: rgba(7, 20, 27, 0.5);
+}
+
+.entry-room[data-state="live"] {
+  border-color: rgba(110, 226, 207, 0.45);
+}
+
+.entry-room[data-state="refused"] {
+  border-color: rgba(255, 154, 140, 0.55);
+}
+
+.entry-room-line {
+  margin: 0;
+  color: #c7e7df;
+  font-size: 0.64rem;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.entry-room[data-state="refused"] .entry-room-line {
+  color: #ff9a8c;
+}
+
+.entry-room-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.entry-room-input {
+  flex: 1 1 150px;
+  min-width: 0;
+  padding: 9px 12px;
+  border: 1px solid rgba(143, 184, 184, 0.24);
+  border-radius: 9px;
+  background: rgba(9, 24, 31, 0.62);
+  color: #e7f4ef;
+  font: inherit;
+  font-size: 0.72rem;
+}
+
+.entry-room-input::placeholder {
+  color: #5f7a7c;
+}
+
+.entry-room-input:focus-visible {
+  border-color: #6ee2cf;
+  outline: none;
+}
+
+.entry-button--room {
+  flex: 0 1 auto;
+}
+
 .entry-hint {
   margin: 0;
   color: #789495;
@@ -990,6 +1094,14 @@ h1 {
   color: #ff9a8c;
 }
 
+.entry-button:disabled {
+  border-color: rgba(143, 184, 184, 0.12);
+  background: rgba(9, 24, 31, 0.4);
+  color: #5f7a7c;
+  cursor: not-allowed;
+  transform: none;
+}
+
 /* Five panels stop fitting on one row a little above 900 px, and the row cannot be squeezed to fit:
    the palette holds the width its names need, so below that it takes a row of its own instead of
    letting the row run past the edge of the window. The stacked layout for narrow windows is the
@@ -1054,6 +1166,10 @@ h1 {
   }
 
   .resource-strip {
+    width: 100%;
+  }
+
+  .session-strip {
     width: 100%;
   }
 

@@ -2,7 +2,7 @@
 
 ## Project
 
-Проект — оригинальная 3D Tower Defense игра с LLM-first рабочим процессом. Browser bootstrap, pure simulation core, vertical slice (pause/resume, replay по command log), asset pipeline с генератором GLB, budgets, per-material IBL, skeletal animation, сохранение матча и экран входа приняты; текущий шаг — фаза 6, задача `0017` (authoritative session, транспорт SSE плюс POST) выдана кодовой сессии. Solo остаётся режимом по умолчанию; multiplayer теперь в работе, и второй реализации правил быть не может.
+Проект — оригинальная 3D Tower Defense игра с LLM-first рабочим процессом. Browser bootstrap, pure simulation core, vertical slice (pause/resume, replay по command log), asset pipeline с генератором GLB, budgets, per-material IBL, skeletal animation, сохранение матча, экран входа и первая authoritative session приняты; текущий шаг — фаза 6, задача `0018` (permissions, reconnect, late join). Задача `0017` сдана и ждёт приёмки штаба. Solo остаётся режимом по умолчанию; multiplayer в работе, и второй реализации правил быть не может.
 
 ## Где искать файлы
 
@@ -19,12 +19,15 @@
 - `docs/screenshots/` — копии E2E-снимков, на которые ссылается `README.md`.
 
 Код и проверки: `src/main.ts` (client), `src/game-core/` (pure core, только чтение без отдельного
-решения), `src/asset-registry.ts`, `src/asset-budgets.ts`, `scripts/build-assets.ts` (генератор GLB),
-`scripts/check-simulation.ts` (core check), `tests/smoke.spec.ts` (Playwright E2E).
+решения), `src/protocol/` (версионированный контракт сессии), `src/server/` (комната и транспорт),
+`src/asset-registry.ts`, `src/asset-budgets.ts`, `scripts/build-assets.ts` (генератор GLB),
+`scripts/check-simulation.ts` (core check), `scripts/serve-session.ts` (сервер сессии),
+`tests/smoke.spec.ts` (Playwright E2E).
 
 ## Commands
 
 - Кодовые команды bootstrap: `npm run dev`, `npm test`, `npm run test:core`, `npm run typecheck`, `npm run build`, `npx playwright test`.
+- Сервер сессий: `npm run server` (порт из `--port`, `PORT` или общего дефолта в `src/protocol/index.ts`). `npx playwright test` поднимает его сам вместе с Vite — вручную запускать не нужно.
 - `npm install` запускать только после отдельного разрешения владельца.
 - Для офлайн-проверки Playwright можно передать путь к установленному Chromium через `PLAYWRIGHT_EXECUTABLE_PATH`; путь не сохранять в проекте.
 - Для desktop проверять тот же frontend-сценарий отдельно в Wails/WebView2.

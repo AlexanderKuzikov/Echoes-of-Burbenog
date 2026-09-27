@@ -1,8 +1,9 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type APIRequestContext, type BrowserContext, type Page } from '@playwright/test';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createTrainingScenario } from '../src/game-core/index.ts';
 import type { SimulationEvent } from '../src/game-core/index.ts';
+import { CONTENT_VERSION, DEFAULT_SESSION_PORT, MAP_VERSION, PROTOCOL_VERSION } from '../src/protocol/index.ts';
 import { MODEL_BUDGET, SCENE_BUDGET } from '../src/asset-budgets.ts';
 
 const GLB_MODEL_PATH = 'public/models/pulse-spire.glb';
@@ -119,6 +120,28 @@ type RebuildReading = {
 
 type AssetBudgetsReading = NonNullable<typeof window.__ECHOES_DEBUG__>['assetBudgets'];
 
+// What the page says about the session it is in. In solo it is `local` and there is nothing to join; in
+// a room it names the room, the connection and the versions both sides agreed on, and it carries the
+// room's own sentence about anything it refused.
+type SessionReading = NonNullable<typeof window.__ECHOES_DEBUG__>['session'];
+
+// One stream frame as this client applied it. Two clients of one room can only be compared at a
+// sequence number both of them saw, so the comparison is made on this log and never on "where each of
+// them happens to be right now".
+type FrameLogReading = {
+  seq: number;
+  kind: string;
+  tick: number;
+  gold: number;
+  status: string;
+  players: number;
+  commandCount: number;
+  eventCounts: Record<SimulationEvent['type'], number>;
+  pads: Record<string, string | null>;
+  at: number;
+  deliveryMs: number;
+};
+
 type DebugReading = {
   ready: boolean;
   objectCount: number;
@@ -145,6 +168,9 @@ type DebugReading = {
   matchReports: MatchReport[];
   lastRebuild: RebuildReading | null;
   entry: { open: boolean; mode: string; armed: boolean; continuing: 'slot' | 'match' | null };
+  session: SessionReading;
+  frameLog: FrameLogReading[];
+  frames: number;
   motion: { reducedMotion: boolean; combatBursts: number; enemyBob: number; clips: number; clipsPlaying: number };
   assets: { status: string; models: string[]; error: string | null };
   probe: {
@@ -246,6 +272,9 @@ const readDebug = (page: Page) =>
       matchReports: debug.matchReports,
       lastRebuild: debug.lastRebuild,
       entry: debug.entry,
+      session: debug.session,
+      frameLog: debug.frameLog,
+      frames: debug.frames,
       motion: debug.motion,
       assets: debug.assets,
       probe: debug.probe,
@@ -400,6 +429,18 @@ const armDefendedWave = async (page: Page) => {
 // against a scene that is still swapping placeholders for loaded models.
 const waitForAssetsReady = (page: Page) =>
   expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'ready');
+
+// "The page has booted" is not a statement about how fast an assertion resolves. The default 5 s expect
+// timeout is a claim about the assertion, and it was measured on a suite that ran alone; a full run now
+// puts six workers, two browser contexts and a session server on one machine, and a cold boot has been
+// observed past 5 s — once in `drops transient canvas effects under prefers-reduced-motion`, which is
+// about canvas effects and has nothing to say about boot time. This is the same patience `EOB-019` gave
+// the negative asset scenarios, applied to boot. No assertion changes: only how long a test waits for the
+// canvas to exist, and the tests that already wait for the registry afterwards are unaffected.
+const BOOT_TIMEOUT = 30_000;
+
+const expectBooted = (page: Page) =>
+  expect(page.getByTestId('scene-canvas')).toBeVisible({ timeout: BOOT_TIMEOUT });
 
 // The page opens on the entry screen, so a scenario starts the way a player does: the entry offers
 // Continue only when there is something to continue, and New match asks a second time before it
@@ -685,19 +726,113 @@ const expectDockLabelsVisible = async (page: Page) => {
   return { names, slot: slot[0] };
 };
 
-// The entry screen is held to the same rules: its lines and its buttons carry a tick, a command count
-// and the price of erasing a save, and none of that may be cut. Hidden buttons are left out of the
-// measurement — Continue is legitimately absent when there is no save — and their absence is asserted
-// as a state, not as a label that produced no glyphs.
+// The entry screen is held to the same rules: its lines and its buttons carry a tick, a command count,
+// a room name and the price of erasing a save, and none of that may be cut. Hidden lines and hidden
+// buttons are left out of the measurement — Continue is legitimately absent when there is no save, and
+// the slot line is legitimately absent in a room — and their absence is asserted as a state, not as a
+// label that produced no glyphs.
 const expectEntryLabelsVisible = async (page: Page) => {
   const lines = await expectLabelsVisible(
     page,
-    '.entry-kicker, .entry-title, .entry-slot, .entry-hint, .entry-feedback',
+    '.entry-kicker, .entry-title, .entry-slot:not([hidden]), .entry-room-line, .entry-hint, .entry-feedback',
     '.entry-panel',
   );
   const buttons = await expectLabelsVisible(page, '.entry-button:not([hidden])', '.entry-button');
   return { lines, buttons };
 };
+
+// --- Authoritative session ---------------------------------------------------------------------
+// The room is a server on its own port, started by the Playwright config next to Vite, and a client
+// reaches it by address: `?room=<name>`. Nothing about it is a test hook — the handshake, the stream and
+// the command POST are the product's own transport, and a second browser *context* is used rather than a
+// second tab because two tabs of one context share a storage and would prove nothing about two clients.
+// The port is the one the protocol module declares, so a test cannot be pointed at a room the product
+// would not look for.
+const SESSION_ORIGIN = `http://127.0.0.1:${DEFAULT_SESSION_PORT}`;
+const SESSION_VIEWPORT = { width: 1280, height: 720 };
+
+// A room name is an address, and an address that is reused meets the match the last run left there.
+// The room server outlives a run when a developer keeps one open, so every room in this suite carries a
+// suffix from this process: a run gets rooms of its own, and a scenario that needs an untouched room
+// really has one instead of a match that started before the test file was read.
+const ROOM_RUN = `${process.pid.toString(36)}${Date.now().toString(36).slice(-4)}`;
+const roomName = (name: string): string => `${name}-${ROOM_RUN}`;
+
+const readSession = (page: Page) => page.evaluate((): SessionReading | null => window.__ECHOES_DEBUG__?.session ?? null);
+
+const readFrameLog = (page: Page) =>
+  page.evaluate((): FrameLogReading[] | null =>
+    (window.__ECHOES_DEBUG__?.frameLog ?? null)?.map((entry) => ({
+      seq: entry.seq,
+      kind: entry.kind,
+      tick: entry.tick,
+      gold: entry.gold,
+      status: entry.status,
+      players: entry.players,
+      commandCount: entry.commandCount,
+      eventCounts: { ...entry.eventCounts },
+      pads: { ...entry.pads },
+      at: entry.at,
+      deliveryMs: entry.deliveryMs,
+    })) ?? null,
+  );
+
+const waitForSessionState = (page: Page, state: string, timeout = 30_000) =>
+  expect(page.getByTestId('session-strip')).toHaveAttribute('data-state', state, { timeout });
+
+// Entering a room the way a player does: the address names it, the entry offers it, one press sends
+// the handshake and opens the stream. Nothing is injected and nothing is armed, so the fact that the
+// two contexts below see one match is a fact about the transport and not about the test.
+const enterRoom = async (page: Page, roomId: string) => {
+  await page.goto(`/?room=${roomId}`);
+  await expect(page.getByTestId('session-strip')).toHaveAttribute('data-mode', 'remote');
+  await expect(page.getByTestId('entry-screen')).toHaveAttribute('data-entry', 'room');
+  await expect(page.getByTestId('entry-room-input')).toHaveValue(roomId);
+  await page.getByTestId('entry-join-room').click();
+  await waitForSessionState(page, 'live');
+  await expect(page.getByTestId('entry-screen')).toBeHidden();
+};
+
+type RoomSummary = {
+  roomId: string;
+  players: number;
+  tick: number;
+  status: string;
+  commands: number;
+  versions: { protocolVersion: number; contentVersion: number; mapVersion: number; seed: number };
+};
+
+// The room as the server itself reports it. It is a third reading of the same match, and it is the one
+// that can prove the room kept ticking while a client did not.
+const readRoom = async (request: APIRequestContext, roomId: string): Promise<RoomSummary> => {
+  const response = await request.get(`${SESSION_ORIGIN}/api/health`);
+  expect(response.ok(), 'the session server is not answering its own health route').toBe(true);
+  const body = (await response.json()) as { rooms: RoomSummary[] };
+  const room = body.rooms.find((entry) => entry.roomId === roomId);
+  if (!room) {
+    throw new Error(`the server does not know a room called ${roomId}`);
+  }
+  return room;
+};
+
+// The frame two clients of one room can be compared at: the highest sequence number both of them
+// applied. A client that joined later has no log before its own first frame, so the overlap starts there
+// — which is exactly the window in which "one match" is a claim with two witnesses.
+const commonFrame = (first: FrameLogReading[], second: FrameLogReading[]): { a: FrameLogReading; b: FrameLogReading } => {
+  const bySeq = new Map(second.map((entry) => [entry.seq, entry]));
+  const shared = first.filter((entry) => bySeq.has(entry.seq)).sort((left, right) => left.seq - right.seq);
+  const latest = shared[shared.length - 1];
+  const partner = latest === undefined ? undefined : bySeq.get(latest.seq);
+  if (!latest || !partner) {
+    throw new Error(`the two clients share no frame (${first.length} and ${second.length} frames seen)`);
+  }
+  return { a: latest, b: partner };
+};
+
+const armHandshake = (page: Page, overrides: Record<string, unknown> | null) =>
+  page.evaluate((value) => {
+    window.__ECHOES_DEBUG__?.forceHandshake(value);
+  }, overrides);
 
 const emptyEventCounts = (): Record<SimulationEvent['type'], number> => ({
   towerPlaced: 0,
@@ -736,7 +871,7 @@ test('renders the first 3D-ready scene and accepts build selection', async ({ pa
   await expect(page.getByTestId('game-title')).toHaveText('First Contact');
   await expect(page.getByTestId('scene-status')).toContainText('Scene online');
   await expect(page.getByTestId('scene-status')).toContainText('models ready (pulse-spire)');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
 
   const debugState = await readDebug(page);
 
@@ -887,7 +1022,7 @@ test('drives presentation from MatchSnapshot without duplicated state', async ({
 test('places the selected tower on a clicked build pad through the command contract', async ({ page }) => {
   test.setTimeout(60_000);
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await enterAsNewMatch(page);
 
   const initial = await readDebugOrThrow(page);
@@ -979,7 +1114,7 @@ test('places the selected tower on a clicked build pad through the command contr
 test('plays a defended wave from real clicks and reports victory from the snapshot', async ({ page }) => {
   test.setTimeout(120_000);
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await enterAsNewMatch(page);
 
   await page.getByRole('button', { name: 'Pulse Spire' }).click();
@@ -1131,7 +1266,7 @@ test('plays a defended wave from real clicks and reports victory from the snapsh
 test('reports defeat when an undefended wave reaches the core', async ({ page }) => {
   test.setTimeout(120_000);
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await enterAsNewMatch(page);
 
   const initial = await readDebugOrThrow(page);
@@ -1190,7 +1325,7 @@ test('reports defeat when an undefended wave reaches the core', async ({ page })
 test('freezes and resumes the fixed-step clock without drift', async ({ page }) => {
   test.setTimeout(120_000);
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await enterAsNewMatch(page);
 
   await armDefendedWave(page);
@@ -1287,7 +1422,7 @@ test('freezes and resumes the fixed-step clock without drift', async ({ page }) 
 test('restarts from the same seed and replays the recorded command log', async ({ page }) => {
   test.setTimeout(150_000);
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await enterAsNewMatch(page);
 
   await expect(page.getByTestId('restart-match')).toBeDisabled();
@@ -1390,7 +1525,7 @@ test('restarts from the same seed and replays the recorded command log', async (
 test('rejects commands injected during replay and keeps the recorded run identical', async ({ page }) => {
   test.setTimeout(180_000);
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await enterAsNewMatch(page);
 
   const recordedCommands = placements.length + 1;
@@ -1486,7 +1621,7 @@ test('drops transient canvas effects under prefers-reduced-motion', async ({ pag
   test.setTimeout(120_000);
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await enterAsNewMatch(page);
 
   const initial = await readDebugOrThrow(page);
@@ -1562,7 +1697,7 @@ test('swaps a placed placeholder for the generated GLB without touching the snap
   page.on('pageerror', (error) => pageErrors.push(error.message));
 
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await enterAsNewMatch(page);
   await expect(page.getByTestId('viewport')).toHaveAttribute('data-assets', 'loading');
 
@@ -1679,7 +1814,7 @@ test('swaps a placed placeholder for the generated GLB without touching the snap
 test('weights the environment probe per material and keeps the generated model at full probe', async ({ page }) => {
   test.setTimeout(120_000);
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await enterAsNewMatch(page);
 
   // Two spires of the one model that has a registry entry. The second view is the proof that the
@@ -1825,7 +1960,7 @@ test('weights the environment probe per material and keeps the generated model a
 test('plays the tower clip on presentation time and freezes it while paused', async ({ page }) => {
   test.setTimeout(120_000);
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await enterAsNewMatch(page);
   // The model is in place before the tower is built, so the view is a model view from the start and
   // the clip belongs to that tower rather than to a swap that happened at an unknown moment.
@@ -1877,7 +2012,7 @@ test('plays the tower clip on presentation time and freezes it while paused', as
 test('reproduces the same clip pose on the same tick after a restart', async ({ page }) => {
   test.setTimeout(180_000);
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await enterAsNewMatch(page);
   await waitForAssetsReady(page);
   await armDefendedWave(page);
@@ -1930,7 +2065,7 @@ test('reproduces the same clip pose on the same tick after a restart', async ({ 
 test('applies a recorded command on its own tick when a frame steps several ticks', async ({ page }) => {
   test.setTimeout(180_000);
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await enterAsNewMatch(page);
   await waitForAssetsReady(page);
 
@@ -2551,7 +2686,7 @@ test('restores the same match from a real page reload', async ({ page }) => {
   const pageErrors: string[] = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await enterAsNewMatch(page);
   await waitForAssetsReady(page);
   await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'empty');
@@ -2618,7 +2753,7 @@ test('restores the same match from a real page reload', async ({ page }) => {
 
   // A real reload, not a call into the page: everything the page knew has to come back from the slot.
   await page.reload();
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   const reloaded = await readDebugOrThrow(page);
   expect(reloaded.commandCount).toBe(0);
   expect(reloaded.snapshot.status).toBe('preparation');
@@ -2743,7 +2878,7 @@ test('keeps a won match won after a load and clears the slot on a new match', as
   const pageErrors: string[] = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await enterAsNewMatch(page);
   await waitForAssetsReady(page);
 
@@ -2766,7 +2901,7 @@ test('keeps a won match won after a load and clears the slot on a new match', as
   await expect(page.getByTestId('save-slot')).toHaveText(`Save · tick ${terminalTick} · ${SAVE_COMMANDS} commands`);
 
   await page.reload();
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   const reloaded = await readDebugOrThrow(page);
   expect(reloaded.snapshot.status).toBe('preparation');
   expect(reloaded.matchReports).toEqual([]);
@@ -2874,7 +3009,7 @@ test('refuses a save that does not match the contract and leaves the slot untouc
   const pageErrors: string[] = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await enterAsNewMatch(page);
   await waitForAssetsReady(page);
 
@@ -2996,7 +3131,7 @@ test('refuses a save that does not match the contract and leaves the slot untouc
   for (const refusal of cases) {
     await writeSlot(page, refusal.raw);
     await page.reload();
-    await expect(page.getByTestId('scene-canvas')).toBeVisible();
+    await expectBooted(page);
     await waitForAssetsReady(page);
     await expect(page.getByTestId('save-slot'), refusal.name).toHaveAttribute('data-state', 'unreadable');
     await expect(page.getByTestId('load-match'), refusal.name).toBeEnabled();
@@ -3052,7 +3187,7 @@ test('rebuilds a preparation-only save to its tick with nothing to replay', asyn
   const pageErrors: string[] = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await enterAsNewMatch(page);
   await waitForAssetsReady(page);
   await expect(page.getByTestId('save-slot')).toHaveAttribute('data-state', 'empty');
@@ -3074,7 +3209,7 @@ test('rebuilds a preparation-only save to its tick with nothing to replay', asyn
   await expect(page.getByTestId('save-slot')).toHaveText(`Save · tick ${preparedTick} · 0 commands`);
 
   await page.reload();
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await setFrameDelta(page, 0.25);
   await waitForAssetsReady(page);
   // A save with an empty log is still a save, and the entry still offers it: zero commands is a
@@ -3137,7 +3272,7 @@ test('opens the entry screen on an empty slot and starts a match from it', async
   const pageErrors: string[] = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await waitForAssetsReady(page);
 
   // The page opens on the entry and not in a preparation. With no save there is nothing to continue,
@@ -3227,7 +3362,7 @@ test('plays a defended wave from the entry screen to victory with real clicks', 
   const pageErrors: string[] = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await enterAsNewMatch(page);
   await waitForAssetsReady(page);
 
@@ -3310,7 +3445,7 @@ test('reaches defeat through the entry screen with a terminal report of its own'
   const pageErrors: string[] = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await enterAsNewMatch(page);
   await waitForAssetsReady(page);
 
@@ -3353,7 +3488,7 @@ test('offers Continue on a saved slot and rebuilds the same match from the entry
   const pageErrors: string[] = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await enterAsNewMatch(page);
   await waitForAssetsReady(page);
 
@@ -3376,7 +3511,7 @@ test('offers Continue on a saved slot and rebuilds the same match from the entry
   expect(raw).not.toBeNull();
 
   await page.reload();
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await waitForAssetsReady(page);
 
   // The entry says what it has and touches nothing: the tick and the command count of the save, both
@@ -3457,7 +3592,7 @@ test('clears the slot only after a confirmed New match on the entry screen', asy
   const pageErrors: string[] = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await enterAsNewMatch(page);
   await waitForAssetsReady(page);
 
@@ -3535,7 +3670,7 @@ test('returns to the entry screen from MENU without erasing the slot or the matc
   const pageErrors: string[] = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto('/');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await enterAsNewMatch(page);
   await waitForAssetsReady(page);
 
@@ -3627,7 +3762,7 @@ test('keeps the entry labels readable in every state and the dev diagnostics beh
   const pageErrors: string[] = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await page.goto('/?dev=1');
-  await expect(page.getByTestId('scene-canvas')).toBeVisible();
+  await expectBooted(page);
   await waitForAssetsReady(page);
 
   // The flag still creates the diagnostics while the entry is open, and the entry is above them
@@ -3703,5 +3838,565 @@ test('keeps the entry labels readable in every state and the dev diagnostics beh
     `entry labels: empty "${labelWidths(emptyWide)}" → narrow "${labelWidths(emptyNarrow)}"; ` +
       `live "${labelWidths(liveWide)}" → narrow "${labelWidths(liveNarrow)}"; ` +
       `confirm "${labelWidths(confirmWide)}"`,
+  );
+});
+
+// --- Authoritative session: one room, two clients -------------------------------------------------
+// Everything below is measured against the room, not against a look at the screen. Two browser contexts
+// meet the same room, one of them builds something with a real canvas click, and the claim "one match"
+// is checked by comparing two readings of the same stream frame. Nothing about the transport is stubbed:
+// the handshake, the stream and the command POST are the product's own.
+
+test('runs one room on the session server and gives two browser contexts the same state', async ({ page, browser, request }) => {
+  test.setTimeout(180_000);
+  const roomId = roomName('pair');
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(`a: ${error.message}`));
+  await enterRoom(page, roomId);
+
+  // A second *context*, not a second tab. Two tabs of one context share a storage and a page object,
+  // so a bug that lived in the page would pass there and fail for two real players.
+  const other: BrowserContext = await browser.newContext({ viewport: SESSION_VIEWPORT });
+  const second = await other.newPage();
+  second.on('pageerror', (error) => pageErrors.push(`b: ${error.message}`));
+
+  try {
+    await enterRoom(second, roomId);
+    // The client count on each side is the room's, and it settles on two once both streams are attached.
+    // Reading it straight after the second one opened would catch the frame that opened *it*.
+    for (const target of [page, second]) {
+      await target.waitForFunction(() => (window.__ECHOES_DEBUG__?.session.players ?? 0) === 2, undefined, {
+        timeout: 20_000,
+      });
+    }
+    const [first, partner] = await Promise.all([readSession(page), readSession(second)]);
+    expect(first?.state).toBe('live');
+    expect(partner?.state).toBe('live');
+    // Different clients, one room: the names have to differ or these are not two clients at all.
+    expect(first?.clientId).not.toBe(partner?.clientId);
+    expect(first?.roomId).toBe(roomId);
+    expect(partner?.roomId).toBe(roomId);
+    expect(first?.players).toBe(2);
+    expect(partner?.players).toBe(2);
+    expect(first?.versions).toEqual({ protocolVersion: 1, contentVersion: 1, mapVersion: 1, seed: scenario.seed });
+
+    const roomBefore = await readRoom(request, roomId);
+    expect(roomBefore.players).toBe(2);
+    expect(roomBefore.commands).toBe(0);
+
+    // One command, from the first context, by a real click on a real pad. Nothing is dispatched through
+    // the seam, so what is being compared is what a player's click produced.
+    await page.getByRole('button', { name: 'Pulse Spire' }).click();
+    await clickPad(page, 'pad-east');
+    await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
+    await expect(page.getByTestId('command-feedback')).toHaveText('Pulse Spire built on pad-east');
+
+    // Both clients wait until the room's log has reached them, and the comparison is made at the
+    // highest frame both of them holds — a "wherever each of us is now" reading would only compare two
+    // different ticks and call it agreement.
+    await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.session.commandCount ?? 0) >= 1, undefined, { timeout: 20_000 });
+    await second.waitForFunction(() => (window.__ECHOES_DEBUG__?.session.commandCount ?? 0) >= 1, undefined, { timeout: 20_000 });
+    const [logA, logB] = await Promise.all([readFrameLog(page), readFrameLog(second)]);
+    if (!logA || !logB) {
+      throw new Error('a client in a room published no frame log');
+    }
+    const { a, b } = commonFrame(logA, logB);
+    expect(a.seq).toBe(b.seq);
+    expect(a.tick).toBe(b.tick);
+    expect(a.gold).toBe(b.gold);
+    expect(a.pads).toEqual(b.pads);
+    expect(a.status).toBe(b.status);
+    expect(a.commandCount).toBe(b.commandCount);
+    expect(a.eventCounts).toEqual(b.eventCounts);
+
+    // And the shared frame says what the room should say after one accepted build, which is what makes
+    // "they agree" a statement about the match and not about two copies of one empty screen.
+    expect(a.tick).toBeGreaterThan(0);
+    expect(a.status).toBe('preparation');
+    expect(a.gold).toBe(startingGold - costOf('pulse-spire'));
+    expect(a.pads['pad-east']).toBe('pulse-spire');
+    expect(a.eventCounts.towerPlaced).toBe(1);
+    expect(a.commandCount).toBe(1);
+    expect(b.deliveryMs).toBeGreaterThanOrEqual(0);
+
+    // The two live projections agree as well, which is the claim a player would make looking at two
+    // windows: same gold, same occupied pad, same one command in the room's log.
+    const [liveA, liveB] = await Promise.all([readDebugOrThrow(page), readDebugOrThrow(second)]);
+    expect(liveA.session.mode).toBe('remote');
+    expect(liveB.session.mode).toBe('remote');
+    expect(liveA.snapshot.gold).toBe(liveB.snapshot.gold);
+    expect(liveA.snapshot.pads).toEqual(liveB.snapshot.pads);
+    expect(liveA.commandCount).toBe(1);
+    expect(liveB.commandCount).toBe(1);
+    expect(liveA.rendered.towers).toBe(1);
+    expect(liveB.rendered.towers).toBe(1);
+    expect(liveA.eventCounts.towerPlaced).toBe(1);
+    expect(liveB.eventCounts.towerPlaced).toBe(1);
+    // The answer names the tick the room's core was standing on when it took the command, and that is
+    // not the tick of the frame the two clients were compared at — the room kept ticking after that. What
+    // has to hold is that the number is a real tick, it is not in the future, and it is the first command
+    // the room was given.
+    const answer = liveA.session.lastCommand;
+    expect(answer?.commandId).toBe(1);
+    expect(answer?.accepted).toBe(true);
+    expect(answer?.reason).toBeNull();
+    expect(Number.isInteger(answer?.tick)).toBe(true);
+    expect(answer?.tick ?? 0).toBeGreaterThan(0);
+    expect(answer?.tick ?? 0).toBeLessThanOrEqual(a.tick);
+    // The second client never sent anything, so it has no answer of its own — the command is the room's
+    // log, not a local echo of someone else's click.
+    expect(liveB.session.lastCommand).toBeNull();
+    await expect(second.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'idle');
+
+    const roomAfter = await readRoom(request, roomId);
+    expect(roomAfter.commands).toBe(1);
+    expect(roomAfter.players).toBe(2);
+    expect(roomAfter.tick).toBeGreaterThanOrEqual(a.tick);
+
+    // Nothing in the dock belongs to a room: the four controls that act on a local core are off, and
+    // the one command control is on, because a command is a command wherever it goes.
+    await expect(page.getByTestId('pause-toggle')).toBeDisabled();
+    await expect(page.getByTestId('restart-match')).toBeDisabled();
+    await expect(page.getByTestId('save-match')).toBeDisabled();
+    await expect(page.getByTestId('load-match')).toBeDisabled();
+    await expect(page.getByTestId('new-match')).toBeDisabled();
+    await expect(page.getByTestId('start-wave')).toBeEnabled();
+    await expect(page.getByTestId('save-slot')).toHaveText('Room match · not saved here');
+    expect(pageErrors).toEqual([]);
+
+    const deliveries = logA.map((entry) => entry.deliveryMs).sort((left, right) => left - right);
+    console.log(
+      `room ${roomId}: both clients agreed at frame ${a.seq} — tick ${a.tick}, gold ${a.gold}, ` +
+        `towerPlaced ${a.eventCounts.towerPlaced}, ${a.commandCount} command; ` +
+        `delivery median ${deliveries[Math.floor(deliveries.length / 2)]}ms, max ${deliveries[deliveries.length - 1]}ms; ` +
+        `room at tick ${roomAfter.tick} with ${roomAfter.commands} command(s)`,
+    );
+  } finally {
+    await other.close();
+  }
+});
+
+test('gives a client that joins late the current state of the room instead of an empty match', async ({ page, browser, request }) => {
+  test.setTimeout(180_000);
+  const roomId = roomName('join');
+  await enterRoom(page, roomId);
+
+  await page.getByRole('button', { name: 'Pulse Spire' }).click();
+  await clickPad(page, 'pad-east');
+  await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
+  await page.getByRole('button', { name: 'Grove Lens' }).click();
+  await clickPad(page, 'pad-south');
+  await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
+  await page.getByTestId('start-wave').click();
+  await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.status ?? 'preparation') === 'wave', undefined, {
+    timeout: 20_000,
+  });
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.enemies.length ?? 0) > 0, undefined, { timeout: 20_000 });
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.tick ?? 0) > 6, undefined, { timeout: 20_000 });
+
+  // The reading the first client is on when the second one walks in. It is taken before the second
+  // context exists, so it is a fact about the room as it was and not about the two of them together.
+  const before = await readDebugOrThrow(page);
+  const beforePlan = await readCommandPlan(page);
+
+  const other: BrowserContext = await browser.newContext({ viewport: SESSION_VIEWPORT });
+  const second = await other.newPage();
+  try {
+    await enterRoom(second, roomId);
+    const log = await readFrameLog(second);
+    if (!log || log.length === 0) {
+      throw new Error('a client that joined late published no frame');
+    }
+    // The frame that opens a connection is a whole state, not a fresh match. If it were a fresh match,
+    // this would be a state frame at tick 0 with no towers and the room would be two matches.
+    const opening = log[0]!;
+    expect(opening.kind).toBe('state');
+    expect(opening.players).toBe(2);
+    expect(opening.commandCount).toBe(before.commandCount);
+    expect(opening.commandCount).toBe(3);
+    expect(opening.tick).toBeGreaterThan(before.snapshot.tick);
+    expect(opening.status).toBe('wave');
+    // Pads and the command count cannot move on their own between the two readings, so they are compared
+    // outright. Gold and the event totals can — a kill lands while the second context is opening — so
+    // they are held to what a fresh match could never report. A client that joined into an empty match of
+    // its own would be at tick 0, at the full 220 aether, with two empty pads and no towers.
+    expect(opening.pads).toEqual(before.snapshot.pads);
+    expect(opening.pads['pad-east']).toBe('pulse-spire');
+    expect(opening.pads['pad-south']).toBe('grove-lens');
+    expect(opening.gold).toBeGreaterThanOrEqual(startingGold - costOf('pulse-spire') - costOf('grove-lens'));
+    expect(opening.gold).toBeLessThan(startingGold);
+    expect(opening.eventCounts.towerPlaced).toBe(2);
+    expect(opening.eventCounts.waveStarted).toBe(1);
+    // Enemies are counted too, and the late client has never seen one spawn. It reports the room's
+    // number, which is the only way a client that was not there for a fight can still be in that fight.
+    expect(opening.eventCounts.enemySpawned).toBeGreaterThan(0);
+
+    const late = await readDebugOrThrow(second);
+    expect(late.snapshot.towers).toHaveLength(2);
+    expect(late.snapshot.status).toBe('wave');
+    expect(late.snapshot.enemies.length).toBeGreaterThan(0);
+    expect(late.commandCount).toBe(3);
+    expect(late.eventCounts.towerPlaced).toBe(before.eventCounts.towerPlaced);
+    expect(late.eventCounts.waveStarted).toBe(1);
+    expect(late.rendered.towers).toBe(2);
+    expectProjectionMatchesSnapshot(late);
+    // The log of the room came across whole, and it came across with the room's own ticks: the late
+    // client publishes the same three entries, on the ticks the room took them, and each one is applied
+    // on the tick it was sent on. A reconstruction from the late client's own clock could not know that.
+    const plan = await readCommandPlan(second);
+    expect(plan).toEqual(beforePlan);
+    expect(plan?.map((entry) => entry.type)).toEqual(['placeTower', 'placeTower', 'startWave']);
+    expect(plan?.every((entry) => entry.appliedTick === entry.tick)).toBe(true);
+    expect(plan?.map((entry) => entry.tick)).toEqual([...plan!.map((entry) => entry.tick)].sort((a, b) => a - b));
+
+    const room = await readRoom(request, roomId);
+    expect(room.players).toBe(2);
+    expect(room.commands).toBe(3);
+    expect(room.status).toBe('wave');
+    console.log(
+      `late join ${roomId}: opened at tick ${opening.tick} (first client ${before.snapshot.tick}) with ` +
+        `${opening.commandCount} commands, gold ${opening.gold}, towerPlaced ${opening.eventCounts.towerPlaced}`,
+    );
+  } finally {
+    await other.close();
+  }
+});
+
+test('refuses a handshake whose versions the room does not run and never opens the stream', async ({ page, request }) => {
+  test.setTimeout(120_000);
+  const roomId = roomName('vers');
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  const streamRequests: string[] = [];
+  page.on('request', (req) => {
+    if (req.url().includes('/stream')) {
+      streamRequests.push(req.url());
+    }
+  });
+
+  await page.goto(`/?room=${roomId}`);
+  await expect(page.getByTestId('session-strip')).toHaveAttribute('data-mode', 'remote');
+  await expect(page.getByTestId('entry-screen')).toHaveAttribute('data-entry', 'room');
+
+  // Each version in turn, including the seed, because a seed that differs is the same class of mistake
+  // as a version that differs: the client would be drawing a match the room never simulated.
+  const refusals: Array<{ overrides: Record<string, unknown>; reason: string; found: string }> = [
+    { overrides: { protocolVersion: PROTOCOL_VERSION + 1 }, reason: 'protocol-version-mismatch', found: 'protocol v2' },
+    { overrides: { contentVersion: CONTENT_VERSION + 1 }, reason: 'content-version-mismatch', found: 'content v2' },
+    { overrides: { mapVersion: MAP_VERSION + 1 }, reason: 'map-version-mismatch', found: 'map v2' },
+    { overrides: { seed: scenario.seed + 1 }, reason: 'seed-mismatch', found: `seed ${scenario.seed + 1}` },
+    { overrides: { role: 'spectator' }, reason: 'role-not-permitted', found: 'spectator' },
+  ];
+
+  for (const refusal of refusals) {
+    await armHandshake(page, refusal.overrides);
+    await page.getByTestId('entry-join-room').click();
+    await waitForSessionState(page, 'refused');
+    const reading = await readSession(page);
+    expect(reading?.state, `no refusal for ${JSON.stringify(refusal.overrides)}`).toBe('refused');
+    expect(reading?.roomId).toBe(roomId);
+    expect(reading?.refusal?.reason).toBe(refusal.reason);
+    // The refusal names the number that arrived and not only the one that was wanted: a mismatch is a
+    // question, and a client that cannot say what it said cannot be helped.
+    expect(reading?.refusal?.found).toContain(refusal.found);
+    expect(reading?.refusal?.text.length ?? 0).toBeGreaterThan(0);
+    expect(reading?.clientId).toBeNull();
+    expect(reading?.frames).toBe(0);
+    expect(reading?.seq).toBe(0);
+    await expect(page.getByTestId('entry-feedback')).toHaveAttribute('data-result', 'refused');
+    await expect(page.getByTestId('entry-feedback')).toHaveAttribute('data-reason', refusal.reason);
+    await expect(page.getByTestId('entry-screen')).toHaveAttribute('data-entry', 'room');
+    await expect(page.getByTestId('entry-join-room')).toBeVisible();
+  }
+
+  // Not one byte of the stream was asked for: the match cannot start from a client the room would not
+  // take, and the local core was never stepped either — the picture behind the entry is still tick 0.
+  expect(streamRequests).toEqual([]);
+  const debug = await readDebugOrThrow(page);
+  expect(debug.snapshot.tick).toBe(0);
+  expect(debug.snapshot.towers).toEqual([]);
+  expect(debug.commandCount).toBe(0);
+  expect(debug.frames).toBeGreaterThan(0);
+  expect(debug.entry.open).toBe(true);
+  const room = await readRoom(request, roomId);
+  expect(room.players).toBe(0);
+  expect(room.tick).toBe(0);
+  expect(room.commands).toBe(0);
+  expect(room.status).toBe('preparation');
+  expect(room.versions).toEqual({
+    protocolVersion: PROTOCOL_VERSION,
+    contentVersion: CONTENT_VERSION,
+    mapVersion: MAP_VERSION,
+    seed: scenario.seed,
+  });
+
+  // With the versions back where they belong the same page walks into the same room, which is what
+  // makes the refusal a decision about the numbers and not about the client.
+  await armHandshake(page, null);
+  await page.getByTestId('entry-join-room').click();
+  await waitForSessionState(page, 'live');
+  await expect(page.getByTestId('entry-screen')).toBeHidden();
+  expect(streamRequests.length).toBe(1);
+  expect(pageErrors).toEqual([]);
+  console.log(
+    `handshake ${roomId}: refused ${refusals.map((refusal) => refusal.reason).join(', ')}; ` +
+      `the room never moved past tick ${(await readRoom(request, roomId)).tick}`,
+  );
+});
+
+test('does not tick locally in a room: a client without the room stream stands still', async ({ page, browser, request }) => {
+  test.setTimeout(180_000);
+  const roomId = roomName('tick');
+  await enterRoom(page, roomId);
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.tick ?? 0) >= 5, undefined, { timeout: 20_000 });
+  const connected = await readDebugOrThrow(page);
+  const connectedSession = await readSession(page);
+  expect(connectedSession?.seq ?? 0).toBeGreaterThan(0);
+  expect(connectedSession?.frames ?? 0).toBeGreaterThan(0);
+
+  // A second client whose stream request never leaves the browser. The room admits it — the handshake is
+  // its own exchange and it succeeds — and then never gets to send it a single frame, so this client is
+  // in a room, connected by the room's own accounting, with no state at all.
+  const other: BrowserContext = await browser.newContext({ viewport: SESSION_VIEWPORT });
+  const stranded = await other.newPage();
+  try {
+    await stranded.route('**/api/rooms/*/stream**', (route) => route.abort());
+    await stranded.goto(`/?room=${roomId}`);
+    await stranded.getByTestId('entry-join-room').click();
+    await waitForSessionState(stranded, 'offline');
+    const first = await readDebugOrThrow(stranded);
+    const firstSession = await readSession(stranded);
+    expect(firstSession?.state).toBe('offline');
+    expect(firstSession?.refusal?.reason).toBe('stream-refused');
+    expect(firstSession?.frames).toBe(0);
+    expect(firstSession?.seq).toBe(0);
+    expect(first.entry.open).toBe(true);
+
+    // Nothing arrived, so nothing moved — and the page is not dead: the frame counter only ever goes up,
+    // and it went up while the room's tick ran on ahead. The count is a witness that the page is alive,
+    // not a claim about how fast it draws: two WebGL contexts on one machine draw at whatever rate they
+    // draw at, and the assertion is about the number moving at all.
+    const roomBefore = await readRoom(request, roomId);
+    await page.waitForFunction((tick) => (window.__ECHOES_DEBUG__?.snapshot.tick ?? 0) > tick + 15, connected.snapshot.tick, {
+      timeout: 30_000,
+    });
+    const later = await readDebugOrThrow(stranded);
+    const laterSession = await readSession(stranded);
+    expect(later.frames, 'the page stopped drawing instead of stopping the match').toBeGreaterThan(first.frames);
+    expect(laterSession?.frames).toBe(0);
+    expect(laterSession?.seq).toBe(0);
+    expect(later.snapshot.tick).toBe(first.snapshot.tick);
+    expect(later.snapshot).toEqual(first.snapshot);
+    expect(later.eventCounts).toEqual(first.eventCounts);
+    expect(later.commandCount).toBe(0);
+    expect(later.replaying).toBe(false);
+    expect(later.lastRebuild).toBeNull();
+
+    // The room, meanwhile, went on: the connected client moved and the server says so twice. That gap is
+    // the whole claim — a page that had quietly taken the clock back would be one that moved too.
+    const live = await readDebugOrThrow(page);
+    const room = await readRoom(request, roomId);
+    expect(live.snapshot.tick).toBeGreaterThan(later.snapshot.tick);
+    expect(room.tick).toBeGreaterThan(roomBefore.tick);
+    expect(room.tick).toBeGreaterThan(later.snapshot.tick);
+    expect(room.players).toBe(1);
+    console.log(
+      `no local tick ${roomId}: the stranded client held tick ${later.snapshot.tick} while drawing ` +
+        `${later.frames - first.frames} more frames and applying ${laterSession?.frames}; the room went ` +
+        `${roomBefore.tick} -> ${room.tick} and the connected client reached ${live.snapshot.tick}`,
+    );
+  } finally {
+    await other.close();
+  }
+});
+
+test('shows the reason the room gave for a rejected command and does not apply it on the client', async ({ page, request }) => {
+  test.setTimeout(180_000);
+  const roomId = roomName('refuse');
+  await enterRoom(page, roomId);
+  await page.getByRole('button', { name: 'Pulse Spire' }).click();
+  await clickPad(page, 'pad-east');
+  await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
+  await expect(page.getByTestId('command-feedback')).toHaveText('Pulse Spire built on pad-east');
+  const built = await readDebugOrThrow(page);
+  expect(built.snapshot.gold).toBe(startingGold - costOf('pulse-spire'));
+
+  // The same pad, the same module, from a client that has not heard anything yet. The client cannot know
+  // the pad is taken — it has no rules — so the reason has to come from the room, and it has to be the
+  // room's reason rather than one the page made up for itself.
+  await clickPad(page, 'pad-east');
+  await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'rejected');
+  await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-reason', 'pad-occupied');
+  await expect(page.getByTestId('command-feedback')).toHaveText('Pad already occupied');
+
+  const refused = await readDebugOrThrow(page);
+  expect(refused.session.lastCommand).toEqual({
+    commandId: 2,
+    accepted: false,
+    reason: 'pad-occupied',
+    tick: refused.session.lastCommand?.tick,
+  });
+  // Nothing about the match moved: the room refused, so the room's state is the same state. A client that
+  // applied the command to its own core would have dropped the gold a second time.
+  expect(refused.snapshot.gold).toBe(startingGold - costOf('pulse-spire'));
+  expect(refused.snapshot.pads['pad-east']).toBe('pulse-spire');
+  expect(refused.snapshot.towers).toHaveLength(1);
+  expect(refused.eventCounts.towerPlaced).toBe(1);
+  expect(refused.rendered.towers).toBe(1);
+  // The client's own log is the room's log, entry for entry. A command the client wrote down itself is a
+  // command that exists nowhere but in its picture, and a rejected command is not a command at all.
+  expect(refused.commandCount).toBe(1);
+  expect(await readCommandPlan(page)).toHaveLength(1);
+  expect((await readCommandPlan(page))?.[0]?.type).toBe('placeTower');
+  // And the room's own log agrees: a rejected command is not recorded as one.
+  const room = await readRoom(request, roomId);
+  expect(room.commands).toBe(1);
+
+  // A second module, the same way round: accepted once, refused on the same pad, with the gold that is
+  // left being the room's arithmetic and not the client's.
+  await page.getByRole('button', { name: 'Grove Lens' }).click();
+  await clickPad(page, 'pad-north');
+  await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
+  await expect(page.getByTestId('command-feedback')).toHaveText('Grove Lens built on pad-north');
+  const second = await readDebugOrThrow(page);
+  expect(second.snapshot.gold).toBe(startingGold - costOf('pulse-spire') - costOf('grove-lens'));
+  expect(second.session.lastCommand?.commandId).toBe(3);
+
+  await clickPad(page, 'pad-north');
+  await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'rejected');
+  await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-reason', 'pad-occupied');
+  const twice = await readDebugOrThrow(page);
+  expect(twice.snapshot.gold).toBe(startingGold - costOf('pulse-spire') - costOf('grove-lens'));
+  expect(twice.snapshot.towers).toHaveLength(2);
+  expect(twice.eventCounts.towerPlaced).toBe(2);
+  expect(twice.session.lastCommand).toEqual({
+    commandId: 4,
+    accepted: false,
+    reason: 'pad-occupied',
+    tick: twice.session.lastCommand?.tick,
+  });
+  // And the room's own log agrees: a rejected command is not recorded as one.
+  expect((await readRoom(request, roomId)).commands).toBe(2);
+  console.log(
+    `room refusal ${roomId}: "Pad already occupied" came from the room twice, gold held at ` +
+      `${twice.snapshot.gold} across both refusals, room log ${(await readRoom(request, roomId)).commands} command(s)`,
+  );
+});
+
+test('names the session in solo and in a room, and keeps solo the default', async ({ page }) => {
+  test.setTimeout(120_000);
+  const strip = page.getByTestId('session-strip');
+
+  // Solo is what the address means by default: no `room` parameter, one `Simulation`, one clock.
+  await page.goto('/');
+  await expect(strip).toHaveAttribute('data-mode', 'solo');
+  await expect(strip).toHaveAttribute('data-state', 'local');
+  await expect(strip).toHaveAttribute('data-room', '');
+  await expect(page.getByTestId('session-name')).toHaveText('Solo');
+  await expect(page.getByTestId('session-detail')).toHaveText('Local match · this browser');
+  await expect(page.getByTestId('entry-room-line')).toHaveText('Solo · local match in this browser');
+  await expect(page.getByTestId('entry-join-room')).toBeDisabled();
+  const solo = await readDebugOrThrow(page);
+  expect(solo.session.mode).toBe('solo');
+  expect(solo.session.state).toBe('local');
+  expect(solo.session.roomId).toBeNull();
+  expect(solo.session.players).toBe(0);
+  // The local clock is still the product's: solo ticks, and nothing about a room took it away.
+  await page.getByTestId('entry-new-match').click();
+  await expect(page.getByTestId('entry-screen')).toBeHidden();
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.tick ?? 0) > 0, undefined, { timeout: 20_000 });
+
+  // A name that is not a room name does not put the page into a mode it cannot get out of: the address
+  // chooses the room, and an address that does not name one is a solo match.
+  await page.goto('/?room=Not%20A%20Room');
+  await expect(strip).toHaveAttribute('data-mode', 'solo');
+  expect((await readDebugOrThrow(page)).session.state).toBe('local');
+
+  // A room by address: the strip says which one, the entry says the same, and the number of clients is
+  // the room's count rather than a claim about this window.
+  const roomId = roomName('strip');
+  await page.goto(`/?room=${roomId}`);
+  await expect(strip).toHaveAttribute('data-mode', 'remote');
+  await expect(strip).toHaveAttribute('data-state', 'idle');
+  await expect(strip).toHaveAttribute('data-room', roomId);
+  await expect(strip).toHaveAttribute('data-clients', '0');
+  await expect(page.getByTestId('session-name')).toHaveText(`Room ${roomId}`);
+  await expect(page.getByTestId('session-detail')).toHaveText('Not entered');
+  await expect(page.getByTestId('entry-room-line')).toHaveText(`Room ${roomId} · Not entered`);
+  await expect(page.getByTestId('entry-join-room')).toBeEnabled();
+  await expect(page.getByTestId('entry-join-room')).toHaveText('Enter room');
+  // In a room the local slot is not what Continue acts on, so the line that describes it is not shown.
+  await expect(page.getByTestId('entry-slot')).toBeHidden();
+  await expect(page.getByTestId('entry-continue')).toBeHidden();
+  await expect(page.getByTestId('entry-new-match')).toBeHidden();
+
+  await page.getByTestId('entry-join-room').click();
+  await waitForSessionState(page, 'live');
+  await expect(strip).toHaveAttribute('data-clients', '1');
+  await expect(page.getByTestId('session-detail')).toHaveText(`1 client · the room's clock`);
+  // The entry is gone in a room, which is what lets the viewport be the match; `MENU` brings the room
+  // panel back and that is where the room state is read.
+  await expect(page.getByTestId('entry-screen')).toBeHidden();
+  await page.getByTestId('menu-button').click();
+  await expect(page.getByTestId('entry-screen')).toHaveAttribute('data-entry', 'room');
+  await expect(page.getByTestId('entry-room-line')).toHaveText(`Room ${roomId} · 1 client · the room's clock`);
+  await expect(page.getByTestId('entry-join-room')).toHaveText('Leave room');
+  await expect(page.getByTestId('entry-join-room')).toHaveAttribute('data-action', 'leave');
+
+  // Leaving is a navigation, and it is the only way out of a room from inside it. The room keeps its
+  // match; the page that comes back to the same address walks in through the handshake again, which is
+  // why the address is the single source of truth about which match this page is in.
+  await page.getByTestId('entry-join-room').click();
+  await page.waitForURL((url) => !url.searchParams.has('room'), { timeout: 20_000 });
+  await expect(strip).toHaveAttribute('data-mode', 'solo');
+  await expect(strip).toHaveAttribute('data-state', 'local');
+  expect((await readDebugOrThrow(page)).session.roomId).toBeNull();
+  console.log(`session strip: solo reads "Solo · Local match · this browser", a room reads "Room ${roomId} · 1 client · the room's clock"`);
+});
+
+test('keeps the room panel and the session strip readable at both widths', async ({ page }) => {
+  test.setTimeout(120_000);
+  const roomId = roomName('panel');
+  await page.goto(`/?room=${roomId}`);
+  await expect(page.getByTestId('entry-screen')).toBeVisible();
+  await expect(page.getByTestId('entry-room-line')).toHaveText(`Room ${roomId} · Not entered`);
+
+  // The same measure as the dock and the rest of the entry: glyph rects inside the padding box of the
+  // box that shows them, at the QA viewport and at the narrow one where the panel is the whole screen.
+  const wide = await expectEntryLabelsVisible(page);
+  const stripWide = await expectLabelsVisible(page, '[data-testid="session-name"], [data-testid="session-detail"]', '.session-strip');
+  await page.screenshot({ path: 'test-results/session-room-entry.png', fullPage: true });
+  await page.setViewportSize({ width: 560, height: 900 });
+  const narrow = await expectEntryLabelsVisible(page);
+  const stripNarrow = await expectLabelsVisible(page, '[data-testid="session-name"], [data-testid="session-detail"]', '.session-strip');
+  await page.screenshot({ path: 'test-results/session-room-narrow.png', fullPage: true });
+  await page.setViewportSize(SESSION_VIEWPORT);
+  expect(narrow.lines.length).toBe(wide.lines.length);
+  expect(narrow.buttons.length).toBe(wide.buttons.length);
+  expect(stripNarrow.length).toBe(stripWide.length);
+
+  // And the panel in the state that matters: connected, with a room name, a client count and a clock the
+  // page does not own.
+  await page.getByTestId('entry-join-room').click();
+  await waitForSessionState(page, 'live');
+  await page.getByRole('button', { name: 'Pulse Spire' }).click();
+  await clickPad(page, 'pad-east');
+  await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
+  await page.getByTestId('start-wave').click();
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.status ?? '') === 'wave', undefined, { timeout: 20_000 });
+  await expectLabelsVisible(page, '[data-testid="session-name"], [data-testid="session-detail"]', '.session-strip');
+  await page.screenshot({ path: 'test-results/session-room-live.png', fullPage: true });
+
+  await page.getByTestId('menu-button').click();
+  const open = await expectEntryLabelsVisible(page);
+  await expect(page.getByTestId('entry-room-line')).toHaveText(`Room ${roomId} · 1 client · the room's clock`);
+  await page.screenshot({ path: 'test-results/session-room-menu.png', fullPage: true });
+  const labelWidths = (measured: Awaited<ReturnType<typeof expectEntryLabelsVisible>>) =>
+    measured.lines.map((line) => `${line.text.slice(0, 18)} ${line.glyphs.map((glyph) => glyph.width.toFixed(1)).join('+')}`).join(' | ');
+  console.log(
+    `room panel ${roomId}: wide "${labelWidths(wide)}" | narrow "${labelWidths(narrow)}" | ` +
+      `menu "${labelWidths(open)}"; strip ${stripWide.map((line) => line.glyphs[0]?.width.toFixed(1)).join('/')}px wide, ` +
+      `${stripNarrow.map((line) => line.glyphs[0]?.width.toFixed(1)).join('/')}px narrow`,
   );
 });

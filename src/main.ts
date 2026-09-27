@@ -4,6 +4,20 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { TICK_RATE, createSimulation, createTrainingScenario } from './game-core/index.ts';
 import type { Command, CommandResult, MatchSnapshot, MatchStatus, SimulationEvent } from './game-core/index.ts';
+import {
+  CONTENT_VERSION,
+  DEFAULT_SESSION_PORT,
+  MAP_VERSION,
+  PROTOCOL_VERSION,
+  SESSION_REFUSAL_TEXT,
+  EVENT_TYPES,
+  isKnownCommand,
+  isRoomName,
+  readCommandAnswer,
+  readHandshakeAnswer,
+  readSessionFrame,
+} from './protocol/index.ts';
+import type { EventTally, HandshakeRequest, RoomCommand, SessionFrame, VersionStamp } from './protocol/index.ts';
 import { ASSET_MANIFEST_URL, AssetContractError, createAssetRegistry, parseAssetManifest, resolveModelUrl } from './asset-registry.ts';
 import type { AssetChecks, AssetRegistry, AssetStatus, ModelCheck, ModelManifestEntry } from './asset-registry.ts';
 import {
@@ -78,7 +92,47 @@ type RebuildReading = {
 // now. `live` is the entry MENU opened over a match the player is in the middle of; the rest are
 // states of the slot. `confirm` is not a state of the slot but of the button: the first New match
 // press arms it, and only the second one erases anything.
-type EntryMode = 'empty' | 'slot' | 'unreadable' | 'live' | 'confirm';
+type EntryMode = 'empty' | 'slot' | 'unreadable' | 'live' | 'confirm' | 'room';
+
+// Where this page stands with respect to a match. `local` is the product: the page owns the core.
+// Everything else is a room, and in a room the page owns nothing except the picture it draws.
+type SessionState = 'local' | 'idle' | 'connecting' | 'live' | 'offline' | 'refused';
+
+type SessionReading = {
+  mode: 'solo' | 'remote';
+  state: SessionState;
+  roomId: string | null;
+  clientId: string | null;
+  tickRate: number;
+  players: number;
+  seq: number;
+  frames: number;
+  commandCount: number;
+  versions: VersionStamp | null;
+  refusal: { reason: string; text: string; found: string | null } | null;
+  lastCommand: { commandId: number; accepted: boolean; reason: string | null; tick: number } | null;
+  deliveryMs: number | null;
+};
+
+// One frame as this client applied it. The log is bounded and kept because two clients of one room can
+// only be compared at a sequence number both of them saw: a reading of "where I am now" races the tick
+// that is already on its way.
+type FrameLogEntry = {
+  seq: number;
+  kind: SessionFrame['kind'];
+  tick: number;
+  gold: number;
+  status: MatchStatus;
+  players: number;
+  commandCount: number;
+  eventCounts: EventTally;
+  pads: Record<string, string | null>;
+  // The page's own clock when the frame was applied, and the one-way delay the frame carried from the
+  // room's clock. Two numbers, both taken inside the page, so a delivery time measured from them holds
+  // no round-trip between the test process and the browser.
+  at: number;
+  deliveryMs: number;
+};
 
 type DebugState = {
   ready: boolean;
@@ -92,7 +146,7 @@ type DebugState = {
   waveCount: number;
   eventsDrained: number;
   snapshot: MatchSnapshot;
-  dispatch: (command: Command) => CommandResult;
+  dispatch: (command: Command) => CommandResult | null;
   readonly selectedTowerId: string;
   readonly feedback: { state: FeedbackState; message: string; reason: string | null };
   readonly objectCount: number;
@@ -131,6 +185,19 @@ type DebugState = {
   // the match clock instead of the round-trip between the test process and the page.
   readonly clockMarks: ClockMark[];
   markClock: (label: string) => void;
+  // Who owns the match, and everything a test needs to say so without reading the transport: the room,
+  // the connection, the versions both sides agreed on, the reason the room gave for a refusal, and the
+  // bounded log of frames as this client applied them. In solo the answer is `local` and the log is
+  // empty, because there is no stream to log.
+  readonly session: SessionReading;
+  readonly frameLog: FrameLogEntry[];
+  // The versions this client declares in its handshake are armable, because a version mismatch has to
+  // be reachable from a test without patching the build. It changes what the client says, never what
+  // the room accepts: the refusal is still the room's answer to a wrong number.
+  forceHandshake: (overrides: Partial<HandshakeRequest> | null) => void;
+  // Frames this page has drawn. A page that is alive but not ticking is the whole claim behind "the
+  // room owns the clock in remote mode", and it cannot be told apart from a frozen picture without it.
+  readonly frames: number;
   readonly motion: { reducedMotion: boolean; combatBursts: number; enemyBob: number; clips: number; clipsPlaying: number };
   readonly assets: { status: AssetStatus; models: string[]; error: string | null };
   // The environment probe sits on the scene at full strength, so what dims it is a property of
@@ -313,6 +380,13 @@ const entryHint = document.querySelector<HTMLElement>('[data-testid="entry-hint"
 const entryFeedback = document.querySelector<HTMLElement>('[data-testid="entry-feedback"]');
 const entryContinueButton = document.querySelector<HTMLButtonElement>('[data-testid="entry-continue"]');
 const entryNewMatchButton = document.querySelector<HTMLButtonElement>('[data-testid="entry-new-match"]');
+const sessionStrip = document.querySelector<HTMLElement>('[data-testid="session-strip"]');
+const sessionName = document.querySelector<HTMLElement>('[data-testid="session-name"]');
+const sessionDetail = document.querySelector<HTMLElement>('[data-testid="session-detail"]');
+const entryRoom = document.querySelector<HTMLElement>('[data-testid="entry-room"]');
+const entryRoomLine = document.querySelector<HTMLElement>('[data-testid="entry-room-line"]');
+const entryRoomInput = document.querySelector<HTMLInputElement>('[data-testid="entry-room-input"]');
+const entryJoinRoom = document.querySelector<HTMLButtonElement>('[data-testid="entry-join-room"]');
 
 if (
   !sceneMount ||
@@ -349,7 +423,14 @@ if (
   !entryHint ||
   !entryFeedback ||
   !entryContinueButton ||
-  !entryNewMatchButton
+  !entryNewMatchButton ||
+  !sessionStrip ||
+  !sessionName ||
+  !sessionDetail ||
+  !entryRoom ||
+  !entryRoomLine ||
+  !entryRoomInput ||
+  !entryJoinRoom
 ) {
   throw new Error('Bootstrap DOM is incomplete');
 }
@@ -1331,6 +1412,12 @@ const rejectionMessages: Record<string, string> = {
   'unknown-tower': 'Unknown module',
   'match-finished': 'Match already finished',
   'wave-already-active': 'Wave already active',
+  // The reasons a room owns rather than the core. They are named in one place on purpose: a refusal the
+  // player cannot read is a refusal the player has to guess about, and the codes are the room's.
+  'command-shape': 'The room did not read that as a command',
+  'command-unreadable': 'The room did not answer that command',
+  'session-unreachable': 'The session server could not be reached',
+  'session-not-live': 'There is no room to send this command to',
 };
 
 let selectedTowerId = buildOptions[0]?.towerId ?? '';
@@ -1486,6 +1573,7 @@ const terminalFeedbackLabels: Record<'victory' | 'defeat', string> = {
 };
 
 const syncHud = () => {
+  const remote = mode === 'remote';
   goldValue.textContent = String(snapshot.gold);
   const integrity = snapshot.maxCoreHealth > 0 ? snapshot.coreHealth / snapshot.maxCoreHealth : 0;
   integrityValue.textContent = `${Math.round(integrity * 100)}%`;
@@ -1497,11 +1585,16 @@ const syncHud = () => {
   phaseTimer.textContent = phaseTimerText(snapshot);
   enemyCount.textContent = String(snapshot.enemies.length);
   objectiveDetail.textContent = objectiveSummary(snapshot);
-  startWaveButton.disabled = snapshot.status !== 'preparation' || replaying;
-  restartButton.disabled = commandLog.length === 0;
+  // Start Wave is a command, so it stays available in a room — it just goes to the room instead of to a
+  // core this page owns. The four controls that act on a local `Simulation` are not commands at all, and
+  // a control that would do nothing but look available is a lie with a button on it.
+  startWaveButton.disabled = remote ? sessionState !== 'live' : snapshot.status !== 'preparation' || replaying;
+  restartButton.disabled = remote || commandLog.length === 0;
   // A log under replay names commands the rebuilt run has not reached yet, so the slot cannot be
   // written from the middle of one. New match stays available throughout: it is the way out.
-  saveButton.disabled = replaying;
+  saveButton.disabled = remote || replaying;
+  newMatchButton.disabled = remote;
+  pauseToggle.disabled = remote;
   pauseToggle.textContent = paused ? 'Resume' : 'Pause';
   pauseToggle.setAttribute('aria-pressed', String(paused));
   viewportShell.dataset.paused = String(paused);
@@ -1519,7 +1612,9 @@ const syncHud = () => {
     stateBadge.hidden = true;
   }
   for (const option of buildOptions) {
-    option.button.disabled = replaying;
+    // In a room the palette is not locked by a replay — it is open, because the build buttons are a
+    // choice of what to ask the room for and a choice is not a command.
+    option.button.disabled = remote ? sessionState !== 'live' : replaying;
   }
   if (snapshot.status === 'victory' || snapshot.status === 'defeat') {
     resultBanner.hidden = false;
@@ -1634,13 +1729,40 @@ const dispatchCommand = (command: Command): CommandResult => {
   const result = simulation.dispatch(command);
   // Command events are consumed in the same task as the input so feedback, event
   // counts and the snapshot never lag the click by a frame.
-  eventsDrained += consumeEvents();
+  eventsDrained += consumeLocalEvents();
   applySnapshot(simulation.getSnapshot());
   return result;
 };
 
 const replayBlockedReason = 'replay-in-progress';
 const replayBlockedFeedback = 'Recorded run is replaying · commands are locked until it finishes';
+
+// The one place an outcome becomes a sentence. Both modes end up here and nowhere else: solo reaches
+// it in the same task as the click, a room reaches it when the room's answer arrives. A client that
+// turned an answer into its own verdict would be a second implementation of the rules, so this function
+// only ever reads what it is given — the reason it shows is the reason its owner produced.
+const reportCommandResult = (command: Command, result: CommandResult) => {
+  if (result.accepted) {
+    if (command.type === 'startWave') {
+      setFeedback('accepted', `Wave ${snapshot.waveIndex + 1} started`);
+      return;
+    }
+    const name = towerDefinitions.get(command.towerId)?.name ?? command.towerId;
+    setFeedback('accepted', `${name} built on ${command.padId}`);
+    return;
+  }
+  const reason = result.reason ?? 'rejected';
+  if (reason === replayBlockedReason) {
+    // The guard already explained that the recorded run owns the core; a pad flash would claim the core
+    // rejected a build it never saw.
+    setFeedback('rejected', replayBlockedFeedback, reason);
+    return;
+  }
+  if (command.type === 'placeTower') {
+    flashPadError(command.padId);
+  }
+  setFeedback('rejected', rejectionMessages[reason] ?? `Rejected: ${reason}`, reason);
+};
 
 // Player intent is logged with the tick it was issued on. Seed plus the tick-ordered
 // log is the whole input of a match, so replaying the log on a fresh core reproduces it.
@@ -1649,11 +1771,14 @@ const replayBlockedFeedback = 'Recorded run is replaying · commands are locked 
 // whether the command arrives from a pad click, Start Wave or the QA seam.
 const dispatchPlayerCommand = (command: Command): CommandResult => {
   if (replaying) {
-    setFeedback('rejected', replayBlockedFeedback, replayBlockedReason);
-    return { accepted: false, reason: replayBlockedReason };
+    const blocked: CommandResult = { accepted: false, reason: replayBlockedReason };
+    reportCommandResult(command, blocked);
+    return blocked;
   }
   commandLog.push({ tick: snapshot.tick, appliedTick: snapshot.tick, command });
-  return dispatchCommand(command);
+  const result = dispatchCommand(command);
+  reportCommandResult(command, result);
+  return result;
 };
 
 const clearCombatBursts = () => {
@@ -1754,11 +1879,12 @@ const eventFeedEntries: EventFeedEntry[] = [];
 const MATCH_SAVE_KEY = 'echoes-of-burbenog:match:v1';
 const MATCH_SAVE_SCHEMA = 1;
 
-// Content is versioned separately from the runtime code, and the training scenario carries no
-// version of its own, so the client declares the content it was built against. A slot written by a
-// build with other content describes a match this client cannot reproduce, and is refused rather
-// than replayed into something it never said.
-const TRAINING_CONTENT_VERSION = 1;
+// Content is versioned separately from the runtime code, and the training scenario carries no version
+// of its own, so the client declares the content it was built against — and it declares the same number
+// the session contract declares, because a slot written against one content and a room running another
+// are the same mistake in two places. A slot written by a build with other content describes a match
+// this client cannot reproduce, and is refused rather than replayed into something it never said.
+const TRAINING_CONTENT_VERSION = CONTENT_VERSION;
 
 // The slot is a local artifact that a player, an extension or a stray script can edit, so the number
 // of commands it may claim is bounded before anything is replayed. The training match records six.
@@ -1784,23 +1910,11 @@ type SaveSlotReading =
 
 const refuseSlot = (reason: string, message: string): SaveSlotReading => ({ state: 'refused', reason, message });
 
-// The command shapes of the current contract, and nothing else: a slot may only claim a command
-// this build knows how to hand to the core. Whether the command would be accepted is not decided
-// here — that is the core's answer, and it is recorded per command in the log either way.
-const isKnownCommand = (value: unknown): value is Command => {
-  if (typeof value !== 'object' || value === null) {
-    return false;
-  }
-  const candidate = value as { type?: unknown; padId?: unknown; towerId?: unknown };
-  if (candidate.type === 'startWave') {
-    return true;
-  }
-  return (
-    candidate.type === 'placeTower' &&
-    typeof candidate.padId === 'string' &&
-    typeof candidate.towerId === 'string'
-  );
-};
+// Whether a command is one this build knows how to hand over is asked in the protocol module, because
+// the room asks the same question of a POST body and the two answers cannot differ: a command the slot
+// validator accepts and the room rejects would be one artifact with two grammars. Whether the command
+// would be *accepted* is not asked here at all — that is the core's answer in solo and the room's answer
+// in a room, and both are recorded per command in the log either way.
 
 const readSaveSlot = (): SaveSlotReading => {
   let raw: string | null;
@@ -1936,6 +2050,16 @@ const slotStateLabel = (payload: MatchSavePayload): string =>
 // player's back. An unreadable slot keeps Load available: the player asked for the reason, and New
 // match is what clears it.
 const refreshSaveSlot = (): SaveSlotReading => {
+  if (mode === 'remote') {
+    // A room's match has no slot in this browser, and the panel is not allowed to describe a slot that
+    // belongs to a different match: a leftover local save sitting under a room that never asked for it
+    // would name a tick and a command count of a game that is not on screen. The line says what the
+    // panel is instead.
+    saveSlotLabel.textContent = 'Room match · not saved here';
+    saveSlotLabel.dataset.state = 'room';
+    loadButton.disabled = true;
+    return slotReading;
+  }
   const reading = readSaveSlot();
   slotReading = reading;
   if (reading.state === 'empty') {
@@ -2044,6 +2168,11 @@ let entryArmed = false;
 const entryHasSave = (): boolean => slotReading.state !== 'empty';
 
 const entryModeFor = (reading: SaveSlotReading): EntryMode => {
+  // The room outranks everything the slot has to say: in a room the local slot describes a different
+  // match, so there is nothing for Continue or New match to act on and the entry is a room instead.
+  if (mode === 'remote') {
+    return 'room';
+  }
   // The armed state outranks the slot state, because it describes the button and not the slot: the
   // slot is still exactly where it was while the first press is waiting for a second one.
   if (entryArmed) {
@@ -2058,8 +2187,8 @@ const entryModeFor = (reading: SaveSlotReading): EntryMode => {
   return reading.state === 'ready' ? 'slot' : 'unreadable';
 };
 
-const entrySlotText = (mode: EntryMode, reading: SaveSlotReading): string => {
-  if (mode === 'live') {
+const entrySlotText = (entryMode: EntryMode, reading: SaveSlotReading): string => {
+  if (entryMode === 'live') {
     return `In progress · tick ${snapshot.tick} · ${commandCountLabel(commandLog.length)}`;
   }
   // The armed state describes the button and not the slot, so the line keeps saying what the slot
@@ -2073,8 +2202,10 @@ const entrySlotText = (mode: EntryMode, reading: SaveSlotReading): string => {
   return 'No saved match in this browser';
 };
 
-const entryHintText = (mode: EntryMode): string => {
-  switch (mode) {
+const entryHintText = (entryMode: EntryMode): string => {
+  switch (entryMode) {
+    case 'room':
+      return sessionEntryHint();
     case 'live':
       return 'Menu kept the match and the save where they were. Continue goes back into the match.';
     case 'slot':
@@ -2092,20 +2223,27 @@ const syncEntry = () => {
   // A closed entry reads nothing: the slot is looked at on boot and by the actions that can change
   // it, and an overlay that is not on screen has no reason to hold a second opinion.
   const reading = entryOpen ? refreshSaveSlot() : slotReading;
-  const mode = entryOpen ? entryModeFor(reading) : 'empty';
+  const entryMode = entryOpen ? entryModeFor(reading) : 'empty';
+  const inRoom = entryMode === 'room';
   entryScreen.hidden = !entryOpen;
   gameShell.inert = entryOpen;
-  entryScreen.dataset.entry = mode;
+  entryScreen.dataset.entry = entryMode;
   entrySlot.dataset.slotState =
-    mode === 'live' ? 'live' : reading.state === 'refused' ? 'unreadable' : reading.state === 'ready' ? 'slot' : 'empty';
-  entrySlot.textContent = entryOpen ? entrySlotText(mode, reading) : '';
-  entryHint.textContent = entryOpen ? entryHintText(mode) : '';
+    entryMode === 'live' ? 'live' : reading.state === 'refused' ? 'unreadable' : reading.state === 'ready' ? 'slot' : 'empty';
+  // The slot line is the state of the thing Continue acts on. In a room Continue does not act on a slot,
+  // so the line is not shown at all rather than shown empty — a room has its own line right below it.
+  entrySlot.hidden = inRoom;
+  entrySlot.textContent = entryOpen && !inRoom ? entrySlotText(entryMode, reading) : '';
+  entryHint.textContent = entryOpen ? entryHintText(entryMode) : '';
   // Continue is offered whenever there is something to continue: a save to rebuild, or a match of the
   // player's own to go back into. It stays available in the armed state, which is the way out of it
-  // that does not destroy anything.
-  entryContinueButton.hidden = !entryOpen || mode === 'empty';
+  // that does not destroy anything. Neither action exists in a room, where both would act on a match
+  // this page does not own.
+  entryContinueButton.hidden = !entryOpen || entryMode === 'empty' || inRoom;
+  entryNewMatchButton.hidden = inRoom;
   entryNewMatchButton.dataset.confirm = entryArmed ? 'armed' : 'idle';
   entryNewMatchButton.textContent = entryArmed ? 'Erase the save' : 'New match';
+  paintSession();
 };
 
 const openEntry = (fromMenu: boolean) => {
@@ -2114,7 +2252,11 @@ const openEntry = (fromMenu: boolean) => {
   entryOpen = true;
   syncEntry();
   // Focus goes to the action that is there, so a keyboard player lands on Continue when there is
-  // something to continue and on New match when there is not.
+  // something to continue and on New match when there is not. A room has one action of its own.
+  if (mode === 'remote') {
+    entryJoinRoom.focus();
+    return;
+  }
   (entryContinueButton.hidden ? entryNewMatchButton : entryContinueButton).focus();
 };
 
@@ -2159,9 +2301,374 @@ const newMatchFromEntry = () => {
 entryContinueButton.addEventListener('click', continueFromEntry);
 entryNewMatchButton.addEventListener('click', newMatchFromEntry);
 // MENU is the way back and it erases nothing: no slot, no log, no core. The match is simply frozen
-// behind the overlay and released again by Continue.
+// behind the overlay and released again by Continue. In a room it freezes nothing at all — the room's
+// clock is not this page's to stop — and the entry becomes the room's own panel.
 menuButton.addEventListener('click', () => {
   openEntry(true);
+});
+
+// --- Session: one client, two owners of the match ----------------------------------------------
+// Solo stays the product: the page owns the `Simulation`, ticks it, and everything below is off. A room
+// is entered by address — `?room=<name>` — and nothing else turns this page into a client, because a
+// mode that turns itself on is a mode a player cannot see. What changes between the two is exactly two
+// things: where the snapshot comes from, and where a command goes. The projection, the event path, the
+// feedback and the log are the same code in both, which is the only way two phases from now will not
+// have two clients that behave differently.
+const roomParam = new URLSearchParams(window.location.search).get('room');
+// The address names the room; the origin says where rooms live. Both are overridable so a session on
+// another machine is a URL rather than a rebuild, and both fall back to the number the protocol module
+// declares, which is the same number the server falls back to.
+const sessionOrigin = (): string => {
+  const override = new URLSearchParams(window.location.search).get('session');
+  if (override !== null && override.length > 0) {
+    return override.replace(/\/$/, '');
+  }
+  const host = window.location.hostname === 'localhost' ? '127.0.0.1' : window.location.hostname;
+  return `${window.location.protocol}//${host}:${DEFAULT_SESSION_PORT}`;
+};
+
+let mode: 'solo' | 'remote' = isRoomName(roomParam) ? 'remote' : 'solo';
+let sessionState: SessionState = mode === 'remote' ? 'idle' : 'local';
+let sessionRoomId: string | null = mode === 'remote' ? roomParam : null;
+let sessionClientId: string | null = null;
+let sessionVersions: VersionStamp | null = null;
+let sessionPlayers = 0;
+let sessionSeq = 0;
+let sessionFrames = 0;
+let sessionTickRate = TICK_RATE;
+let sessionDeliveryMs: number | null = null;
+let sessionRefusal: { reason: string; text: string; found: string | null } | null = null;
+let sessionLastCommand: { commandId: number; accepted: boolean; reason: string | null; tick: number } | null = null;
+let sessionSource: EventSource | null = null;
+let forcedHandshake: Partial<HandshakeRequest> | null = null;
+
+// Enough of the recent stream to compare two clients of one room at a sequence number they both saw. A
+// client that joined late is missing the frames before its own, so the two logs only overlap from the
+// moment of its first frame onwards, and that overlap is the only place a comparison means anything.
+const FRAME_LOG_LIMIT = 64;
+const frameLog: FrameLogEntry[] = [];
+
+const clientCountLabel = (players: number): string => `${players} ${players === 1 ? 'client' : 'clients'}`;
+
+const sessionDetailText = (): string => {
+  if (mode === 'solo') {
+    return 'Local match · this browser';
+  }
+  switch (sessionState) {
+    case 'idle':
+      return 'Not entered';
+    case 'connecting':
+      return 'Handshake in flight';
+    case 'live':
+      return `${clientCountLabel(sessionPlayers)} · the room's clock`;
+    case 'offline':
+      return 'Update stream lost · the room keeps running';
+    case 'refused':
+      return sessionRefusal?.text ?? 'The room refused the handshake';
+    default:
+      return 'Local match · this browser';
+  }
+};
+
+const sessionEntryHint = (): string => {
+  if (sessionState === 'refused') {
+    return `The room did not take this client: ${sessionRefusal?.found ?? 'no reason given'}. The versions both sides run are named on the line above.`;
+  }
+  if (sessionState === 'live') {
+    return 'The room owns this match. Commands go to it, and every client in it sees the same state.';
+  }
+  if (sessionState === 'offline') {
+    return 'The update stream stopped. The match has not paused — the room went on without this client.';
+  }
+  return 'Name a room to play the same match in two browsers. The page keeps solo as the default.';
+};
+
+// One writer for the two surfaces that name the session, so the strip in the top bar and the panel on
+// the entry cannot describe two different connections. It is called from `syncEntry` and from the frame
+// handler, and it only ever writes the connection's identity — never the tick, which is in the HUD and
+// belongs to whoever owns the match.
+let paintedSessionState: SessionState | null = null;
+let paintedSessionPlayers = -1;
+let paintedSessionRoom: string | null = null;
+
+const paintSession = (): void => {
+  const room = sessionRoomId;
+  if (
+    paintedSessionState === sessionState &&
+    paintedSessionPlayers === sessionPlayers &&
+    paintedSessionRoom === room
+  ) {
+    return;
+  }
+  paintedSessionState = sessionState;
+  paintedSessionPlayers = sessionPlayers;
+  paintedSessionRoom = room;
+  sessionStrip.dataset.mode = mode;
+  sessionStrip.dataset.state = sessionState;
+  sessionStrip.dataset.room = room ?? '';
+  sessionStrip.dataset.clients = String(sessionPlayers);
+  sessionName.textContent = mode === 'solo' ? 'Solo' : `Room ${room ?? '—'}`;
+  sessionDetail.textContent = sessionDetailText();
+  entryRoom.dataset.state = sessionState;
+  entryRoomLine.textContent = mode === 'solo' ? 'Solo · local match in this browser' : `Room ${room ?? '—'} · ${sessionDetailText()}`;
+  // The input shows the room the page is about, which is the room in the address when there is one and
+  // an empty field when there is not: typing a name is the whole of choosing a room.
+  if (document.activeElement !== entryRoomInput && entryRoomInput.value !== (room ?? '')) {
+    entryRoomInput.value = room ?? '';
+  }
+  const live = sessionState === 'live';
+  entryJoinRoom.textContent = live ? 'Leave room' : mode === 'solo' ? 'Join room' : 'Enter room';
+  entryJoinRoom.dataset.action = live ? 'leave' : 'enter';
+  entryJoinRoom.disabled = !live && !isRoomName(entryRoomInput.value);
+  if (sessionState === 'refused' && sessionRefusal !== null) {
+    setSaveFeedback('refused', sessionRefusal.text, sessionRefusal.reason);
+  } else if (mode === 'remote') {
+    setSaveFeedback('idle', `Room ${room ?? '—'} · the room keeps the state`);
+  }
+  syncHud();
+};
+
+const applySessionFrame = (frame: SessionFrame) => {
+  sessionSeq = frame.seq;
+  sessionFrames += 1;
+  sessionPlayers = frame.players;
+  sessionTickRate = frame.tickRate;
+  if (frame.versions !== undefined) {
+    sessionVersions = frame.versions;
+  }
+  // The room's log is the room's. In a room this page does not append to it: a command it sends comes
+  // back in a frame, with the tick the room sent it on and the tick its core was standing on, so the
+  // same `commandPlan` a solo run publishes is a projection here rather than a local guess. A frame that
+  // carries the log carries all of it, so the local list is replaced rather than added to — appending a
+  // whole log to a whole log would publish six commands for a room that was given three.
+  if (frame.commands !== undefined || frame.kind === 'state') {
+    commandLog.length = 0;
+    for (const entry of frame.commands ?? []) {
+      commandLog.push(roomCommandEntry(entry));
+    }
+  }
+  adoptEventCounts(frame.eventCounts);
+  if (frame.events.length > 0) {
+    eventsDrained += frame.events.length;
+    presentEvents(frame.events);
+  }
+  applySnapshot(frame.snapshot);
+  const deliveryMs = Math.max(0, Date.now() - frame.sentAt);
+  sessionDeliveryMs = deliveryMs;
+  frameLog.push({
+    seq: frame.seq,
+    kind: frame.kind,
+    tick: frame.snapshot.tick,
+    gold: frame.snapshot.gold,
+    status: frame.snapshot.status,
+    players: frame.players,
+    commandCount: frame.commandCount,
+    eventCounts: { ...frame.eventCounts },
+    pads: { ...frame.snapshot.pads },
+    at: performance.now(),
+    deliveryMs,
+  });
+  while (frameLog.length > FRAME_LOG_LIMIT) {
+    frameLog.shift();
+  }
+  // The entry stays up until the room has actually said what the match is. Closing it on the strength
+  // of a successful handshake would put a local preparation of tick 0 on screen for a frame, which is
+  // the one thing this page is not allowed to show about a match it does not own.
+  if (frame.kind === 'state' && sessionState === 'connecting') {
+    sessionState = 'live';
+    setFeedback('idle', `Joined room ${sessionRoomId ?? ''} · tick ${frame.snapshot.tick}`);
+    closeEntry();
+  }
+  paintSession();
+};
+
+const roomCommandEntry = (entry: RoomCommand): CommandLogEntry => ({
+  tick: entry.tick,
+  appliedTick: entry.appliedTick,
+  command: entry.command,
+});
+
+const closeSession = (state: SessionState, reason: string, found: string | null) => {
+  sessionSource?.close();
+  sessionSource = null;
+  sessionState = state;
+  sessionRefusal = reason === '' ? null : { reason, text: SESSION_REFUSAL_TEXT[reason] ?? reason, found };
+  syncHud();
+  paintSession();
+};
+
+const connectToRoom = async (roomId: string) => {
+  if (!isRoomName(roomId) || sessionState === 'connecting' || sessionState === 'live') {
+    return;
+  }
+  const origin = sessionOrigin();
+  sessionState = 'connecting';
+  sessionRoomId = roomId;
+  sessionRefusal = null;
+  sessionClientId = null;
+  sessionPlayers = 0;
+  sessionSeq = 0;
+  sessionFrames = 0;
+  frameLog.length = 0;
+  commandLog.length = 0;
+  terminalReported = false;
+  syncHud();
+  paintSession();
+
+  // The handshake is explicit and it happens before the first tick: the client says what it is and the
+  // room either agrees or names the number it disagrees about. A room that would take a client on trust
+  // could be running rules the client cannot reproduce, and the whole point of `MatchSnapshot` is that
+  // what is drawn is what was simulated.
+  const declared: HandshakeRequest = {
+    role: 'player',
+    protocolVersion: PROTOCOL_VERSION,
+    contentVersion: CONTENT_VERSION,
+    mapVersion: MAP_VERSION,
+    seed: config.seed,
+    ...(forcedHandshake ?? {}),
+  };
+  let parsed: unknown = null;
+  try {
+    const response = await fetch(`${origin}/api/rooms/${encodeURIComponent(roomId)}/handshake`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(declared),
+    });
+    parsed = await response.json();
+  } catch {
+    closeSession('offline', 'session-unreachable', origin);
+    return;
+  }
+  const answer = readHandshakeAnswer(parsed);
+  if (answer === null) {
+    closeSession('refused', 'handshake-shape', 'the answer was not a handshake this build reads');
+    return;
+  }
+  if (!answer.accepted) {
+    // The refusal is the room's sentence about the numbers this client sent, and it is shown as it came
+    // back. The match does not start, the stream is never opened, and the local core is never touched.
+    closeSession('refused', answer.reason, answer.found);
+    return;
+  }
+  sessionClientId = answer.clientId;
+  sessionVersions = answer.versions;
+  sessionTickRate = answer.tickRate;
+
+  const source = new EventSource(`${origin}/api/rooms/${encodeURIComponent(roomId)}/stream?client=${encodeURIComponent(answer.clientId)}`);
+  sessionSource = source;
+  source.onmessage = (event: MessageEvent<string>) => {
+    let raw: unknown = null;
+    try {
+      raw = JSON.parse(event.data);
+    } catch {
+      raw = null;
+    }
+    const frame = readSessionFrame(raw);
+    if (frame === null) {
+      // A frame this build cannot read is never merged into the match it is presenting. Refusing the
+      // whole stream is the honest answer: there is no partial projection of a frame with no meaning.
+      closeSession('refused', 'session-frame-unreadable', event.data.slice(0, 120));
+      return;
+    }
+    applySessionFrame(frame);
+  };
+  source.onerror = () => {
+    // No automatic reconnection: a client that quietly starts guessing where it left off is the failure
+    // mode this whole phase exists to prevent, and `0018` is where reconnect becomes a policy.
+    closeSession('offline', 'stream-refused', sessionRoomId);
+  };
+};
+
+const sendRoomCommand = async (command: Command): Promise<void> => {
+  if (sessionState !== 'live' || sessionClientId === null || sessionRoomId === null) {
+    reportCommandResult(command, { accepted: false, reason: 'session-not-live' });
+    return;
+  }
+  let parsed: unknown = null;
+  try {
+    const response = await fetch(`${sessionOrigin()}/api/rooms/${encodeURIComponent(sessionRoomId)}/commands`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ clientId: sessionClientId, command }),
+    });
+    parsed = await response.json();
+  } catch {
+    sessionLastCommand = null;
+    reportCommandResult(command, { accepted: false, reason: 'session-unreachable' });
+    return;
+  }
+  const answer = readCommandAnswer(parsed);
+  if (answer === null) {
+    reportCommandResult(command, { accepted: false, reason: 'command-unreadable' });
+    return;
+  }
+  sessionLastCommand = {
+    commandId: answer.commandId,
+    accepted: answer.accepted,
+    reason: answer.reason ?? null,
+    tick: answer.tick,
+  };
+  // The verdict, the reason and the state it produced all come from the room. Nothing here decides
+  // whether the command was allowed, and nothing here applies it.
+  reportCommandResult(command, { accepted: answer.accepted, reason: answer.reason });
+};
+
+// The one place a command leaves the page. Solo hands the intent to the core this page owns and answers
+// in the same task; a room posts it and answers when the room does. Past this line the two are the same
+// code, which is what keeps a pad click, Start Wave and a QA injection from growing separate rules.
+const submitCommand = (command: Command): CommandResult | null => {
+  if (mode === 'remote') {
+    void sendRoomCommand(command);
+    return null;
+  }
+  return dispatchPlayerCommand(command);
+};
+
+const joinRoomFromEntry = () => {
+  if (mode === 'remote' && sessionState === 'live') {
+    // Leaving is a navigation, not a teardown: the room keeps its match, and the page that comes back to
+    // the same address walks in through the handshake again. Reconnecting in place is `0018`.
+    window.location.assign('/');
+    return;
+  }
+  const wanted = entryRoomInput.value.trim().toLowerCase();
+  if (!isRoomName(wanted)) {
+    return;
+  }
+  if (mode === 'remote' && wanted === sessionRoomId) {
+    void connectToRoom(wanted);
+    return;
+  }
+  // A different room is a different address, because the address is what chooses the mode and there is
+  // no second source of truth about which match this page is in.
+  window.location.assign(`/?room=${encodeURIComponent(wanted)}`);
+};
+
+entryJoinRoom.addEventListener('click', joinRoomFromEntry);
+entryRoomInput.addEventListener('input', () => {
+  entryJoinRoom.disabled = !isRoomName(entryRoomInput.value.trim().toLowerCase());
+});
+entryRoomInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    joinRoomFromEntry();
+  }
+});
+
+const sessionReading = (): SessionReading => ({
+  mode,
+  state: sessionState,
+  roomId: sessionRoomId,
+  clientId: sessionClientId,
+  tickRate: sessionTickRate,
+  players: sessionPlayers,
+  seq: sessionSeq,
+  frames: sessionFrames,
+  commandCount: commandLog.length,
+  versions: sessionVersions,
+  refusal: sessionRefusal,
+  lastCommand: sessionLastCommand,
+  deliveryMs: sessionDeliveryMs,
 });
 
 // The tick of the slot has been reached, so the rebuilt run is the saved match and the clock may run
@@ -2285,14 +2792,15 @@ const applyEventPresentation = (event: SimulationEvent) => {
   }
 };
 
-const consumeEvents = (): number => {
-  const drained = simulation.drainEvents();
-  if (drained.length === 0) {
-    return 0;
+// The transient half of a batch of events: bounded feed, recent list and the 3D reactions. It runs for
+// the events of the update that just arrived and for nothing else, because a frame of history is not
+// something to flash at: a kill the room remembers is not a kill this client saw happen.
+const presentEvents = (events: readonly SimulationEvent[]): void => {
+  if (events.length === 0) {
+    return;
   }
   let feedDirty = false;
-  for (const event of drained) {
-    eventCounts[event.type] += 1;
+  for (const event of events) {
     recentEvents.push(event);
     applyEventPresentation(event);
     const text = describeEvent(event);
@@ -2311,7 +2819,28 @@ const consumeEvents = (): number => {
   if (feedDirty) {
     renderEventFeed();
   }
+};
+
+// Counting is separated from presenting because the running totals belong to whoever owns the match. In
+// solo that is this page, and the core's drain is the truth. In a room it is the room, and the totals
+// arrive with every frame — which is also what lets a client that joined late report the same numbers as
+// one that was there from the first tick, instead of counting from whatever it happened to witness.
+const consumeLocalEvents = (): number => {
+  const drained = simulation.drainEvents();
+  if (drained.length === 0) {
+    return 0;
+  }
+  for (const event of drained) {
+    eventCounts[event.type] += 1;
+  }
+  presentEvents(drained);
   return drained.length;
+};
+
+const adoptEventCounts = (counts: Readonly<EventTally>): void => {
+  for (const type of EVENT_TYPES) {
+    eventCounts[type] = counts[type] ?? 0;
+  }
 };
 
 const PAD_PICK_HEIGHT = 0.19;
@@ -2378,21 +2907,10 @@ const flashPadError = (padId: string) => {
   }
 };
 
+// A pad click and Start Wave are the only two ways a player starts anything, and both go through the one
+// function that decides where the intent goes. There is no third path and no mode that builds locally.
 const attemptPlacement = (padId: string) => {
-  const result = dispatchPlayerCommand({ type: 'placeTower', padId, towerId: selectedTowerId });
-  const name = towerDefinitions.get(selectedTowerId)?.name ?? selectedTowerId;
-  if (result.accepted) {
-    setFeedback('accepted', `${name} built on ${padId}`);
-    return;
-  }
-  const reason = result.reason ?? 'rejected';
-  if (reason === replayBlockedReason) {
-    // The guard already explained that the recorded run owns the core; a pad flash
-    // would claim the core rejected a build it never saw.
-    return;
-  }
-  flashPadError(padId);
-  setFeedback('rejected', rejectionMessages[reason] ?? `Rejected: ${reason}`, reason);
+  submitCommand({ type: 'placeTower', padId, towerId: selectedTowerId });
 };
 
 renderer.domElement.addEventListener('click', (event) => {
@@ -2403,16 +2921,7 @@ renderer.domElement.addEventListener('click', (event) => {
 });
 
 const attemptWaveStart = () => {
-  const result = dispatchPlayerCommand({ type: 'startWave' });
-  if (result.accepted) {
-    setFeedback('accepted', `Wave ${snapshot.waveIndex + 1} started`);
-    return;
-  }
-  const reason = result.reason ?? 'rejected';
-  if (reason === replayBlockedReason) {
-    return;
-  }
-  setFeedback('rejected', rejectionMessages[reason] ?? `Rejected: ${reason}`, reason);
+  submitCommand({ type: 'startWave' });
 };
 
 startWaveButton.addEventListener('click', attemptWaveStart);
@@ -2459,7 +2968,17 @@ applySnapshot(snapshot);
 // The page opens on the entry screen rather than in a preparation: the slot is looked at, never
 // loaded, and the match behind the overlay is a fresh preparation of tick 0 that the player has not
 // asked for yet. Nothing runs until an action on the entry says so.
-setSaveFeedback('idle', 'Local slot · this browser');
+setSaveFeedback('idle', mode === 'remote' ? `Room ${sessionRoomId ?? ''} · the room keeps the state` : 'Local slot · this browser');
+// The controls that act on a local `Simulation` say so in a room instead of sitting there inert with a
+// solo tooltip. A disabled button with the wrong explanation is worse than no button, because it tells
+// the reader what the control would have done.
+if (mode === 'remote') {
+  pauseToggle.title = 'The room owns the clock in a room; there is nothing here to pause';
+  restartButton.title = 'A room keeps its own match; Restart has no core to rebuild here';
+  saveButton.title = 'A room match is not written into this browser';
+  loadButton.title = 'A room match is not read from this browser';
+  newMatchButton.title = 'Leave the room from the entry to play a match of your own';
+}
 openEntry(false);
 void bootAssets();
 
@@ -2477,6 +2996,11 @@ const MAX_FRAME_SECONDS = 0.25;
 // is what lets a test place a multi-tick frame across a recorded command's tick on purpose instead
 // of waiting for machine load to produce one by luck.
 let forcedFrameDelta: number | null = null;
+
+// How many frames this page has drawn. It exists for one claim: that a remote client whose stream
+// stopped is a live page with a stopped match, and not a page that froze. Without a counter that keeps
+// moving, "the tick stood still" and "the browser died" look the same from outside.
+let framesRendered = 0;
 
 const readFrameDelta = (timestamp: number): number => {
   const measured = (timestamp - previousTimestamp) / 1000;
@@ -2627,6 +3151,18 @@ window.__ECHOES_DEBUG__ = {
     return clockMarks.map((mark) => ({ ...mark }));
   },
   markClock,
+  get session() {
+    return sessionReading();
+  },
+  get frameLog() {
+    return frameLog.map((entry) => ({ ...entry, eventCounts: { ...entry.eventCounts }, pads: { ...entry.pads } }));
+  },
+  forceHandshake(overrides) {
+    forcedHandshake = overrides;
+  },
+  get frames() {
+    return framesRendered;
+  },
   get matchReports() {
     return matchReports.map((report) => ({ ...report, eventCounts: { ...report.eventCounts } }));
   },
@@ -2693,9 +3229,9 @@ window.__ECHOES_DEBUG__ = {
       clip: view.clip === null ? null : readTowerClip(view.clip),
     }));
   },
-  // The QA seam goes through the logging path as well, so the command log always stays
-  // the complete input of the match that Restart replays.
-  dispatch: dispatchPlayerCommand,
+  // The QA seam goes through the same door a pad click does, so a command a test injects cannot take a
+  // route the product does not take — in a room that means it is posted, not applied to a local core.
+  dispatch: submitCommand,
 };
 
 // The tick the next recorded command is due on, or `null` when nothing is pending. This is the only
@@ -2705,12 +3241,19 @@ const pendingCommandTick = (): number | null =>
   replaying && replayIndex < commandLog.length ? commandLog[replayIndex].tick : null;
 
 const renderFrame = (timestamp: number) => {
+  framesRendered += 1;
   const frameDelta = readFrameDelta(timestamp);
   // The entry screen stops the match clock the same way a pause does, and for the same reason the
   // pause is a clock control and not a state of the match: what the player comes back to has to be
   // the match they left. `paused` is the player's own switch and stays exactly as they left it, so
   // Continue from MENU returns a frozen match still frozen if it was frozen.
-  if (!paused && !entryOpen) {
+  //
+  // `mode === 'solo'` is the whole of "this page owns the match". In a room the local core is not
+  // stepped, not dispatched and not drained: the only thing that moves the snapshot is a frame from the
+  // room, so a client that lost the stream shows a picture that has stopped rather than a match it kept
+  // running on its own. Everything below this line — the ambient motion, the animations, the render —
+  // runs in both modes, because a client that stops drawing is a broken client and not an honest one.
+  if (mode === 'solo' && !paused && !entryOpen) {
     accumulator += frameDelta;
     // A frame may spend whole ticks only up to the tick of the next recorded command. Without this
     // ceiling a frame that steps five ticks walks straight over that tick, and `applyReplayPlan`
@@ -2735,7 +3278,7 @@ const renderFrame = (timestamp: number) => {
       steps += 1;
     }
     if (steps > 0) {
-      eventsDrained += consumeEvents();
+      eventsDrained += consumeLocalEvents();
       syncFromCore();
     }
     if (replaying) {

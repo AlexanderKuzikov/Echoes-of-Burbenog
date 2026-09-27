@@ -28,13 +28,13 @@
 | ![Р’С…РѕРґ](docs/screenshots/entry-screen-slot.png) | ![РЎРµСЂРµРґРёРЅР° РІРѕР»РЅС‹](docs/screenshots/wave-combat-midwave.png) | ![РџРѕР±РµРґР°](docs/screenshots/wave-combat-victory.png) | ![Replay](docs/screenshots/vertical-slice-replay-reset.png) | ![Р—Р°РіСЂСѓР¶РµРЅРЅС‹Р№ РјР°С‚С‡](docs/screenshots/vertical-slice-match-load.png) |
 | РЎС‚СЂР°РЅРёС†Р° РѕС‚РєСЂС‹РІР°РµС‚СЃСЏ РЅР° РІС…РѕРґРµ, Р° РЅРµ РІ preparation: СЃР»РѕС‚ РЅР°Р·РІР°РЅ С‚РёРєРѕРј Рё С‡РёСЃР»РѕРј РєРѕРјР°РЅРґ, СЂРµС€РµРЅРёРµ РѕСЃС‚Р°С‘С‚СЃСЏ Р·Р° РёРіСЂРѕРєРѕРј, РјР°С‚С‡ Р·Р° РѕРІРµСЂР»РµРµРј РЅРµ РёРґС‘С‚ | Route, build pads, combat log Рё HUD вЂ” РїСЂРѕРµРєС†РёСЏ `MatchSnapshot` | Terminal state, `Sector secured`, `restart repeats this run exactly` | РўРѕС‚ Р¶Рµ РјР°С‚С‡ РїРµСЂРµР·Р°РїСѓСЃРєР°РµС‚СЃСЏ РїРѕ command log: `REPLAY В· 0 / 4 COMMANDS`, РїР°Р»РёС‚СЂР° Рё Start Wave Р·Р°Р±Р»РѕРєРёСЂРѕРІР°РЅС‹ | РўРѕС‚ Р¶Рµ РјР°С‚С‡ РїРѕСЃР»Рµ РЅР°СЃС‚РѕСЏС‰РµР№ РїРµСЂРµР·Р°РіСЂСѓР·РєРё СЃС‚СЂР°РЅРёС†С‹: СЃР»РѕС‚ С…СЂР°РЅРёС‚ seed, content, С‚РёРє Рё log, Р° `Continue` РїРµСЂРµСЃРёРјСѓР»РёСЂСѓРµС‚ РµРіРѕ РґРѕ СЃРѕС…СЂР°РЅС‘РЅРЅРѕРіРѕ С‚РёРєР° |
 
-РћСЃС‚Р°Р»СЊРЅС‹Рµ СЃРѕСЃС‚РѕСЏРЅРёСЏ РІС…РѕРґР° вЂ” `entry-screen-empty.png` (РїСѓСЃС‚РѕР№ СЃР»РѕС‚, РµРґРёРЅСЃС‚РІРµРЅРЅРѕРµ РґРµР№СЃС‚РІРёРµ), `entry-screen-menu.png` (`MENU` РїРѕРІРµСЂС… РёРґСѓС‰РµРіРѕ РјР°С‚С‡Р°), `entry-screen-confirm.png` (РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ СЃС‚РёСЂР°РЅРёСЏ СЃР»РѕС‚Р° РІС‚РѕСЂС‹Рј РЅР°Р¶Р°С‚РёРµРј), `entry-screen-narrow.png` (560 px) Рё `entry-to-victory.png` (РїРѕР»РЅС‹Р№ РїСѓС‚СЊ РѕС‚ РІС…РѕРґР° РґРѕ РїРѕР±РµРґС‹).
+РћСЃС‚Р°Р»СЊРЅС‹Рµ СЃРѕСЃС‚РѕСЏРЅРёСЏ РІС…РѕРґР° вЂ” `entry-screen-empty.png` (РїСѓСЃС‚РѕР№ СЃР»РѕС‚, РµРґРёРЅСЃС‚РІРµРЅРЅРѕРµ РґРµР№СЃС‚РІРёРµ), `entry-screen-menu.png` (`MENU` РїРѕРІРµСЂС… РёРґСѓС‰РµРіРѕ РјР°С‚С‡Р°), `entry-screen-confirm.png` (РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ СЃС‚РёСЂР°РЅРёСЏ СЃР»РѕС‚Р° РІС‚РѕСЂС‹Рј РЅР°Р¶Р°С‚РёРµРј), `entry-screen-narrow.png` (560 px) Рё `entry-to-victory.png` (РїРѕР»РЅС‹Р№ РїСѓС‚СЊ РѕС‚ РІС…РѕРґР° РґРѕ РїРѕР±РµРґС‹). Четыре кадра сессии лежат рядом: `session-room-entry.png` (вход в комнату), `session-room-live.png` (матч в комнате: полоса сессии и пустая панель MATCH SAVE), `session-room-menu.png` (MENU поверх комнаты) и `session-room-narrow.png` (560 px).
 
 РЎРЅРёРјРєРё вЂ” РєРѕРїРёРё `test-results/`, РєРѕС‚РѕСЂС‹Рµ СЃРЅРёРјР°РµС‚ E2E-СЃСЊСЋС‚РєР°. РћР±РЅРѕРІР»СЏСЋС‚СЃСЏ РЅР° РїСЂРёС‘РјРєРµ Р·Р°РґР°С‡Рё, РјРµРЅСЏСЋС‰РµР№ РєР°СЂС‚РёРЅРєСѓ.
 
 ## Р‘С‹СЃС‚СЂС‹Р№ СЃС‚Р°СЂС‚
 
-Р РµРїРѕР·РёС‚РѕСЂРёР№ СЃРѕРґРµСЂР¶РёС‚ РїРµСЂРІС‹Р№ РІРµСЂС‚РёРєР°Р»СЊРЅС‹Р№ СЃСЂРµР·: 3D-ready СЃС†РµРЅР°, schematic build pads, Р·Р°РїСѓСЃРє РІРѕР»РЅС‹, combat, pause/resume, replay РїРѕ seed, СЌРєСЂР°РЅ РІС…РѕРґР° СЃ Р»РѕРєР°Р»СЊРЅС‹Рј СЃРѕС…СЂР°РЅРµРЅРёРµРј РјР°С‚С‡Р° РїРѕ command log Рё HUD вЂ” РІСЃС‘ РїРѕРІРµСЂС… РґРµС‚РµСЂРјРёРЅРёСЂРѕРІР°РЅРЅРѕРіРѕ pure core.
+Реализовано и проверено следующее: 3D-ready сцена, schematic build pads, placement, combat presentation, pause/resume, replay по seed, локальный слот матча (вход симуляции, а не snapshot; Load — пересимуляция до тика слота), экран входа (Continue из слота или из идущего матча, подтверждение стирания, `MENU` без потери матча), первая authoritative session на Node (комната владеет `Simulation`, транспорт SSE плюс POST без новых зависимостей, версионированный handshake до первого тика, причина отказа команды принадлежит серверу, solo остаётся режимом по умолчанию) плюс asset pipeline: собственная генерация GLB и budgets, per-material IBL, скелетная анимация. Проверено: `test:core`, `test:assets` и 39 зелёных E2E, включая одну комнату на двух настоящих browser context.
 
 ```bash
 git clone https://github.com/AlexanderKuzikov/Echoes-of-Burbenog.git
@@ -48,6 +48,13 @@ npm run dev
 ```bash
 npx playwright install chromium
 npm test
+```
+
+Проверка поднимает и Vite, и сервер сессий сама. Для ручной игры вдвоём в одной комнате:
+
+```bash
+npm run server   # в соседнем терминале; порт из src/protocol/index.ts
+# затем в двух окнах: http://127.0.0.1:5173/?room=<имя-комнаты>
 ```
 
 ## Р”РѕРєСѓРјРµРЅС‚Р°С†РёСЏ
@@ -66,13 +73,13 @@ npm test
 | Development | Vite | verified |
 | Simulation | TypeScript core | verified |
 | QA | Playwright + core check + asset validator | verified |
-| Server | Node.js, Р·Р°С‚РµРј РїСЂРё РЅРµРѕР±С…РѕРґРёРјРѕСЃС‚Рё Go | phased |
+| Server | Node.js, сессии и комнаты (SSE + POST), dedicated server на Go | in work |
 | Desktop | Wails + Go | deferred |
 | Assets | glTF/GLB, СЃРІРѕР№ РіРµРЅРµСЂР°С‚РѕСЂ, budgets | verified |
 
 ## РЎС‚Р°С‚СѓСЃ
 
-**v0.1.0-alpha** вЂ” browser bootstrap, pure deterministic core, snapshot projection, placement, combat presentation, pause/resume, seed replay, СЌРєСЂР°РЅ РІС…РѕРґР° (Continue РёР· СЃР»РѕС‚Р° РёР»Рё РїРѕРґС‚РІРµСЂР¶РґР°РµРјС‹Р№ New match, `MENU` Р±РµР· РїРѕС‚РµСЂРё РјР°С‚С‡Р°), Р»РѕРєР°Р»СЊРЅРѕРµ СЃРѕС…СЂР°РЅРµРЅРёРµ РјР°С‚С‡Р° (СЃР»РѕС‚ С…СЂР°РЅРёС‚ РІС…РѕРґ СЃРёРјСѓР»СЏС†РёРё, Load вЂ” РїРµСЂРµСЃРёРјСѓР»СЏС†РёСЏ РґРѕ СЃРѕС…СЂР°РЅС‘РЅРЅРѕРіРѕ С‚РёРєР°) Рё asset pipeline СЃ РіРµРЅРµСЂР°С‚РѕСЂРѕРј GLB Рё budgets СЂРµР°Р»РёР·РѕРІР°РЅС‹ Рё РїРѕРєСЂС‹С‚С‹ E2E. РЎСЂРµР· РїСЂРѕС…РѕРґРёС‚ РїРѕР»РЅС‹Р№ РёРіСЂРѕРІРѕР№ С†РёРєР» РІ Р±СЂР°СѓР·РµСЂРµ РѕС‚ СЌРєСЂР°РЅР° РІС…РѕРґР° Рё РїРµСЂРµР¶РёРІР°РµС‚ РїРµСЂРµР·Р°РіСЂСѓР·РєСѓ СЃС‚СЂР°РЅРёС†С‹. Р¤Р°Р·Р° 5 Р·Р°РєСЂС‹С‚Р°; СЃР»РµРґСѓСЋС‰Р°СЏ вЂ” `0017`, Р»РѕРєР°Р»СЊРЅС‹Р№ РєРѕРѕРїРµСЂР°С‚РёРІ.
+**v0.1.0-alpha** — browser bootstrap, pure deterministic core, snapshot projection, placement, combat presentation, pause/resume, seed replay, локальный слот матча, экран входа (Continue из слота или из идущего матча, подтверждение стирания, `MENU` без потери матча), первая authoritative session на Node: комната владеет `Simulation`, транспорт SSE плюс POST, версионированный handshake, причина отказа команды принадлежит серверу, solo остаётся режимом по умолчанию, а presentation и правила матча — тот же код и тот же core. Плюс asset pipeline: собственная генерация GLB, budgets, per-material IBL и скелетная анимация. Проверено: `test:core`, `test:assets` и 39 зелёных E2E. Следующий шаг фазы 6: `0018` — permissions, reconnect и late join как политика.
 
 ## Р›РёС†РµРЅР·РёСЏ
 

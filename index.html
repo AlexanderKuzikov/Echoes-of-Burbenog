@@ -21,6 +21,18 @@
               <h1 data-testid="game-title">First Contact</h1>
             </div>
           </div>
+          <div
+            class="session-strip"
+            data-testid="session-strip"
+            data-mode="solo"
+            data-state="local"
+            data-room=""
+            data-clients="0"
+          >
+            <span class="resource-label">Session</span>
+            <strong data-testid="session-name">Solo</strong>
+            <span class="session-detail" data-testid="session-detail">Local match · this browser</span>
+          </div>
           <div class="resource-strip" aria-label="Game resources">
             <div class="resource-card">
               <span class="resource-label">Aether</span>
@@ -183,6 +195,30 @@
           <p class="entry-kicker">Echoes of Burbenog</p>
           <h2 class="entry-title" id="entry-title" data-testid="entry-title">First Contact</h2>
           <p class="entry-slot" data-testid="entry-slot" data-slot-state="empty">No saved match in this browser</p>
+          <!-- The room panel is the entry in a room, and it is the same language as everything else on
+               the panel: a line that says what the session is and a row with the one action that
+               applies. Solo keeps it visible with its own line, because "the room" is an offer and an
+               offer that appears only once you are already in a room is not one. `main.ts` writes
+               `data-state` (`idle` / `connecting` / `live` / `offline` / `refused`) and the line from
+               the same connection state the strip in the top bar is painted from. -->
+          <div class="entry-room" data-testid="entry-room" data-state="idle">
+            <p class="entry-room-line" data-testid="entry-room-line">Solo · local match in this browser</p>
+            <div class="entry-room-actions">
+              <input
+                class="entry-room-input"
+                type="text"
+                data-testid="entry-room-input"
+                aria-label="Room name"
+                placeholder="room name"
+                autocomplete="off"
+                spellcheck="false"
+                maxlength="24"
+              />
+              <button class="entry-button entry-button--room" type="button" data-testid="entry-join-room" data-action="enter" disabled>
+                Join room
+              </button>
+            </div>
+          </div>
           <p class="entry-hint" data-testid="entry-hint">New match starts a fresh preparation</p>
           <div class="entry-actions">
             <button class="entry-button" type="button" data-testid="entry-continue" hidden>Continue</button>
