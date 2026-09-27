@@ -9,8 +9,14 @@
 
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
-import { DEFAULT_SESSION_PORT, SESSION_REFUSAL_TEXT, isRoomName, readCommandRequest } from '../protocol/index.ts';
-import type { CommandAnswer, SessionFrame } from '../protocol/index.ts';
+import {
+  DEFAULT_SESSION_PORT,
+  SESSION_REFUSAL_TEXT,
+  isRoomName,
+  readCommandRequest,
+  readLifecycleRequest,
+} from '../protocol/index.ts';
+import type { CommandAnswer, LifecycleAnswer, SessionFrame } from '../protocol/index.ts';
 import { SessionRoom } from './room.ts';
 
 // A command is a pad id and a tower id, so a body past this is not a body worth parsing. The cap is a
@@ -120,11 +126,15 @@ export const createSessionServer = (
       json(response, 409, admission.refusal);
       return;
     }
-    log(`room ${roomId}: client ${admission.clientId} admitted at protocol v${room.versions.protocolVersion}`);
+    log(
+      `room ${roomId}: client ${admission.clientId} admitted as ${admission.seatRole} on seat ${admission.seatToken.slice(0, 6)}…`,
+    );
     json(response, 200, {
       accepted: true,
       roomId,
       clientId: admission.clientId,
+      seatToken: admission.seatToken,
+      seatRole: admission.seatRole,
       tickRate: room.tickRate,
       versions: room.versions,
     });
@@ -191,6 +201,43 @@ export const createSessionServer = (
     json(response, 200, answer);
   };
 
+  // The room's own two acts, behind one route so neither of them can grow a second door. `endRoom` is
+  // also where a name goes back into circulation: the transport owns the map of names, so it is the
+  // transport that removes a closed one and the room that closes it.
+  const handleLifecycle = async (roomId: string, request: IncomingMessage, response: ServerResponse) => {
+    const raw = await readBody(request);
+    if (raw === null) {
+      json(response, 413, refusal('request-too-large'));
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      json(response, 400, refusal('verb-shape', { found: 'not JSON' }));
+      return;
+    }
+    const room = rooms.get(roomId);
+    const lifecycle = readLifecycleRequest(parsed);
+    if (!room || !lifecycle) {
+      json(response, 400, refusal('verb-shape', { found: 'not a room verb this build reads' }));
+      return;
+    }
+    const answer: LifecycleAnswer | null = room.lifecycle(lifecycle.clientId, lifecycle.verb);
+    if (answer === null) {
+      json(response, 404, refusal('unknown-client'));
+      return;
+    }
+    json(response, 200, answer);
+    if (answer.accepted && lifecycle.verb === 'endRoom') {
+      // The clients were told over their own streams a moment ago; what is left is to stop answering to
+      // the name, so the next handshake under it opens a new room instead of this one.
+      rooms.delete(roomId);
+      room.shutdown();
+      log(`room ${roomId}: closed by its owner; the name is free again`);
+    }
+  };
+
   const handle = async (request: IncomingMessage, response: ServerResponse) => {
     withCors(response);
     if (request.method === 'OPTIONS') {
@@ -235,6 +282,10 @@ export const createSessionServer = (
     }
     if (request.method === 'POST' && action === 'commands') {
       await handleCommand(roomId, request, response);
+      return;
+    }
+    if (request.method === 'POST' && action === 'lifecycle') {
+      await handleLifecycle(roomId, request, response);
       return;
     }
     json(response, 404, refusal('unknown-room', { path: url.pathname }));

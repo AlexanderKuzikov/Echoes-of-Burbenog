@@ -759,9 +759,10 @@ h1 {
   gap: 6px;
 }
 
-/* Menu takes a row of its own for the same reason New match does in the save panel: a third control
-   in a two-column grid either squeezes Pause and Restart or grows the column, and both of them are
-   controls the player presses mid-match. */
+/* Menu takes a row of its own for the same reason New match does in the save panel: a row of controls
+   in a two-column grid either squeezes the pair above it or grows the column, and both of them are
+   controls the player presses mid-match. End room joins Pause and Restart as the second pair, which
+   is also where the two room verbs ended up: they are one decision about the room, not two. */
 .wave-controls > :last-child {
   grid-column: 1 / -1;
 }

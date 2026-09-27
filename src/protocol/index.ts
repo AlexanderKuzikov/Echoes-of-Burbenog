@@ -29,10 +29,31 @@ export const MAP_VERSION = 1;
 // mistake into a session that cannot be reached.
 export const DEFAULT_SESSION_PORT = 5180;
 
-// One role today. The handshake still names it, because the check is where a second role goes in
-// `0018` and a check that only appears with the second role is a check nobody has ever run.
+// What a client says it is. It is not a seat: it names the kind of client, and the room refuses
+// anything it does not admit. Who may close the room is the room's answer, not the client's claim.
 export const SESSION_ROLES = ['player'] as const;
 export type SessionRole = (typeof SESSION_ROLES)[number];
+
+// Who a seat is inside a room. `owner` is the seat the room issued to the client whose handshake
+// created it, and every seat after that is a `guest`. The role belongs to the seat and not to the
+// connection holding it, so presenting the seat token again brings the role back with it — which is
+// what makes reconnect the same player rather than a new one.
+//
+// There is no `spectator` and no kick. Without accounts a guest cannot be told apart from somebody
+// who is reconnecting, so "remove this player" is not a thing the room can honestly do; closing the
+// room is, and the room says that in words rather than pretending.
+export const ROOM_ROLES = ['owner', 'guest'] as const;
+export type RoomRole = (typeof ROOM_ROLES)[number];
+
+// A seat token is the whole of identity in v1, and it means exactly one thing: "this is the same
+// seat". It is not an account, it is not a name, and it carries no rights — what a seat may do is
+// decided by the room when it issues the token. The shape lives here so the room that mints one and
+// the client that offers one cannot grow two opinions about what a token looks like; the client never
+// checks it before offering one, because deciding whether a token counts is the room's job.
+export const SEAT_TOKEN_PATTERN = /^[a-z0-9]{22}$/;
+
+export const isSeatToken = (value: unknown): value is string =>
+  typeof value === 'string' && SEAT_TOKEN_PATTERN.test(value);
 
 export type VersionStamp = {
   protocolVersion: number;
@@ -43,12 +64,21 @@ export type VersionStamp = {
 
 export type HandshakeRequest = VersionStamp & {
   role: SessionRole;
+  // The seat this client is claiming. Absent when it holds none, and the room then issues one.
+  // Present when the client is coming back — by reload or by a dropped stream — and the room binds
+  // the same seat, and the same role, to the connection that presents it.
+  seatToken?: string;
 };
 
 export type HandshakeAccepted = {
   accepted: true;
   roomId: string;
   clientId: string;
+  // The seat this connection now holds and what it may do with it. Issued on the first handshake and
+  // handed back unchanged on every handshake that presents it, so a client never has to remember
+  // which room a token belongs to in order to find out whether it still has a place.
+  seatToken: string;
+  seatRole: RoomRole;
   tickRate: number;
   versions: VersionStamp;
 };
@@ -56,6 +86,7 @@ export type HandshakeAccepted = {
 export type HandshakeRefusalReason =
   | 'handshake-shape'
   | 'role-not-permitted'
+  | 'seat-shape'
   | 'protocol-version-mismatch'
   | 'content-version-mismatch'
   | 'map-version-mismatch'
@@ -83,13 +114,30 @@ export type RoomCommand = {
 
 export type EventTally = Record<SimulationEvent['type'], number>;
 
+// Why a connection stopped having a place in a room, said on the stream it was already reading. It is
+// a notice about the connection, not a fact about the match, so it rides the same frame rather than
+// opening a second channel: one stream, one shape, and a client that lost its seat is owed a name and
+// not only a verdict.
+export type RoomClosure = {
+  // `room-closed` — the owner closed the room. Its name is free again and the match it held is gone.
+  // `seat-taken` — a later connection presented this connection's seat token, so the seat is that
+  // connection's now and this one has no place in the room until it takes a new one.
+  reason: 'room-closed' | 'seat-taken';
+  // Who ended it, when the room knows: the owner seat is the only one that can close a room. Null for
+  // `seat-taken`, where nothing was closed and the party that took the seat is named by `found`.
+  by: RoomRole | null;
+  // The client id that took the seat, for `seat-taken`.
+  found: string | null;
+};
+
 // The one stream shape. A `state` frame opens a connection and carries the whole room; a `tick` frame
-// carries what the tick changed. Both carry the snapshot, the running event totals and the length of
-// the command log, so a client is never in a position where it has to guess what it is looking at.
+// carries what the tick changed; a `closed` frame is the last one a connection is given, and says why
+// it will not be given another. All three carry the snapshot, the running event totals and the length
+// of the command log, so a client is never in a position where it has to guess what it is looking at.
 // `commands` rides along only on the frame where the log changed for that connection, and `versions`
 // only on the frame that opens it.
 export type SessionFrame = {
-  kind: 'state' | 'tick';
+  kind: 'state' | 'tick' | 'closed';
   seq: number;
   sentAt: number;
   tickRate: number;
@@ -100,6 +148,7 @@ export type SessionFrame = {
   commandCount: number;
   commands?: RoomCommand[];
   versions?: VersionStamp;
+  closure?: RoomClosure;
 };
 
 export type CommandRequest = {
@@ -115,6 +164,37 @@ export type CommandAnswer = {
   reason?: string;
   tick: number;
   seq: number;
+};
+
+// The two acts that belong to the room rather than to the match. `placeTower` and `startWave` are core
+// commands and any seat may send them: the economy and the board belong to the room, and splitting
+// either would be a second rule book (`0019`). These two are the room's own lifecycle, and only the
+// owner seat may ask for them.
+export const ROOM_VERBS = ['restartRun', 'endRoom'] as const;
+export type RoomVerb = (typeof ROOM_VERBS)[number];
+
+export const isRoomVerb = (value: unknown): value is RoomVerb =>
+  typeof value === 'string' && (ROOM_VERBS as readonly string[]).includes(value);
+
+export type LifecycleRequest = {
+  clientId: string;
+  verb: RoomVerb;
+};
+
+export type LifecycleAnswer = {
+  verb: RoomVerb;
+  accepted: boolean;
+  // The room's reason, in the same vocabulary as a command refusal and for the same reason: the client
+  // shows it and decides nothing about it.
+  reason?: string;
+  // The role the room decided for this seat, so a refusal can be read as a role problem rather than
+  // as a mystery. A client that is told "guest" can see exactly which door is not its own.
+  role: RoomRole;
+  tick: number;
+  seq: number;
+  // How many clients the room holds after the answer, so a refused client can see that nothing moved
+  // and a closing one can see the room empty itself.
+  players: number;
 };
 
 export const emptyEventTally = (): EventTally => ({
@@ -158,6 +238,15 @@ export const isKnownCommand = (value: unknown): value is Command => {
 
 export const isSessionRole = (value: unknown): value is SessionRole =>
   typeof value === 'string' && (SESSION_ROLES as readonly string[]).includes(value);
+
+export const isRoomRole = (value: unknown): value is RoomRole =>
+  typeof value === 'string' && (ROOM_ROLES as readonly string[]).includes(value);
+
+const isRoomClosure = (value: unknown): value is RoomClosure =>
+  isRecord(value) &&
+  (value.reason === 'room-closed' || value.reason === 'seat-taken') &&
+  (value.by === null || isRoomRole(value.by)) &&
+  (value.found === null || typeof value.found === 'string');
 
 export const isEventTally = (value: unknown): value is EventTally => {
   if (!isRecord(value)) {
@@ -207,7 +296,7 @@ export const readSessionFrame = (value: unknown): SessionFrame | null => {
   if (!isRecord(value)) {
     return null;
   }
-  if (value.kind !== 'state' && value.kind !== 'tick') {
+  if (value.kind !== 'state' && value.kind !== 'tick' && value.kind !== 'closed') {
     return null;
   }
   if (!isTick(value.seq) || !isCount(value.sentAt) || !isCount(value.tickRate) || value.tickRate <= 0) {
@@ -228,6 +317,12 @@ export const readSessionFrame = (value: unknown): SessionFrame | null => {
   if (value.versions !== undefined && !isVersionStamp(value.versions)) {
     return null;
   }
+  // A notice that says the connection is over has to be on the frame that says so, and a frame that
+  // is still about the match has no business carrying one: a closure read off a live frame would put
+  // a client into a room it has just been removed from.
+  if (value.kind === 'closed' ? !isRoomClosure(value.closure) : value.closure !== undefined) {
+    return null;
+  }
   return value as unknown as SessionFrame;
 };
 
@@ -246,6 +341,12 @@ export const checkHandshake = (declared: unknown, room: VersionStamp): Handshake
   }
   if (!isSessionRole(declared.role)) {
     return refuse('role-not-permitted', String(declared.role));
+  }
+  // A seat token is either absent or a token this protocol knows how to read. The client offers what
+  // it has and does not filter it, because a token that is not the room's to accept is the room's
+  // sentence to give — and the name of what arrived is what lets the client stop offering it again.
+  if (declared.seatToken !== undefined && declared.seatToken !== null && !isSeatToken(declared.seatToken)) {
+    return refuse('seat-shape', String(declared.seatToken));
   }
   if (!isCount(declared.protocolVersion) || !isCount(declared.contentVersion)) {
     return refuse('handshake-shape', 'versions are not numbers');
@@ -284,6 +385,16 @@ export const readCommandRequest = (value: unknown): CommandRequest | null => {
   return isKnownCommand(value.command) ? { clientId: value.clientId, command: value.command } : null;
 };
 
+// The lifecycle body is read with the same discipline as a command body: a verb this build does not
+// know is refused by name rather than ignored, because a verb the room did not recognise would
+// otherwise be a room verb that silently does nothing.
+export const readLifecycleRequest = (value: unknown): LifecycleRequest | null => {
+  if (!isRecord(value) || typeof value.clientId !== 'string' || value.clientId.length === 0) {
+    return null;
+  }
+  return isRoomVerb(value.verb) ? { clientId: value.clientId, verb: value.verb } : null;
+};
+
 // A room name arrives out of a URL, so both sides read it with the same rule instead of each having an
 // opinion about what a room may be called. It is also the name the client puts in its own link, which
 // is why a name that could not be typed is a name that could not be joined.
@@ -295,7 +406,16 @@ export const readHandshakeAnswer = (value: unknown): HandshakeAnswer | null => {
     return null;
   }
   if (value.accepted) {
-    if (typeof value.roomId !== 'string' || typeof value.clientId !== 'string' || !isCount(value.tickRate)) {
+    // The seat is not optional in an accepted handshake. A client that cannot name the seat it holds
+    // cannot come back to it, and a client that comes back to nothing is a guest in someone else's
+    // room — so the answer without a seat is an answer this build does not read.
+    if (
+      typeof value.roomId !== 'string' ||
+      typeof value.clientId !== 'string' ||
+      !isSeatToken(value.seatToken) ||
+      !isRoomRole(value.seatRole) ||
+      !isCount(value.tickRate)
+    ) {
       return null;
     }
     return value as unknown as HandshakeAccepted;
@@ -319,12 +439,32 @@ export const readCommandAnswer = (value: unknown): CommandAnswer | null => {
   return value as unknown as CommandAnswer;
 };
 
+export const readLifecycleAnswer = (value: unknown): LifecycleAnswer | null => {
+  if (
+    !isRecord(value) ||
+    !isRoomVerb(value.verb) ||
+    typeof value.accepted !== 'boolean' ||
+    !isRoomRole(value.role) ||
+    !isTick(value.tick) ||
+    !isTick(value.seq) ||
+    !Number.isInteger(value.players) ||
+    (value.players as number) < 0
+  ) {
+    return null;
+  }
+  if (value.reason !== undefined && typeof value.reason !== 'string') {
+    return null;
+  }
+  return value as unknown as LifecycleAnswer;
+};
+
 // The refusal sentences a client can show. They live next to the codes on purpose: a reason that only
 // exists in one place is a reason the other side cannot name, and an unnamed refusal is a refusal the
 // player has to guess about.
 export const SESSION_REFUSAL_TEXT: Record<string, string> = {
   'handshake-shape': 'The session request was not a handshake this build reads',
   'role-not-permitted': 'This room does not admit that role',
+  'seat-shape': 'The seat token was not one this room can read',
   'protocol-version-mismatch': 'The room speaks a different protocol version',
   'content-version-mismatch': 'The room runs different content',
   'map-version-mismatch': 'The room runs a different map version',
@@ -333,6 +473,15 @@ export const SESSION_REFUSAL_TEXT: Record<string, string> = {
   'unknown-client': 'This client is not in the room',
   'command-shape': 'The room did not read that as a command',
   'command-unreadable': 'The room did not answer that command',
+  'verb-shape': 'The room did not read that as one of its own acts',
+  // Two rooms verbs, two sentences: a guest is told which door is not its own rather than being told
+  // "rejected", because a control that is off with a reason on it is the difference between a rule
+  // and a bug.
+  'owner-only-restart': 'Only the room owner restarts the run',
+  'owner-only-end-room': 'Only the room owner closes the room',
+  'room-closed': 'The room owner closed this room',
+  'seat-taken': 'A later connection took this seat',
+  'seat-not-persisted': 'This browser refused to keep the room seat',
   'request-too-large': 'The command was larger than the room accepts',
   'stream-refused': 'The room refused the update stream',
   'session-unreachable': 'The session server could not be reached',

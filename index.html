@@ -137,6 +137,16 @@
                   title="Restart from the same seed and replay the recorded commands"
                   disabled
                 >Restart</button>
+                <!-- The two room verbs sit together, because they are one decision: what may be done to
+                     the room itself. `main.ts` keeps End room off the dock in solo, and gives both
+                     controls a reason when the seat this client holds does not open them. -->
+                <button
+                  class="wave-button wave-button--ghost"
+                  type="button"
+                  data-testid="end-room"
+                  title="Close this room for everyone; nobody can sit in it again"
+                  hidden
+                >End room</button>
                 <button
                   class="wave-button wave-button--ghost"
                   type="button"

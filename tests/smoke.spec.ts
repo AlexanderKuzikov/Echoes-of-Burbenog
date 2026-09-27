@@ -834,6 +834,72 @@ const armHandshake = (page: Page, overrides: Record<string, unknown> | null) =>
     window.__ECHOES_DEBUG__?.forceHandshake(value);
   }, overrides);
 
+// A dropped update stream, the way a network drops it: the seam runs the same path `EventSource.onerror`
+// runs, so what is being tested is the product's reconnect policy and not a patched transport.
+const breakStream = (page: Page) =>
+  page.evaluate(() => {
+    window.__ECHOES_DEBUG__?.breakStream();
+  });
+
+// A seat is handed to a second context through the only durable place a browser has. The payload is the
+// product's own slot shape — a preparation with nothing recorded plus the optional seat field — so
+// nothing about the second client depends on a test-only storage key or a patched reader.
+const seatSlotPayload = (roomToken: string | null): string =>
+  JSON.stringify({
+    schemaVersion: 1,
+    contentVersion: CONTENT_VERSION,
+    seed: scenario.seed,
+    tick: 0,
+    log: [],
+    ...(roomToken === null ? {} : { roomToken }),
+  });
+
+const seedSeat = (context: BrowserContext, roomToken: string | null): Promise<void> =>
+  context
+    .addInitScript(
+      ([key, payload]) => {
+        window.localStorage.setItem(key as string, payload as string);
+      },
+      [MATCH_SAVE_KEY, seatSlotPayload(roomToken)] as const,
+    )
+    .then(() => undefined);
+
+
+// The room's own answer to a room verb, asked over the product's route with the product's body. It is
+// how a guest's permission is proved: a disabled control only says the page would not press it, and the
+// claim that needs proving is that the room refuses the request when one arrives anyway.
+const askRoomVerb = async (request: APIRequestContext, roomId: string, clientId: string, verb: string) => {
+  const response = await request.post(`${SESSION_ORIGIN}/api/rooms/${roomId}/lifecycle`, {
+    data: { clientId, verb },
+  });
+  expect(response.ok(), `the room did not answer ${verb} with a status`).toBe(true);
+  return (await response.json()) as {
+    verb: string;
+    accepted: boolean;
+    reason?: string;
+    role: string;
+    tick: number;
+    seq: number;
+    players: number;
+  };
+};
+
+const readRooms = async (request: APIRequestContext): Promise<RoomSummary[]> => {
+  const response = await request.get(`${SESSION_ORIGIN}/api/health`);
+  expect(response.ok(), 'the session server is not answering its own health route').toBe(true);
+  return ((await response.json()) as { rooms: RoomSummary[] }).rooms;
+};
+
+// The delay of a frame is stamped in the page, and only the summary is worked out here, so no round
+// trip between the test process and the browser is inside any of these numbers. The caller passes the
+// frames it decided were inside the window, which is what keeps the warm-up of a browser out of them.
+const deliveryPercentiles = (delays: number[]) => {
+  const sorted = [...delays].sort((left, right) => left - right);
+  const at = (fraction: number): number =>
+    sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(fraction * sorted.length) - 1))] ?? 0;
+  return { count: sorted.length, p50: at(0.5), p95: at(0.95), p99: at(0.99), max: sorted[sorted.length - 1] ?? 0 };
+};
+
 const emptyEventCounts = (): Record<SimulationEvent['type'], number> => ({
   towerPlaced: 0,
   preparationEnded: 0,
@@ -3953,15 +4019,28 @@ test('runs one room on the session server and gives two browser contexts the sam
     expect(roomAfter.players).toBe(2);
     expect(roomAfter.tick).toBeGreaterThanOrEqual(a.tick);
 
-    // Nothing in the dock belongs to a room: the four controls that act on a local core are off, and
-    // the one command control is on, because a command is a command wherever it goes.
+    // Nothing in the dock belongs to a local core: the four controls that act on a local `Simulation`
+    // are off, and the two that ask the room something follow the seat. This client opened the room, so
+    // it holds the owner seat and both of those are on — Restart and End room are the room's own verbs,
+    // not a rebuild of a core that is not here. The command control is on for the same reason as ever:
+    // a command is a command wherever it goes.
     await expect(page.getByTestId('pause-toggle')).toBeDisabled();
-    await expect(page.getByTestId('restart-match')).toBeDisabled();
     await expect(page.getByTestId('save-match')).toBeDisabled();
     await expect(page.getByTestId('load-match')).toBeDisabled();
     await expect(page.getByTestId('new-match')).toBeDisabled();
     await expect(page.getByTestId('start-wave')).toBeEnabled();
+    await expect(page.getByTestId('restart-match')).toBeEnabled();
+    await expect(page.getByTestId('restart-match')).toHaveAttribute('data-seat', 'owner');
+    await expect(page.getByTestId('end-room')).toBeVisible();
+    await expect(page.getByTestId('end-room')).toBeEnabled();
     await expect(page.getByTestId('save-slot')).toHaveText('Room match · not saved here');
+    // The second client joined an existing room and is a guest, so the same two controls are off and
+    // each one names the reason it is off.
+    await expect(second.getByTestId('restart-match')).toBeDisabled();
+    await expect(second.getByTestId('restart-match')).toHaveAttribute('data-reason', 'owner-only-restart');
+    await expect(second.getByTestId('end-room')).toBeDisabled();
+    await expect(second.getByTestId('end-room')).toHaveAttribute('data-reason', 'owner-only-end-room');
+    await expect(second.getByTestId('start-wave')).toBeEnabled();
     expect(pageErrors).toEqual([]);
 
     const deliveries = logA.map((entry) => entry.deliveryMs).sort((left, right) => left - right);
@@ -4080,13 +4159,16 @@ test('refuses a handshake whose versions the room does not run and never opens t
   await expect(page.getByTestId('entry-screen')).toHaveAttribute('data-entry', 'room');
 
   // Each version in turn, including the seed, because a seed that differs is the same class of mistake
-  // as a version that differs: the client would be drawing a match the room never simulated.
+  // as a version that differs: the client would be drawing a match the room never simulated. The seat
+  // token is in the same list because it is the same kind of trust boundary — a value this browser
+  // offers and the room has to be able to read before it binds anything to it.
   const refusals: Array<{ overrides: Record<string, unknown>; reason: string; found: string }> = [
     { overrides: { protocolVersion: PROTOCOL_VERSION + 1 }, reason: 'protocol-version-mismatch', found: 'protocol v2' },
     { overrides: { contentVersion: CONTENT_VERSION + 1 }, reason: 'content-version-mismatch', found: 'content v2' },
     { overrides: { mapVersion: MAP_VERSION + 1 }, reason: 'map-version-mismatch', found: 'map v2' },
     { overrides: { seed: scenario.seed + 1 }, reason: 'seed-mismatch', found: `seed ${scenario.seed + 1}` },
     { overrides: { role: 'spectator' }, reason: 'role-not-permitted', found: 'spectator' },
+    { overrides: { seatToken: 'not-a-seat-token' }, reason: 'seat-shape', found: 'not-a-seat-token' },
   ];
 
   for (const refusal of refusals) {
@@ -4324,7 +4406,7 @@ test('names the session in solo and in a room, and keeps solo the default', asyn
   await expect(page.getByTestId('session-name')).toHaveText(`Room ${roomId}`);
   await expect(page.getByTestId('session-detail')).toHaveText('Not entered');
   await expect(page.getByTestId('entry-room-line')).toHaveText(`Room ${roomId} · Not entered`);
-  await expect(page.getByTestId('entry-join-room')).toBeEnabled();
+  await expect(page.getByTestId('entry-join-room').first()).toBeEnabled();
   await expect(page.getByTestId('entry-join-room')).toHaveText('Enter room');
   // In a room the local slot is not what Continue acts on, so the line that describes it is not shown.
   await expect(page.getByTestId('entry-slot')).toBeHidden();
@@ -4334,13 +4416,17 @@ test('names the session in solo and in a room, and keeps solo the default', asyn
   await page.getByTestId('entry-join-room').click();
   await waitForSessionState(page, 'live');
   await expect(strip).toHaveAttribute('data-clients', '1');
-  await expect(page.getByTestId('session-detail')).toHaveText(`1 client · the room's clock`);
+  // The aether statement is on the strip rather than behind the entry, because the player who has to
+  // read it is the one already playing: a late joiner arrives through the entry, but the next person to
+  // spend a shared purse is a client that has been in the room for a while.
+  await expect(page.getByTestId('session-detail')).toHaveText(`1 client · the room's clock · shared aether`);
   // The entry is gone in a room, which is what lets the viewport be the match; `MENU` brings the room
   // panel back and that is where the room state is read.
   await expect(page.getByTestId('entry-screen')).toBeHidden();
   await page.getByTestId('menu-button').click();
   await expect(page.getByTestId('entry-screen')).toHaveAttribute('data-entry', 'room');
-  await expect(page.getByTestId('entry-room-line')).toHaveText(`Room ${roomId} · 1 client · the room's clock`);
+  await expect(page.getByTestId('entry-room-line')).toHaveText(`Room ${roomId} · 1 client · the room's clock · shared aether`);
+  await expect(page.getByTestId('entry-hint')).toContainText('Aether is shared');
   await expect(page.getByTestId('entry-join-room')).toHaveText('Leave room');
   await expect(page.getByTestId('entry-join-room')).toHaveAttribute('data-action', 'leave');
 
@@ -4390,7 +4476,9 @@ test('keeps the room panel and the session strip readable at both widths', async
 
   await page.getByTestId('menu-button').click();
   const open = await expectEntryLabelsVisible(page);
-  await expect(page.getByTestId('entry-room-line')).toHaveText(`Room ${roomId} · 1 client · the room's clock`);
+  await expect(page.getByTestId('entry-room-line')).toHaveText(
+    `Room ${roomId} · 1 client · the room's clock · shared aether`,
+  );
   await page.screenshot({ path: 'test-results/session-room-menu.png', fullPage: true });
   const labelWidths = (measured: Awaited<ReturnType<typeof expectEntryLabelsVisible>>) =>
     measured.lines.map((line) => `${line.text.slice(0, 18)} ${line.glyphs.map((glyph) => glyph.width.toFixed(1)).join('+')}`).join(' | ');
@@ -4399,4 +4487,635 @@ test('keeps the room panel and the session strip readable at both widths', async
       `menu "${labelWidths(open)}"; strip ${stripWide.map((line) => line.glyphs[0]?.width.toFixed(1)).join('/')}px wide, ` +
       `${stripNarrow.map((line) => line.glyphs[0]?.width.toFixed(1)).join('/')}px narrow`,
   );
+});
+
+// --- Room permissions, reconnect and late join -------------------------------------------------
+// Everything below is measured against the room and against a second real browser context, because
+// none of it is a claim one window can make: a permission is about two seats, a reconnect is about
+// what a client does after the frames stop, and a shared purse is about two clients spending one
+// number. Nothing here is stubbed — the handshake, the stream, the command POST and the room-verb POST
+// are the product's own transport.
+
+test('refuses a guest both room verbs by name and changes nothing at all', async ({ page, browser, request }) => {
+  test.setTimeout(180_000);
+  const roomId = roomName('perm');
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(`a: ${error.message}`));
+  await enterRoom(page, roomId);
+
+  const other: BrowserContext = await browser.newContext({ viewport: SESSION_VIEWPORT });
+  const guest = await other.newPage();
+  guest.on('pageerror', (error) => pageErrors.push(`b: ${error.message}`));
+
+  try {
+    await enterRoom(guest, roomId);
+    for (const target of [page, guest]) {
+      await target.waitForFunction(() => (window.__ECHOES_DEBUG__?.session.players ?? 0) === 2, undefined, {
+        timeout: 20_000,
+      });
+    }
+    // The room decided the seats, and it decided them the way the protocol says: the client whose
+    // handshake opened the room owns it, the one that arrived after is a guest. Neither was asked.
+    const owner = await readSession(page);
+    const joined = await readSession(guest);
+    expect(owner?.seatRole).toBe('owner');
+    expect(joined?.seatRole).toBe('guest');
+    expect(owner?.seatToken).toMatch(/^[a-z0-9]{22}$/);
+    expect(joined?.seatToken).toMatch(/^[a-z0-9]{22}$/);
+    expect(joined?.seatToken).not.toBe(owner?.seatToken);
+
+    await page.getByRole('button', { name: 'Pulse Spire' }).click();
+    await clickPad(page, 'pad-east');
+    await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
+    const settled = await readDebugOrThrow(page);
+    const roomBefore = await readRoom(request, roomId);
+    expect(settled.commandCount).toBe(1);
+    expect(roomBefore.commands).toBe(1);
+
+    // The guest's controls are off, and each one names the room's reason on it: a disabled button that
+    // says nothing is indistinguishable from a bug, and one that said "rejected" would be the page
+    // inventing a rule it is not allowed to have.
+    await expect(guest.getByTestId('restart-match')).toBeDisabled();
+    await expect(guest.getByTestId('restart-match')).toHaveAttribute('data-reason', 'owner-only-restart');
+    await expect(guest.getByTestId('restart-match')).toHaveAttribute('data-seat', 'guest');
+    expect(await guest.getByTestId('restart-match').getAttribute('title')).toBe(
+      'Only the room owner restarts the run',
+    );
+    await expect(guest.getByTestId('end-room')).toBeDisabled();
+    await expect(guest.getByTestId('end-room')).toHaveAttribute('data-reason', 'owner-only-end-room');
+    expect(await guest.getByTestId('end-room').getAttribute('title')).toBe('Only the room owner closes the room');
+
+    // The owner's own pair is open, which is what makes the difference between the two windows a
+    // difference of seat and not of build.
+    await expect(page.getByTestId('restart-match')).toBeEnabled();
+    expect(await page.getByTestId('restart-match').getAttribute('data-reason')).toBeNull();
+    await expect(page.getByTestId('end-room')).toBeEnabled();
+    await guest.screenshot({ path: 'test-results/session-room-guest.png', fullPage: true });
+
+    // And the room refuses the request when one is made anyway, over its own route with the guest's own
+    // client id. This is the half a disabled control cannot prove: the gate is the room's, and the
+    // control is only the room's answer made visible.
+    const refusedRestart = await askRoomVerb(request, roomId, joined?.clientId ?? '', 'restartRun');
+    expect(refusedRestart.accepted).toBe(false);
+    expect(refusedRestart.reason).toBe('owner-only-restart');
+    expect(refusedRestart.role).toBe('guest');
+    expect(refusedRestart.verb).toBe('restartRun');
+    const refusedClose = await askRoomVerb(request, roomId, joined?.clientId ?? '', 'endRoom');
+    expect(refusedClose.accepted).toBe(false);
+    expect(refusedClose.reason).toBe('owner-only-end-room');
+    expect(refusedClose.role).toBe('guest');
+    expect(refusedClose.verb).toBe('endRoom');
+
+    // A refused verb is not an event in the match. The tick moved on, the gold is the gold the build
+    // left, the log still holds one command and both clients are still in the room: a permission that
+    // changed any of those would not be a permission.
+    const roomAfter = await readRoom(request, roomId);
+    expect(roomAfter.tick).toBeGreaterThan(roomBefore.tick);
+    expect(roomAfter.commands).toBe(1);
+    expect(roomAfter.players).toBe(2);
+    expect(roomAfter.status).toBe(roomBefore.status);
+    const [afterOwner, afterGuest] = await Promise.all([readDebugOrThrow(page), readDebugOrThrow(guest)]);
+    expect(afterOwner.snapshot.gold).toBe(startingGold - costOf('pulse-spire'));
+    expect(afterGuest.snapshot.gold).toBe(afterOwner.snapshot.gold);
+    expect(afterOwner.snapshot.pads['pad-east']).toBe('pulse-spire');
+    expect(afterGuest.rendered.towers).toBe(1);
+    expect(afterOwner.commandCount).toBe(1);
+    expect(afterGuest.commandCount).toBe(1);
+    expect(afterOwner.eventCounts.towerPlaced).toBe(1);
+    expect(afterGuest.session.state).toBe('live');
+    expect(afterOwner.session.state).toBe('live');
+    // The guest's client was never told anything about the two requests the test made on its behalf: it
+    // was not the one that sent them, and the room's answer to them is not a frame.
+    expect(afterGuest.session.lastVerb).toBeNull();
+    expect(pageErrors).toEqual([]);
+    console.log(
+      `permissions ${roomId}: guest ${joined?.seatRole} refused restartRun(${refusedRestart.reason}) and ` +
+        `endRoom(${refusedClose.reason}) while the room went ${roomBefore.tick} -> ${roomAfter.tick} with ` +
+        `${roomAfter.commands} command and ${roomAfter.players} clients`,
+    );
+  } finally {
+    await other.close();
+  }
+});
+
+test('restarts the run for every client at the owner request and keeps the seat', async ({ page, browser, request }) => {
+  test.setTimeout(180_000);
+  const roomId = roomName('restart');
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(`a: ${error.message}`));
+  await enterRoom(page, roomId);
+
+  const other: BrowserContext = await browser.newContext({ viewport: SESSION_VIEWPORT });
+  const guest = await other.newPage();
+  guest.on('pageerror', (error) => pageErrors.push(`b: ${error.message}`));
+
+  try {
+    await enterRoom(guest, roomId);
+    for (const target of [page, guest]) {
+      await target.waitForFunction(() => (window.__ECHOES_DEBUG__?.session.players ?? 0) === 2, undefined, {
+        timeout: 20_000,
+      });
+    }
+    // A match with something in it, so that "restarted" is a claim about a run that was replaced rather
+    // than about two empty preparations looking alike.
+    await page.getByRole('button', { name: 'Pulse Spire' }).click();
+    await clickPad(page, 'pad-east');
+    await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
+    await page.getByRole('button', { name: 'Grove Lens' }).click();
+    await clickPad(page, 'pad-north');
+    await page.getByTestId('start-wave').click();
+    await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.status ?? '') === 'wave', undefined, {
+      timeout: 20_000,
+    });
+    for (const target of [page, guest]) {
+      await target.waitForFunction(() => (window.__ECHOES_DEBUG__?.session.commandCount ?? 0) >= 3, undefined, {
+        timeout: 20_000,
+      });
+    }
+    const before = await readDebugOrThrow(page);
+    expect(before.commandCount).toBe(3);
+    expect(before.snapshot.towers).toHaveLength(2);
+    expect((await readRoom(request, roomId)).commands).toBe(3);
+
+    // One press, one verb, one room. The result both clients get is the room's, not a rebuild one of them
+    // performed: there is no local core in here to rebuild, and the frame is what puts two windows back
+    // into the same match.
+    await page.getByTestId('restart-match').click();
+    await expect(page.getByTestId('command-feedback')).toHaveText(
+      'Room run restarted · every client got the new preparation',
+    );
+    for (const target of [page, guest]) {
+      await target.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.status ?? '') === 'preparation', undefined, {
+        timeout: 20_000,
+      });
+      await target.waitForFunction(() => (window.__ECHOES_DEBUG__?.session.commandCount ?? 1) === 0, undefined, {
+        timeout: 20_000,
+      });
+    }
+    const [afterOwner, afterGuest] = await Promise.all([readDebugOrThrow(page), readDebugOrThrow(guest)]);
+    for (const [after, target] of [
+      [afterOwner, page],
+      [afterGuest, guest],
+    ] as const) {
+      expect(after.snapshot.status).toBe('preparation');
+      // The run was replaced, and "replaced" is measured against the run that was there: an exact tick
+      // would be a bound on how long a reading took to come back, not on the rule.
+      expect(after.snapshot.tick).toBeLessThan(before.snapshot.tick);
+      expect(after.snapshot.gold).toBe(startingGold);
+      expect(after.snapshot.pads).toEqual(Object.fromEntries(after.padIds.map((padId) => [padId, null])));
+      expect(after.snapshot.towers).toEqual([]);
+      expect(after.snapshot.enemies).toEqual([]);
+      expect(after.rendered.towers).toBe(0);
+      expect(after.commandCount).toBe(0);
+      expect(await readCommandPlan(target)).toEqual([]);
+      expect(after.eventCounts).toEqual(emptyEventCounts());
+      expect(after.replaying).toBe(false);
+      expect(after.matchReports).toEqual([]);
+    }
+    // The answer to the verb belongs to the client that asked, and it names what the room did with it.
+    // The guest's client has none, because the guest sent nothing: the frame it is looking at is the
+    // same frame the owner caused, and it did not need a sentence of its own to learn about it.
+    expect(afterOwner.session.lastVerb).toEqual({
+      verb: 'restartRun',
+      accepted: true,
+      reason: null,
+      tick: afterOwner.session.lastVerb?.tick,
+      role: 'owner',
+    });
+    expect(afterGuest.session.lastVerb).toBeNull();
+
+    // A run is not a room: the guest is still a guest, so a restart did not quietly hand anybody a door.
+    expect(afterOwner.session.seatRole).toBe('owner');
+    expect(afterGuest.session.seatRole).toBe('guest');
+    await expect(guest.getByTestId('restart-match')).toBeDisabled();
+    await expect(guest.getByTestId('restart-match')).toHaveAttribute('data-reason', 'owner-only-restart');
+    await expect(guest.getByTestId('end-room')).toBeDisabled();
+    const room = await readRoom(request, roomId);
+    expect(room.commands).toBe(0);
+    expect(room.status).toBe('preparation');
+    expect(room.players).toBe(2);
+    await guest.screenshot({ path: 'test-results/session-room-restart.png', fullPage: true });
+    expect(pageErrors).toEqual([]);
+    console.log(
+      `restart ${roomId}: owner restarted at tick ${before.snapshot.tick} and both clients came back to ` +
+        `preparation ${afterOwner.snapshot.tick} with 0 commands and 0 towers; room tick now ${room.tick}`,
+    );
+  } finally {
+    await other.close();
+  }
+});
+
+test('closes the room for everyone, names the reason and gives the name back', async ({ page, browser, request }) => {
+  test.setTimeout(180_000);
+  const roomId = roomName('close');
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(`a: ${error.message}`));
+  await enterRoom(page, roomId);
+
+  const other: BrowserContext = await browser.newContext({ viewport: SESSION_VIEWPORT });
+  const guest = await other.newPage();
+  guest.on('pageerror', (error) => pageErrors.push(`b: ${error.message}`));
+
+  try {
+    await enterRoom(guest, roomId);
+    for (const target of [page, guest]) {
+      await target.waitForFunction(() => (window.__ECHOES_DEBUG__?.session.players ?? 0) === 2, undefined, {
+        timeout: 20_000,
+      });
+    }
+    await page.getByRole('button', { name: 'Pulse Spire' }).click();
+    await clickPad(page, 'pad-east');
+    await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
+    const playedTo = await readRoom(request, roomId);
+    expect(playedTo.commands).toBe(1);
+
+
+    await page.getByTestId('end-room').click();
+    await expect(page.getByTestId('command-feedback')).toHaveText('Room closed · nobody can sit in it again');
+
+    // Both clients are sent back to the entry and both are told why. Nobody is left looking at a room
+    // that has simply stopped answering, which is the failure mode a closed room has to avoid: an empty
+    // screen and no sentence is indistinguishable from a bug, and the sentence costs one frame.
+    for (const [target, label] of [
+      [page, 'owner'],
+      [guest, 'guest'],
+    ] as const) {
+      await waitForSessionState(target, 'refused');
+      await expect(target.getByTestId('entry-screen')).toBeVisible();
+      await expect(target.getByTestId('entry-screen')).toHaveAttribute('data-entry', 'room');
+      await expect(target.getByTestId('entry-feedback')).toHaveAttribute('data-reason', 'room-closed');
+      await expect(target.getByTestId('entry-feedback')).toHaveText('The room owner closed this room');
+      await expect(target.getByTestId('session-detail')).toHaveText('The room owner closed this room');
+      await expect(target.getByTestId('entry-hint')).toContainText('The owner closed this room');
+      const reading = await readSession(target);
+      expect(reading?.closure?.reason, `${label} was not told why`).toBe('room-closed');
+      expect(reading?.closure?.by).toBe('owner');
+      expect(reading?.seatRole, `${label} kept a seat in a room that ended`).toBeNull();
+      // The controls that asked the room for something are off with the reason on them, because there
+      // is no room left to ask.
+      await expect(target.getByTestId('restart-match')).toBeDisabled();
+      await expect(target.getByTestId('restart-match')).toHaveAttribute('data-reason', 'session-not-live');
+      await expect(target.getByTestId('end-room')).toBeDisabled();
+    }
+    await page.screenshot({ path: 'test-results/session-room-closed.png', fullPage: true });
+
+    // The name is free. The room is not a tombstone, it is gone: the next client under that name opens a
+    // new match, and it owns it, because opening it is what owning it means.
+    expect((await readRooms(request)).map((entry) => entry.roomId)).not.toContain(roomId);
+
+    const third: BrowserContext = await browser.newContext({ viewport: SESSION_VIEWPORT });
+    const fresh = await third.newPage();
+    fresh.on('pageerror', (error) => pageErrors.push(`c: ${error.message}`));
+    let freshTick = 0;
+    try {
+      await enterRoom(fresh, roomId);
+      const reading = await readSession(fresh);
+      expect(reading?.state).toBe('live');
+      expect(reading?.roomId).toBe(roomId);
+      expect(reading?.players).toBe(1);
+      expect(reading?.seatRole).toBe('owner');
+      expect(reading?.commandCount).toBe(0);
+      const freshRoom = await readRoom(request, roomId);
+      freshTick = freshRoom.tick;
+      expect(freshRoom.commands).toBe(0);
+      expect(freshRoom.status).toBe('preparation');
+      // A new match, not the old one on another name: it starts below the tick the closed room had
+      // reached. An exact bound here would be about how long a reading took to arrive.
+      expect(freshRoom.tick).toBeLessThan(playedTo.tick);
+
+      await expect(fresh.getByTestId('end-room')).toBeEnabled();
+      const debug = await readDebugOrThrow(fresh);
+      expect(debug.snapshot.towers).toEqual([]);
+      expect(debug.snapshot.pads['pad-east']).toBeNull();
+    } finally {
+      await third.close();
+    }
+    expect(pageErrors).toEqual([]);
+    console.log(
+      `close ${roomId}: both clients sent back to the entry with room-closed, the name answered again as a ` +
+        `new match at tick ${freshTick} with its owner seat`,
+    );
+  } finally {
+    await other.close();
+  }
+});
+
+test('hands the same seat back after a dropped stream, whole, from the tick the room stood still on', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(180_000);
+  const roomId = roomName('rejoin');
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await enterRoom(page, roomId);
+  await page.getByRole('button', { name: 'Pulse Spire' }).click();
+  await clickPad(page, 'pad-east');
+  await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.session.commandCount ?? 0) >= 1, undefined, {
+    timeout: 20_000,
+  });
+
+  const before = await readDebugOrThrow(page);
+  const beforeLog = await readFrameLog(page);
+  const seat = before.session.seatToken;
+  const plan = await readCommandPlan(page);
+  expect(before.session.seatRole).toBe('owner');
+  expect(before.session.connect.handshakes).toBe(1);
+  expect(before.session.connect.reconnects).toBe(0);
+  expect(before.commandCount).toBe(1);
+
+  // The stream goes. Nothing is guessed and nothing is asked for: the client says it is offline, and the
+  // entry comes back with the one action that exists for it.
+  await breakStream(page);
+  await waitForSessionState(page, 'offline');
+  const lost = await readSession(page);
+  expect(lost?.refusal?.reason).toBe('stream-refused');
+  expect(lost?.seatRole).toBe('owner');
+
+  await expect(page.getByTestId('entry-screen')).toBeVisible();
+  await expect(page.getByTestId('entry-hint')).toContainText('Continue goes back in as the same seat');
+  // The action the entry offers is the one that carries the seat, and it says so.
+  await expect(page.getByTestId('entry-join-room')).toHaveText('Continue');
+  await expect(page.getByTestId('entry-join-room')).toHaveAttribute('data-action', 'continue');
+  expect(beforeLog?.length ?? 0).toBeGreaterThan(0);
+
+  // A room with no clients does not go on playing a match nobody is in. It stands still, and this is the
+  // half of the rule that matters: a client that came back to a room which had caught up on the wall
+  // clock would be looking at a match it was not there for. The detach is waited for rather than
+  // assumed, because the room learns about a closed connection when the request ends, and the first
+  // reading taken after that instant would otherwise be a reading of a room that had not noticed yet.
+  await expect
+    .poll(async () => (await readRoom(request, roomId)).players, { timeout: 20_000 })
+    .toBe(0);
+  const frozen = await readRoom(request, roomId);
+  const atBreak = await readDebugOrThrow(page);
+  await page.waitForTimeout(1_500);
+  const stillThere = await readRoom(request, roomId);
+  const held = await readDebugOrThrow(page);
+  expect(stillThere.tick, 'the room went on without a client in it').toBe(frozen.tick);
+  // The client stood still as well, and it stood still by being alive: the frame counter is the witness
+  // that the page is drawing and the match is the thing that is not moving.
+  expect(held.snapshot.tick).toBe(atBreak.snapshot.tick);
+  expect(held.snapshot).toEqual(atBreak.snapshot);
+  expect(held.frames, 'the page stopped drawing instead of stopping the match').toBeGreaterThan(atBreak.frames);
+  expect(beforeLog?.length ?? 0).toBeGreaterThan(0);
+  const standing = frozen.tick;
+
+
+  // Back in, the same way as the first time: one handshake, the seat token, and the whole room in the
+  // frame that opens the stream. No delta, no catch-up, no second path of state.
+  await page.getByTestId('entry-join-room').click();
+  await waitForSessionState(page, 'live');
+  await expect(page.getByTestId('entry-screen')).toBeHidden();
+
+  const after = await readDebugOrThrow(page);
+  const afterLog = await readFrameLog(page);
+  if (!afterLog || afterLog.length === 0) {
+    throw new Error('a reconnecting client published no frame');
+  }
+  // The frame that opened the stream is a whole state, and it is the first thing this client saw again.
+  const opening = afterLog[0]!;
+  expect(opening.kind).toBe('state');
+  expect(after.session.connect.handshakes).toBe(2);
+  expect(after.session.connect.reconnects).toBe(1);
+  expect(after.session.seatToken).toBe(seat);
+  expect(after.session.seatRole).toBe('owner');
+  expect(Number.isFinite(after.session.connect.handshakeMs)).toBe(true);
+  expect(Number.isFinite(after.session.connect.firstFrameMs)).toBe(true);
+  // Same match: the log, the pads, the event totals and the command count are the room's, whole and
+  // unchanged, which a delta could not have carried.
+  expect(after.commandCount).toBe(1);
+  expect(afterLog.every((entry) => entry.commandCount === 1)).toBe(true);
+  expect(await readCommandPlan(page)).toEqual(plan);
+  expect(after.eventCounts).toEqual(before.eventCounts);
+  expect(after.snapshot.pads).toEqual(before.snapshot.pads);
+  expect(after.snapshot.gold).toBe(startingGold - costOf('pulse-spire'));
+  expect(after.rendered.towers).toBe(1);
+  // Same place in time: the room stood still, so the client comes back where the room is, not where the
+  // frames it missed would have put it and not at the end of a catch-up.
+  expect(opening.tick).toBeGreaterThanOrEqual(standing);
+  expect(opening.tick).toBeLessThanOrEqual(standing + 2);
+  // The owner came back as the owner, which is the whole point of a token instead of a fresh seat.
+  await expect(page.getByTestId('end-room')).toBeEnabled();
+  await expect(page.getByTestId('end-room')).toHaveAttribute('data-seat', 'owner');
+  // The cost of coming back is reported rather than hidden behind a median: the handshake the client had
+  // to wait for is inside `firstFrameMs`, and the worst single delivery in the whole reconnected stream
+  // is named next to it. No threshold is applied to either — the limit on delay is a budget on a
+  // reference machine, and there is no reference machine yet (`EOB-002`).
+  const worst = afterLog.reduce((highest, entry) => Math.max(highest, entry.deliveryMs), 0);
+  expect(Number.isFinite(worst)).toBe(true);
+  expect(after.session.connect.firstFrameMs ?? 0).toBeGreaterThanOrEqual(opening.deliveryMs);
+
+  const resumed = await readRoom(request, roomId);
+  expect(resumed.players).toBe(1);
+  expect(resumed.tick).toBeGreaterThan(standing);
+  expect(resumed.commands).toBe(1);
+  await page.waitForFunction((tick) => (window.__ECHOES_DEBUG__?.snapshot.tick ?? 0) > tick, opening.tick, {
+    timeout: 20_000,
+  });
+  await page.screenshot({ path: 'test-results/session-room-reconnect.png', fullPage: true });
+  expect(pageErrors).toEqual([]);
+  console.log(
+    `reconnect ${roomId}: the room stood at tick ${standing} with 0 players for 1.5 s, the returning client ` +
+      `handshaked again (${after.session.connect.handshakeMs?.toFixed(1)}ms) and got a whole ${opening.kind} ` +
+      `frame of ${opening.tick} — first frame ${after.session.connect.firstFrameMs?.toFixed(1)}ms, its delivery ` +
+      `${opening.deliveryMs}ms, worst in the reconnected stream ${worst}ms, seat back as ${after.session.seatRole}`,
+  );
+
+});
+
+test('gives the loser of a seat the reason by name and frees the seat when the holder leaves', async ({
+  page,
+  browser,
+  request,
+}) => {
+  test.setTimeout(180_000);
+  const roomId = roomName('seat');
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(`a: ${error.message}`));
+  await enterRoom(page, roomId);
+  const owner = await readSession(page);
+  const seat = owner?.seatToken ?? '';
+  expect(owner?.seatRole).toBe('owner');
+
+  // A second context is handed the same seat token, which is what a browser that already held it would do
+  // on a second tab. Nothing is patched: the token travels in the slot, through the same reader the
+  // product uses, and the room is asked exactly the question a returning player is asked.
+  const other: BrowserContext = await browser.newContext({ viewport: SESSION_VIEWPORT });
+  await seedSeat(other, seat);
+  const second = await other.newPage();
+  second.on('pageerror', (error) => pageErrors.push(`b: ${error.message}`));
+
+  try {
+    await enterRoom(second, roomId);
+    // The last connection to present a seat holds it. The earlier one is not left reading a stream it has
+    // no right to: it is told, on that stream, that the seat is gone and who has it now.
+    await waitForSessionState(page, 'refused');
+    const lost = await readSession(page);
+    const taken = await readSession(second);
+    expect(lost?.refusal?.reason).toBe('seat-taken');
+    expect(lost?.closure?.reason).toBe('seat-taken');
+    expect(lost?.closure?.found).toBe(taken?.clientId);
+    await expect(page.getByTestId('entry-screen')).toBeVisible();
+    await expect(page.getByTestId('entry-feedback')).toHaveAttribute('data-reason', 'seat-taken');
+    await expect(page.getByTestId('entry-feedback')).toHaveText('A later connection took this seat');
+    await expect(page.getByTestId('session-detail')).toHaveText('A later connection took this seat');
+    await expect(page.getByTestId('entry-hint')).toContainText('only an owner restarts the run or closes the room');
+    expect(taken?.seatToken).toBe(seat);
+    expect(taken?.seatRole).toBe('owner');
+    expect(taken?.state).toBe('live');
+    expect((await readRoom(request, roomId)).players).toBe(1);
+    await expect(second.getByTestId('end-room')).toBeEnabled();
+  } finally {
+    // Closing the connection frees the seat without destroying it: the token still means the same place,
+    // and the role it carries is what the next holder gets back.
+    await other.close();
+  }
+
+  const third: BrowserContext = await browser.newContext({ viewport: SESSION_VIEWPORT });
+  await seedSeat(third, seat);
+  const again = await third.newPage();
+  again.on('pageerror', (error) => pageErrors.push(`c: ${error.message}`));
+  let backAs: string | null = null;
+  try {
+    await enterRoom(again, roomId);
+    const reading = await readSession(again);
+    backAs = reading?.seatRole ?? null;
+    expect(reading?.state).toBe('live');
+    expect(reading?.seatToken).toBe(seat);
+    expect(reading?.seatRole).toBe('owner');
+    expect((await readRoom(request, roomId)).players).toBe(1);
+    await expect(again.getByTestId('end-room')).toBeEnabled();
+  } finally {
+    await third.close();
+  }
+  expect(pageErrors).toEqual([]);
+  console.log(
+    `seat ${roomId}: seat …${seat.slice(-4)} moved to a second context, the first was told seat-taken and ` +
+      `left the room, and the same seat came back to a third as ${backAs}`,
+  );
+});
+
+test('lets a late client build at once and says the aether is shared', async ({ page, browser, request }) => {
+  test.setTimeout(180_000);
+  const roomId = roomName('share');
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(`a: ${error.message}`));
+  await enterRoom(page, roomId);
+  await page.getByRole('button', { name: 'Pulse Spire' }).click();
+  await clickPad(page, 'pad-east');
+  await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
+  await page.getByTestId('start-wave').click();
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.status ?? '') === 'wave', undefined, {
+    timeout: 20_000,
+  });
+  await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.tick ?? 0) > 8, undefined, { timeout: 20_000 });
+
+  const other: BrowserContext = await browser.newContext({ viewport: SESSION_VIEWPORT });
+  const late = await other.newPage();
+  late.on('pageerror', (error) => pageErrors.push(`b: ${error.message}`));
+  try {
+    await enterRoom(late, roomId);
+    const joined = await readSession(late);
+    const openingLog = await readFrameLog(late);
+    expect(joined?.seatRole).toBe('guest');
+    expect(joined?.state).toBe('live');
+    // The statement about the purse is on the strip, where the player who is about to spend it is
+    // looking, and on the entry for the one that arrived through it. Without it a newcomer reads the
+    // number as a purse of their own and spends what is not there.
+    await expect(late.getByTestId('session-detail')).toHaveText(`2 clients · the room's clock · shared aether`);
+    await late.getByTestId('menu-button').click();
+    await expect(late.getByTestId('entry-hint')).toContainText('Aether is shared');
+    await late.getByTestId('entry-continue').click();
+    await expect(late.getByTestId('entry-screen')).toBeHidden();
+
+    // A guest may build the moment it arrives: the board and the aether are the room's, and a permission
+    // that hid the second player from the board would be the separate-economy decision this task
+    // explicitly does not take.
+    await late.getByRole('button', { name: 'Frost Relay' }).click();
+    await clickPad(late, 'pad-south');
+    await expect(late.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
+    await expect(late.getByTestId('command-feedback')).toHaveText('Frost Relay built on pad-south');
+    for (const target of [page, late]) {
+      await target.waitForFunction(() => (window.__ECHOES_DEBUG__?.session.commandCount ?? 0) >= 3, undefined, {
+        timeout: 20_000,
+      });
+    }
+
+    const [owner, guest] = await Promise.all([readDebugOrThrow(page), readDebugOrThrow(late)]);
+    // One purse: both windows show the same gold, the same three entries in the room's log and the same
+    // two towers. What is deliberately *not* asserted is an exact gold number — the wave pays bounty and
+    // rewards while this runs, so a bound computed here would be a bound on the wall clock, not on the
+    // rule. The rule is the agreement: two clients, one number, and a second tower on the board.
+    expect(guest.snapshot.gold).toBe(owner.snapshot.gold);
+    expect(owner.snapshot.gold).toBeLessThan(startingGold);
+    expect(owner.rendered.towers).toBe(2);
+    expect(guest.rendered.towers).toBe(2);
+    expect(owner.commandCount).toBe(3);
+    expect(guest.commandCount).toBe(3);
+    expect(owner.snapshot.pads['pad-south']).toBe('frost-relay');
+    expect(guest.snapshot.pads).toEqual(owner.snapshot.pads);
+    expect(owner.eventCounts).toEqual(guest.eventCounts);
+    const room = await readRoom(request, roomId);
+    expect(room.commands).toBe(3);
+    expect(room.players).toBe(2);
+    expect(room.status).toBe('wave');
+
+    await late.screenshot({ path: 'test-results/session-room-shared.png', fullPage: true });
+    expect(pageErrors).toEqual([]);
+    console.log(
+      `shared aether ${roomId}: a guest joined at tick ${openingLog?.[0]?.tick} built on pad-south at once, ` +
+        `and both clients settled on gold ${owner.snapshot.gold} with ${room.commands} commands in one log`,
+    );
+  } finally {
+    await other.close();
+  }
+});
+
+test('measures the steady-state frame delay on two warm clients', async ({ page, browser }) => {
+  test.setTimeout(180_000);
+  const roomId = roomName('delay');
+  await enterRoom(page, roomId);
+
+  const other: BrowserContext = await browser.newContext({ viewport: SESSION_VIEWPORT });
+  const second = await other.newPage();
+  try {
+    await enterRoom(second, roomId);
+    for (const target of [page, second]) {
+      await target.waitForFunction(() => (window.__ECHOES_DEBUG__?.session.players ?? 0) === 2, undefined, {
+        timeout: 20_000,
+      });
+    }
+    // The window opens only after both clients are up and the room is going. The delay while a second
+    // browser was starting is the cost of starting a browser, not the cost of the room, and a strategy
+    // for interpolation chosen on it would be a strategy about the wrong number.
+    const [logA, logB] = await Promise.all([readFrameLog(page), readFrameLog(second)]);
+    const shared = commonFrame(logA ?? [], logB ?? []);
+    const from = shared.a.seq;
+    const step = (await readDebugOrThrow(page)).tickRate;
+    await page.waitForTimeout(10_000);
+
+    const [warmA, warmB] = await Promise.all([readFrameLog(page), readFrameLog(second)]);
+    const a = (warmA ?? []).filter((entry) => entry.seq > from);
+    const b = (warmB ?? []).filter((entry) => entry.seq > from);
+    // Nothing from before the window is in the numbers, and both sides have a sample a tail can exist in.
+    expect(a.length).toBeGreaterThan(120);
+    expect(b.length).toBeGreaterThan(120);
+
+    expect(a.every((entry) => entry.seq > shared.a.seq)).toBe(true);
+    expect(b.every((entry) => entry.seq > shared.b.seq)).toBe(true);
+    // Each client's delays are its own: two windows do not render on the same schedule, and a single
+    // shared figure would be a number about neither of them.
+    const first = deliveryPercentiles(a.map((entry) => entry.deliveryMs));
+    const secondStats = deliveryPercentiles(b.map((entry) => entry.deliveryMs));
+    console.log(
+      `frame delay ${roomId}: window opens at seq ${from} with both clients attached, room step ${step} ticks/s — ` +
+        `client a ${first.count} frames p50 ${first.p50}ms p95 ${first.p95}ms p99 ${first.p99}ms max ${first.max}ms; ` +
+        `client b ${secondStats.count} frames p50 ${secondStats.p50}ms p95 ${secondStats.p95}ms ` +
+        `p99 ${secondStats.p99}ms max ${secondStats.max}ms`,
+    );
+  } finally {
+    await other.close();
+  }
 });
