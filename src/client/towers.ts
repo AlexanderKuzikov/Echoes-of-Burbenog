@@ -120,6 +120,13 @@ const enemyImpactHeight = 0.3;
 // The pad floor is at 0.19, so a tower seated at 0.14 is socketed a little way into its own pad
 // rather than balanced on top of it. All three stands come from here, and none of them lifts itself.
 const towerSeatHeight = 0.14;
+// The camera looks down at 38 degrees, so a unit of height reaches the screen at cos(38) = 0.79 of
+// what a unit of width does: a tower authored at its true height reads as a squat object sitting in
+// its own niche. Every seat is stretched by this much. It is a fact about the camera and not about
+// any one tower, which is why it is a constant and not a field of the look table — and it is applied
+// to the loaded model exactly as it is to the procedural placeholder, because the two-phase swap
+// puts the artifact into this same seat and a difference here would be a jump in the picture.
+const towerHeightCompensation = 1.2;
 
 // One clip per view, started at a slot-derived offset instead of at a random moment. The offset
 // comes from the order the towers were built in, which the replay reproduces, so two spires never
@@ -128,17 +135,27 @@ const TOWER_CLIP_PHASE_SECONDS = 0.37;
 
 // The read of one tower at a glance. Three of these and an enemy have to be told apart from an
 // orbiting orthographic camera, so the silhouette and the proportions do the work and the colour only
-// confirms it: a tall solid spindle, a wide leaning lens on a short post, an open frame with a gem
-// hung in it. None of these numbers is a gameplay value.
+// confirms it. The three outlines are deliberately three different shapes rather than three sizes of
+// one: a solid mass widest at its foot and tapering to a point, a narrow upright with a hole in it,
+// and a broad flat top held up on a stem. Nothing that walks the road is any of the three. None of
+// these numbers is a gameplay value.
 type TowerLook = {
   accent: number;
   base: number;
   stem: number;
   roof: number;
+  // The one edge that catches the light: a rim, a lintel, an antenna. Kept apart from `roof` so a
+  // tower can have a broad face and a bright edge, which at this scale is the difference between a
+  // shape the eye can trace and a shape that is only a colour.
+  lip: number;
   // How the tower stands in its niche. The scale and the lean live on a seat below the group, not on
   // the group itself, because the group carries the aim yaw and a rotation that has to be both a
   // posture and a bearing is a rotation that will be wrong half of the time.
   scale: number;
+  // One tower's own answer to the squatness of the artifact it is built from. The camera
+  // compensation above is a fact about the camera and belongs to all three; this is a fact about a
+  // shape nobody here may change, so it lives in that one look. One for the other two.
+  rise: number;
   tiltX: number;
   tiltZ: number;
   // How far the seat travels out of that rest lean while the match runs.
@@ -255,122 +272,170 @@ const spireBody = (seat: THREE.Object3D, look: TowerLook): THREE.Mesh => {
   return crystal;
 };
 
-// Grove Lens: the opposite of the spire on both axes at once — wider than it is tall, and open in
-// the middle. A short post carries a cradle that leans back, and the lens lies in the plane of that
-// cradle rather than sitting on top of it, so the tower reads as an eye and not as a roof with a gem
-// on it. The cradle is a 270° arc, not a closed ring, and that is a correction rather than a style:
-// `0022` gave the wisp a closed halo around a round body, and a closed ring around a bright disc on a
-// violet drum was the same picture in the same colour. An opening is a bracket, a halo is a halo.
-// Tilted towards the player rather than away from them: the disc is flat along the cradle's own up,
-// so a lean that turned its face from the camera showed the lens edge-on and the cradle as a bowl with
-// a rim. This way the opening and the lens both face the road.
-const lensTilt = 0.72;
-const lensArc = (3 * Math.PI) / 2;
-// A torus sweep runs from angle 0, so the middle of the opening sits at `(arc + 2π) / 2`; this turns it
-// to the top of the ring, where a cradle opens.
-const lensArcTurn = Math.PI / 2 - (lensArc + Math.PI * 2) / 2;
+// Grove Lens: a canopy held up on a leaning stem, and the widest part of this tower is its top —
+// the one thing the spire and the relay are not. It is stepped rather than smooth, because a smooth
+// disc of a canopy is a lily pad and the spire's cap is a smooth bright mass, so a single tier would
+// be the same picture one colour over. Two tiers with air between them read as a profile — wide,
+// narrower, a point of light — that neither a cone nor a frame can be mistaken for, and the step
+// survives the aim yaw because it is a profile and not a bearing.
+//
+// The light stands on a spike above the canopy instead of lying in it: a gem encircled by this
+// tower's own green would be the wisp's picture, and `0022` gave the wisp a bright ball inside a
+// closed halo.
+//
+// Saturated green, and not the pale sage `0023` moved it to. Sage is a desaturated version of the
+// stone's own hue, which is exactly why the tower disappeared into the turquoise: the separation had
+// been made against the enemies' palette instead of against the frame the tower stands in. There is
+// no green anywhere on this board, so a green tower is the one thing on the map that cannot be
+// mistaken for the rock it stands on. It is separated by hue and not by brightness: a canopy bright
+// enough to shout turns the tower into one green blob and hands the eye nothing else to read. Each
+// tier is tilted far enough to stay a readable ellipse at every azimuth the aim yaw can turn it to,
+// and no further: past about half a radian its rim turns edge-on and the tower becomes a line.
+const lensTilt = 0.34;
+// Two canopies, the lower one wide and the upper one a third narrower, with a hand's width of air
+// between them. The gap is the whole point: without it the two tiers merge into one thick disc, and
+// with it the tower has a stepped profile that a cone has no way of imitating.
+const lensTiers = [
+  { y: 1.16, outer: 0.72, inner: 0.3, thickness: 0.2 },
+  { y: 1.6, outer: 0.48, inner: 0.22, thickness: 0.18 },
+] as const;
 const lensBody = (seat: THREE.Object3D, look: TowerLook): THREE.Mesh => {
   structurePart(seat, {
-    geometry: new THREE.CylinderGeometry(0.5, 0.56, 0.18, 8),
-    color: look.base,
-    role: 'towerBase',
-    y: 0.09,
-    roughness: 0.5,
-    metalness: 0.3,
-  });
-  const rim = structurePart(seat, {
-    geometry: new THREE.TorusGeometry(0.44, 0.04, 8, 24),
-    color: look.roof,
-    role: 'towerRoof',
-    y: 0.19,
-    roughness: 0.3,
-    metalness: 0.42,
-  });
-  rim.rotation.x = Math.PI / 2;
-  structurePart(seat, {
-    geometry: new THREE.CylinderGeometry(0.07, 0.1, 0.62, 6),
-    color: look.stem,
-    role: 'towerStem',
-    y: 0.49,
-    roughness: 0.35,
-    metalness: 0.5,
-  });
-  // The cradle is tilted on a mount of its own, so the lean and the turn of the opening are two
-  // rotations that cannot fight over one axis.
-  const cradle = new THREE.Group();
-  cradle.position.y = 0.78;
-  cradle.rotation.x = lensTilt;
-  seat.add(cradle);
-  const frame = structurePart(cradle, {
-    geometry: new THREE.TorusGeometry(0.36, 0.055, 8, 24, lensArc),
-    color: look.roof,
-    role: 'towerRoof',
-    y: 0,
-    roughness: 0.28,
-    metalness: 0.45,
-  });
-  frame.rotation.z = lensArcTurn;
-  // Flattened in the geometry rather than in the node's scale, because the scale of this node belongs
-  // to the shot flash: a flash that swelled the lens along one axis only would read as a squashed
-  // gem instead of a bright one. The disc is narrower than the aperture on purpose — a lens that
-  // fills its frame reads as a ball in a hoop.
-  const lensGeometry = new THREE.SphereGeometry(0.24, 14, 10);
-  lensGeometry.scale(1, 0.32, 1);
-  const lens = crystalPart(cradle, lensGeometry, look.accent, 0, 0.16, 0.1);
-  // A sphere is flat along its own Y, so this quarter turn is what puts the lens in the plane of the
-  // cradle instead of flat on the post.
-  lens.rotation.x = Math.PI / 2;
-  return lens;
-};
-
-// Frost Relay: an open frame, and the only tower here that is mostly air. Two struts lean together
-// under a crossbar and the crystal hangs in the space between them, which is a shape neither the
-// solid spire nor the solid lens can be mistaken for. The angled bars at mid height are the antennae
-// that give the frame a purpose, and the wide stance is what keeps it from reading as a mast.
-const relayBody = (seat: THREE.Object3D, look: TowerLook): THREE.Mesh => {
-  structurePart(seat, {
-    geometry: new THREE.CylinderGeometry(0.38, 0.46, 0.2, 6),
+    geometry: new THREE.CylinderGeometry(0.5, 0.58, 0.2, 8),
     color: look.base,
     role: 'towerBase',
     y: 0.1,
+    roughness: 0.5,
+    metalness: 0.3,
+  });
+  for (const side of [-1, 1]) {
+    // A plain post reads as a lamp, and a lamp is not a category. The braces run from the wide foot
+    // up to the narrow stem, so the tower is visibly held up rather than planted.
+    const brace = structurePart(seat, {
+      geometry: new THREE.BoxGeometry(0.42, 0.07, 0.07),
+      color: look.stem,
+      role: 'towerStem',
+      y: 0.4,
+      x: side * 0.23,
+      roughness: 0.35,
+      metalness: 0.5,
+    });
+    brace.rotation.z = -side * 0.62;
+  }
+  const stem = structurePart(seat, {
+    geometry: new THREE.CylinderGeometry(0.11, 0.17, 1.36, 6),
+    color: look.stem,
+    role: 'towerStem',
+    y: 0.86,
+    roughness: 0.35,
+    metalness: 0.5,
+  });
+  // The lean is small on purpose. The seat carries the aim yaw, so a pronounced lean would swing
+  // round with the target and read as a tower falling over rather than as a canopy that is angled.
+  stem.rotation.x = -0.1;
+  for (const tier of lensTiers) {
+    const canopy = new THREE.Group();
+    canopy.position.y = tier.y;
+    canopy.rotation.x = lensTilt;
+    seat.add(canopy);
+    structurePart(canopy, {
+      geometry: new THREE.CylinderGeometry(tier.outer, tier.inner, tier.thickness, 8),
+      color: look.roof,
+      role: 'towerRoof',
+      y: 0,
+      roughness: 0.32,
+      metalness: 0.4,
+    });
+    // The lit rim is what draws the outline, so the eye can trace the shape instead of guessing at
+    // it. It is the only bright edge on this tower, which is why the canopy itself stays mid green.
+    const lip = structurePart(canopy, {
+      geometry: new THREE.TorusGeometry(tier.outer - 0.02, 0.045, 6, 18),
+      color: look.lip,
+      role: 'towerRoof',
+      y: tier.thickness / 2,
+      roughness: 0.26,
+      metalness: 0.45,
+    });
+    lip.rotation.x = Math.PI / 2;
+  }
+  structurePart(seat, {
+    geometry: new THREE.CylinderGeometry(0.05, 0.07, 0.26, 5),
+    color: look.stem,
+    role: 'towerStem',
+    y: 1.88,
+    roughness: 0.35,
+    metalness: 0.5,
+  });
+  return crystalPart(seat, new THREE.OctahedronGeometry(0.17, 0), look.accent, 2.06, 0.16, 0.12);
+};
+
+// Frost Relay: a gate. Two struts lean in under a lintel, a hanger drops from the lintel into the
+// opening, and the gem hangs at the end of it. Almost everything this tower is made of is air, and
+// that is the point: a narrow upright with a bar across the top, a bar across the foot and a light
+// in the middle is the one outline on this board with a hole in it, and nothing that walks the road
+// will ever have one. The bars are the brightest structure on the board after the spire's cap, so
+// the frame carries the read on its own and the gem only has to be the warm note in it.
+const relayBody = (seat: THREE.Object3D, look: TowerLook): THREE.Mesh => {
+  structurePart(seat, {
+    geometry: new THREE.CylinderGeometry(0.42, 0.5, 0.18, 6),
+    color: look.base,
+    role: 'towerBase',
+    y: 0.09,
     roughness: 0.52,
     metalness: 0.28,
   });
-  for (const side of [-1, 1]) {
-    const leg = structurePart(seat, {
-      geometry: new THREE.CylinderGeometry(0.075, 0.1, 1.16, 5),
-      color: look.stem,
-      role: 'towerStem',
-      y: 0.58,
-      x: side * 0.24,
-      roughness: 0.34,
-      metalness: 0.55,
-    });
-    // Signed by the side, so both struts lean inward and meet under the crossbar instead of splaying
-    // away from each other.
-    leg.rotation.z = side * 0.2;
-    const antenna = structurePart(seat, {
-      geometry: new THREE.BoxGeometry(0.3, 0.055, 0.055),
-      color: look.roof,
-      role: 'towerRoof',
-      y: 0.62,
-      x: side * 0.32,
-      roughness: 0.3,
-      metalness: 0.4,
-    });
-    antenna.rotation.z = side * 0.34;
-  }
   structurePart(seat, {
-    geometry: new THREE.BoxGeometry(0.46, 0.09, 0.09),
+    geometry: new THREE.BoxGeometry(0.84, 0.09, 0.11),
     color: look.roof,
     role: 'towerRoof',
-    y: 1.14,
+    y: 0.24,
     roughness: 0.3,
     metalness: 0.4,
   });
-  // A tetrahedron and not an octahedron, sized so that it spans about as much of the frame as the
-  // spire's crystal spans of its roof: at this distance the shape of the gem is a third of the read.
-  const crystal = crystalPart(seat, new THREE.TetrahedronGeometry(0.34), look.accent, 0.96, 0.16, 0.12);
+  for (const side of [-1, 1]) {
+    const leg = structurePart(seat, {
+      geometry: new THREE.CylinderGeometry(0.06, 0.085, 1.5, 5),
+      color: look.stem,
+      role: 'towerStem',
+      y: 0.9,
+      x: side * 0.3,
+      roughness: 0.34,
+      metalness: 0.55,
+    });
+    // Signed by the side, so both struts lean inward and meet under the lintel instead of splaying
+    // away from each other.
+    leg.rotation.z = side * 0.15;
+    const antenna = structurePart(seat, {
+      geometry: new THREE.BoxGeometry(0.26, 0.05, 0.05),
+      color: look.lip,
+      role: 'towerRoof',
+      y: 0.62,
+      x: side * 0.33,
+      roughness: 0.3,
+      metalness: 0.4,
+    });
+    antenna.rotation.z = -side * 0.3;
+  }
+  structurePart(seat, {
+    geometry: new THREE.BoxGeometry(0.92, 0.11, 0.12),
+    color: look.roof,
+    role: 'towerRoof',
+    y: 1.68,
+    roughness: 0.3,
+    metalness: 0.4,
+  });
+  structurePart(seat, {
+    geometry: new THREE.CylinderGeometry(0.025, 0.025, 0.6, 4),
+    color: look.stem,
+    role: 'towerStem',
+    y: 1.32,
+    roughness: 0.34,
+    metalness: 0.55,
+  });
+  // A tetrahedron and not an octahedron, so the gem is not the same shape as the spire's crystal
+  // and not the same shape as the lens's: three towers, three gems, and the shape of the light is
+  // part of what tells them apart.
+  const crystal = crystalPart(seat, new THREE.TetrahedronGeometry(0.3), look.accent, 0.86, 0.16, 0.12);
   crystal.rotation.y = Math.PI / 4;
   return crystal;
 };
@@ -381,10 +446,13 @@ const towerLooks: Record<string, TowerLook> = {
     base: 0x1d4651,
     stem: 0x346f75,
     roof: 0xd29b62,
-    // The tallest of the three and the only one scaled up: this is the tower the player reads as the
-    // building, and the extra size belongs in the seat rather than in the geometry, where the model
-    // pipeline and its eleven red checks own it.
-    scale: 1.08,
+    lip: 0xd29b62,
+    // The artifact owns this tower's shape, and that shape is a drum with a cone on it: 1.29 tall
+    // against 1.12 wide, so it is the one tower here that cannot be made to read as tall by scaling
+    // alone without becoming a 2.6-unit-wide drum. `rise` is the one place a single tower's
+    // proportions may be answered, and it is the only field of the three looks that is not one.
+    scale: 1.7,
+    rise: 1.5,
     tiltX: 0.02,
     tiltZ: 0.03,
     nod: 0,
@@ -397,34 +465,38 @@ const towerLooks: Record<string, TowerLook> = {
     build: spireBody,
   },
   'grove-lens': {
-    accent: 0x8cd6ff,
-    // Pale sage rather than the violet this tower started in. The violet is the wisp's: `0022` gave it
-    // a purple body in a halo, and a violet tower in a violet ring on the same board meant two
-    // readings of one shape in one colour. A desaturated sage is clear of the enemies (orange, amber,
-    // purple), clear of the spire's teal, and the name was asking for it anyway.
-    base: 0x2c3a33,
-    stem: 0x41544a,
-    roof: 0x7f9a86,
-    scale: 0.94,
+    accent: 0x00b03c,
+    base: 0x14291d,
+    stem: 0x24543a,
+    roof: 0x2f7d52,
+    lip: 0x7ff0b0,
+    scale: 1.25,
+    rise: 1,
     tiltX: 0,
     tiltZ: 0.02,
-    // A heavy lens on a short post does not bob, it scans. The body already carries its lean, so all
-    // the seat has left to give is that slow sweep across the road.
+    // A canopy on a leaning stem does not bob, it sweeps. The body already carries its lean, so all
+    // the seat has left to give is that slow turn across the road, and the turn is a little quicker
+    // than it was: the canopy is the widest thing a tower puts on the board, so it is also the thing
+    // whose angle the player is most likely to read as its state.
     nod: 0.05,
-    spin: 0.2,
+    spin: 0.26,
     bob: 0.02,
     roll: 0,
     breath: 0.35,
     build: lensBody,
   },
   'frost-relay': {
-    accent: 0xffc56b,
-    base: 0x20323b,
-    stem: 0x4a6b78,
-    roof: 0x8fa3b5,
-    // The frame is mostly air, so it is also the smallest thing on screen: without the extra scale and
-    // the lighter steel it read as debris on the terrace rather than as a structure the player built.
-    scale: 1.06,
+    accent: 0xf07a10,
+    base: 0x1b2a34,
+    stem: 0x8fa9bb,
+    roof: 0xc9dcea,
+    lip: 0xffc46b,
+    // The gate is the tallest of the three and the narrowest. A frame that is mostly air can be that
+    // tall without becoming a solid mass, which is what keeps it off the spire's outline, and the
+    // bright steel is what keeps it off the stone: this board is cold and mid-value everywhere, and
+    // the one tower built out of near-white bars is the one the eye finds first.
+    scale: 1.8,
+    rise: 1,
     tiltX: 0,
     tiltZ: 0,
     nod: 0,
@@ -445,7 +517,9 @@ const unknownTowerLook: TowerLook = {
   base: 0x1d4651,
   stem: 0x346f75,
   roof: 0x5b7f86,
+  lip: 0x5b7f86,
   scale: 1,
+  rise: 1,
   tiltX: 0,
   tiltZ: 0,
   nod: 0,
@@ -557,7 +631,7 @@ export const createTowers = (
     const look = lookOf(towerId);
     const seat = new THREE.Group();
     seat.name = 'seat';
-    seat.scale.setScalar(look.scale);
+    seat.scale.set(look.scale, look.scale * towerHeightCompensation * look.rise, look.scale);
     const model = modelStore.get(towerId);
     const owned: THREE.Material[] = [];
     let crystal: THREE.Mesh;
