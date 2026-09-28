@@ -62,6 +62,11 @@ export type MapPresentation = {
 
 export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentation => {
   const ROAD_HALF_WIDTH = trainingCorridor.roadHalfWidth;
+  // Declared before anything that draws: the lit edge of the road and the frame around a niche both have
+  // to know where a niche is, and a helper used above the line it is written on is a runtime error, not
+  // a compile error.
+  const insideBay = (bay: BayDefinition, x: number, z: number): boolean =>
+    x >= bay.minX && x <= bay.maxX && z >= bay.minZ && z <= bay.maxZ;
 
   const roadSegments: RoadSegment[] = [];
   for (const route of config.map.routes) {
@@ -124,9 +129,18 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
   // a road that has to be read as a road cannot be built out of pieces that do not meet.
   const toShapePoint = (x: number, z: number): THREE.Vector2 => new THREE.Vector2(x, -z);
 
-  const offsetRibbon = (points: readonly { x: number; z: number }[], offset: number): THREE.Vector2[] => {
-    const left: THREE.Vector2[] = [];
-    const right: THREE.Vector2[] = [];
+  type EdgePoint = readonly [x: number, z: number];
+
+  // Both borders of the ribbon in world coordinates and in travel order. The road bed and the lit band
+  // that outlines it are two reads of one offset, so the offset is computed once: a second copy of this
+  // mitre would eventually disagree with the first at a corner, and a corner is the one place the player
+  // reads a turn from.
+  const offsetEdges = (
+    points: readonly { x: number; z: number }[],
+    offset: number,
+  ): { left: EdgePoint[]; right: EdgePoint[] } => {
+    const left: EdgePoint[] = [];
+    const right: EdgePoint[] = [];
     for (let index = 0; index < points.length; index += 1) {
       const point = points[index];
       const isFirst = index === 0;
@@ -155,26 +169,141 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
       // Clamped, because a hairpin would otherwise send the corner to infinity and a spike is not a
       // turn. Two and a half widths is past any turn a corridor map has.
       const clamped = Math.max(-Math.abs(offset) * 2.5, Math.min(Math.abs(offset) * 2.5, reach));
-      left.push(toShapePoint(point.x + (miterX / miterLength) * clamped, point.z + (miterZ / miterLength) * clamped));
-      right.push(toShapePoint(point.x - (miterX / miterLength) * clamped, point.z - (miterZ / miterLength) * clamped));
+      left.push([point.x + (miterX / miterLength) * clamped, point.z + (miterZ / miterLength) * clamped]);
+      right.push([point.x - (miterX / miterLength) * clamped, point.z - (miterZ / miterLength) * clamped]);
     }
-    return [...left, ...right.reverse()];
+    return { left, right };
   };
 
+  const offsetRibbon = (points: readonly { x: number; z: number }[], offset: number): THREE.Vector2[] => {
+    const { left, right } = offsetEdges(points, offset);
+    return [
+      ...left.map(([x, z]) => toShapePoint(x, z)),
+      ...right.map(([x, z]) => toShapePoint(x, z)).reverse(),
+    ];
+  };
+
+  // Flat bands as raw quads, in the shape space the road and the floors are already drawn in: local x is
+  // world x, local y is world -z, and local z is the height above the plane the mesh is laid on. A
+  // shape with a hole is the other way to draw a frame, and a frame that has to break where a niche
+  // opens onto the road is not a hole in anything. Every attribute a merged `ShapeGeometry` carries is
+  // declared here too, because `mergeGeometries` refuses a set that differs.
+  type FlatQuad = readonly [a: EdgePoint, b: EdgePoint, c: EdgePoint, d: EdgePoint];
+
+  const flatQuads = (height: number, quads: readonly FlatQuad[]): THREE.BufferGeometry => {
+    const positions = new Float32Array(quads.length * 6 * 3);
+    const normals = new Float32Array(quads.length * 6 * 3);
+    const uvs = new Float32Array(quads.length * 6 * 2);
+    let cursor = 0;
+    const put = ([x, z]: EdgePoint): void => {
+      positions[cursor * 3] = x;
+      positions[cursor * 3 + 1] = -z;
+      positions[cursor * 3 + 2] = height;
+      normals[cursor * 3 + 2] = 1;
+      uvs[cursor * 2] = x;
+      uvs[cursor * 2 + 1] = z;
+      cursor += 1;
+    };
+    for (const [a, b, c, d] of quads) {
+      put(a);
+      put(b);
+      put(c);
+      put(a);
+      put(c);
+      put(d);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    // Indexed even though the index says nothing: `ShapeGeometry` next to it is indexed, and a merge
+    // that mixes the two forms refuses the whole set rather than the one geometry that differs.
+    geometry.setIndex(Array.from({ length: quads.length * 6 }, (_, vertex) => vertex));
+    return geometry;
+  };
+
+  // Merges parts that each need their own slot in a material list, and returns the geometry. The list
+  // is a mesh property and the assignment is a geometry one, so the two are tied together here once:
+  // `mergeGeometries` numbers its groups by input geometry, and a mesh with two materials wants them
+  // numbered by slot. Left as it comes, the fortieth block asks a two-entry array for material number
+  // thirty-nine, and both the renderer and the pick ray read `undefined` out of it.
+  const mergeBySlot = (parts: THREE.BufferGeometry[], slots: number[]): THREE.BufferGeometry | null => {
+    if (parts.length === 0) {
+      return null;
+    }
+    const merged = mergeGeometries(parts, true);
+    for (const part of parts) {
+      part.dispose();
+    }
+    if (!merged) {
+      return null;
+    }
+    merged.groups.forEach((group, index) => {
+      group.materialIndex = slots[index];
+    });
+    return merged;
+  };
+
+  // The bed of the channel and the lip that outlines it are two values of one idea, and the picture is
+  // built on the difference between them: a dark floor with a lit edge reads as a trench that turns,
+  // where one flat bright slab reads as a stripe until the player has to guess where it goes.
   const pathMaterial = withProbeWeight(
     new THREE.MeshStandardMaterial({
-      color: 0x2e5c5c,
-      emissive: 0x0c2425,
-      emissiveIntensity: 0.65,
-      roughness: 0.82,
+      color: 0x214b56,
+      emissive: 0x0c2b31,
+      emissiveIntensity: 0.7,
+      roughness: 0.88,
+      side: THREE.DoubleSide,
+    }),
+    'path',
+  );
+  const pathEdgeMaterial = withProbeWeight(
+    new THREE.MeshStandardMaterial({
+      color: 0x2f9d92,
+      emissive: 0x1a6d67,
+      emissiveIntensity: 0.8,
+      roughness: 0.5,
+      metalness: 0.1,
       side: THREE.DoubleSide,
     }),
     'path',
   );
   const PATH_Y = 0.08;
+  const PATH_EDGE_WIDTH = 0.17;
+  const PATH_EDGE_Y = PATH_Y + 0.012;
   for (const route of config.map.routes) {
     const ribbon = new THREE.Shape(offsetRibbon(route.points, ROAD_HALF_WIDTH));
-    const road = new THREE.Mesh(new THREE.ShapeGeometry(ribbon), pathMaterial);
+    // The lit band runs inside the border, so it can never be swallowed by a terrace it did not measure.
+    // It breaks where a niche opens onto the road, because a lit line across a niche mouth would seal
+    // the one opening the player is looking for, and where the road enters the core chamber, because
+    // the channel is supposed to end in the well rather than run into its wall.
+    const outer = offsetEdges(route.points, ROAD_HALF_WIDTH);
+    const inner = offsetEdges(route.points, ROAD_HALF_WIDTH - PATH_EDGE_WIDTH);
+    const edgeQuads: FlatQuad[] = [];
+    for (const side of ['left', 'right'] as const) {
+      const border = outer[side];
+      const inboard = inner[side];
+      for (let index = 0; index + 1 < border.length; index += 1) {
+        const quad: FlatQuad = [border[index], border[index + 1], inboard[index + 1], inboard[index]];
+        const middleX = (quad[0][0] + quad[2][0]) / 2;
+        const middleZ = (quad[0][1] + quad[2][1]) / 2;
+        if (trainingCorridor.bays.some((bay) => insideBay(bay, middleX, middleZ))) {
+          continue;
+        }
+        if (Math.hypot(middleX - trainingCorridor.coreChamber.x, middleZ - trainingCorridor.coreChamber.z)
+          <= trainingCorridor.coreChamber.radius) {
+          continue;
+        }
+        edgeQuads.push(quad);
+      }
+    }
+    const road = new THREE.Mesh(
+      mergeBySlot(
+        [new THREE.ShapeGeometry(ribbon), flatQuads(PATH_EDGE_Y - PATH_Y, edgeQuads)],
+        [0, 1],
+      ) as THREE.BufferGeometry,
+      [pathMaterial, pathEdgeMaterial],
+    );
     road.rotation.x = -Math.PI / 2;
     road.position.y = PATH_Y;
     road.receiveShadow = true;
@@ -192,8 +321,6 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
   const cellCenterX = (column: number): number => -config.map.width / 2 + (column + 0.5) * CELL_SIZE;
   const cellCenterZ = (row: number): number => -config.map.depth / 2 + (row + 0.5) * CELL_SIZE;
   const cellIndex = (column: number, row: number): number => row * rasterColumns + column;
-  const insideBay = (bay: BayDefinition, x: number, z: number): boolean =>
-    x >= bay.minX && x <= bay.maxX && z >= bay.minZ && z <= bay.maxZ;
 
   const openCells = new Uint8Array(rasterColumns * rasterRows);
   // Every open cell, as a point to frame. The fit used to measure the rectangle around the corridor,
@@ -316,69 +443,146 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
     }
   }
 
-  // The rim gets a faint self-glow because it is the edge the player reads the corridor by: a lip of
-  // lit rock between the road and the mass behind it. The mass behind the rim does not, or the whole
-  // map would glow.
-  const wallLowMaterial = withProbeWeight(
-    new THREE.MeshStandardMaterial({
-      color: 0x24454f,
-      emissive: 0x0a2126,
-      emissiveIntensity: 0.55,
-      roughness: 0.84,
-      metalness: 0.12,
-    }),
+  // Stone says three things at once: how deep into the rock a terrace stands, how much of the light
+  // that falls in the channel reaches it, and which face is turned to the sky. The height class owns
+  // the first two — a value ramp that goes out from the lit lip into the dark mass, which is the reason
+  // a player can follow the channel with their eye instead of counting steps — and the per-vertex shade
+  // owns the third. All of it rides in the colour attribute, so four terraces that do not look alike are
+  // three materials between them rather than four, and the frame costs 7 programs against 6.
+  //
+  // The lip is the only part of the rock that glows on its own: it is the edge the player reads the
+  // corridor by. The bank above it and the mass behind that do not, or there would be no ramp to read.
+  const stoneTone: ReadonlyArray<readonly [number, number, number]> = [
+    [1.16, 1.08, 0.96],
+    [0.9, 0.93, 0.99],
+    [0.72, 0.77, 0.87],
+    [0.55, 0.61, 0.75],
+  ];
+  const FACE_TOP = 1;
+  const FACE_EDGE = 1.34;
+  const FACE_FOOT = 0.44;
+  const FACE_UNDER = 0.28;
+  const stoneBase = { color: 0x2a4450, vertexColors: true, roughness: 0.88, metalness: 0.1 };
+  const wallLipMaterial = withProbeWeight(
+    new THREE.MeshStandardMaterial({ ...stoneBase, emissive: 0x0d272c, emissiveIntensity: 0.55 }),
     'ground',
   );
-  const wallHighMaterial = withProbeWeight(
-    new THREE.MeshStandardMaterial({ color: 0x1a323a, roughness: 0.9, metalness: 0.08 }),
+  const wallBankMaterial = withProbeWeight(
+    new THREE.MeshStandardMaterial({ ...stoneBase, roughness: 0.9 }),
+    'ground',
+  );
+  const wallMassMaterial = withProbeWeight(
+    new THREE.MeshStandardMaterial({ ...stoneBase, roughness: 0.94, metalness: 0.06 }),
     'ground',
   );
 
-  // Every rect of a height class becomes one box, and the boxes of a material become one mesh. A
-  // carved massif of a few hundred cells costs two draw calls, not three hundred. The meshes also go
-  // into the pick list, because rock in front of a niche is rock in the way of a click.
+  // One terrace block, shaded by hand. A box has two rows of side vertices, so the foot of every face and
+  // its top edge are two values and the quad between them is the gradient: dark where the wall meets the
+  // ground, bright along the edge it presents to the sky. That edge line is the one cue that separates two
+  // terraces of the same colour, and unlike a chamfer it holds from every angle, because the key light is
+  // fixed while the stand turns.
+  const stoneBlock = (rect: WallRect): THREE.BufferGeometry => {
+    const height = WALL_HEIGHTS[rect.heightClass];
+    const box = new THREE.BoxGeometry(rect.width, height, rect.depth);
+    box.translate(rect.minX + rect.width / 2, height / 2, rect.minZ + rect.depth / 2);
+    const [toneR, toneG, toneB] = stoneTone[rect.heightClass];
+    const position = box.getAttribute('position');
+    const normal = box.getAttribute('normal');
+    const shade = new Float32Array(position.count * 3);
+    for (let vertex = 0; vertex < position.count; vertex += 1) {
+      const normalY = normal.getY(vertex);
+      const scale = normalY > 0.5
+        ? FACE_TOP
+        : normalY < -0.5
+          ? FACE_UNDER
+          : position.getY(vertex) > height * 0.5
+            ? FACE_EDGE
+            : FACE_FOOT;
+      shade[vertex * 3] = toneR * scale;
+      shade[vertex * 3 + 1] = toneG * scale;
+      shade[vertex * 3 + 2] = toneB * scale;
+    }
+    box.setAttribute('color', new THREE.BufferAttribute(shade, 3));
+    return box;
+  };
+
+  // Every rect of a height class becomes one box, the boxes of a class become one geometry, and the
+  // classes of a mesh are merged again in the order the mesh was given so each lands in its own slot of
+  // the material list. The meshes also go into the pick list, because rock in front of a niche is rock
+  // in the way of a click.
+  //
+  // The class-then-mesh order is the whole trick: in three a group is a draw call, so a massif merged
+  // with one group per box pays for itself in calls to carry a colour that already rides in the vertex
+  // attribute — measured on the same frame, 367 calls against 33, before the classes were merged first.
   const wallPickTargets: THREE.Mesh[] = [];
 
-  const buildWallGroup = (name: string, material: THREE.Material, classes: readonly number[]): number => {
-    const parts: THREE.BufferGeometry[] = [];
-    for (const rect of wallRects) {
-      if (!classes.includes(rect.heightClass)) {
+  const buildWallGroup = (
+    name: string,
+    materials: THREE.Material[],
+    classes: readonly number[],
+  ): number => {
+    const perClass: THREE.BufferGeometry[] = [];
+    let blocks = 0;
+    for (const heightClass of classes) {
+      const parts: THREE.BufferGeometry[] = [];
+      for (const rect of wallRects) {
+        if (rect.heightClass === heightClass) {
+          parts.push(stoneBlock(rect));
+        }
+      }
+      if (parts.length === 0) {
         continue;
       }
-      const height = WALL_HEIGHTS[rect.heightClass];
-      const box = new THREE.BoxGeometry(rect.width, height, rect.depth);
-      box.translate(rect.minX + rect.width / 2, height / 2, rect.minZ + rect.depth / 2);
-      parts.push(box);
+      blocks += parts.length;
+      const classGeometry = mergeGeometries(parts);
+      for (const part of parts) {
+        part.dispose();
+      }
+      if (classGeometry) {
+        perClass.push(classGeometry);
+      }
     }
-    if (parts.length === 0) {
-      return 0;
-    }
-    const merged = mergeGeometries(parts);
-    for (const part of parts) {
-      part.dispose();
+    const merged = materials.length === 1
+      ? mergeGeometries(perClass)
+      : mergeBySlot(perClass, perClass.map((_, index) => index));
+    for (const geometry of perClass) {
+      geometry.dispose();
     }
     if (!merged) {
       return 0;
     }
-    const mesh = new THREE.Mesh(merged, material);
+    const mesh = new THREE.Mesh(merged, materials.length === 1 ? materials[0] : materials);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     mesh.name = name;
     scene.add(mesh);
     wallPickTargets.push(mesh);
-    return parts.length;
+    return blocks;
   };
 
-  const wallBlockCount = buildWallGroup('massif:low', wallLowMaterial, [0, 1]);
-  buildWallGroup('massif:high', wallHighMaterial, [2, 3]);
+  const wallBlockCount = buildWallGroup('massif:low', [wallLipMaterial, wallBankMaterial], [0, 1]);
+  buildWallGroup('massif:high', [wallMassMaterial], [2, 3]);
 
-  // Niche floors and the core chamber: the open ground a tower stands on, kept a shade apart from the
-  // road so a recess reads as a recess and not as a widening the road happens to have.
+  // Niche floors, the frame marked into each of them, and the core chamber. The floor is darker than
+  // the road on purpose: a recess in shadow with a lit slot inside it is a room, while a recess in the
+  // same value as the road is a widening the road happens to have. The frame is the part that carries
+  // the promise — this ground is for a tower, and it is the only marking on the map that says so.
+  const NICHE_FLOOR_Y = 0.05;
+  const NICHE_FRAME_Y = 0.075;
   const bayFloorMaterial = withProbeWeight(
-    new THREE.MeshStandardMaterial({ color: 0x11303a, emissive: 0x082024, emissiveIntensity: 0.7, roughness: 0.88 }),
+    new THREE.MeshStandardMaterial({ color: 0x0d2129, emissive: 0x06171c, emissiveIntensity: 0.6, roughness: 0.9 }),
+    'ground',
+  );
+  const bayFrameMaterial = withProbeWeight(
+    new THREE.MeshStandardMaterial({ color: 0x3aa39d, emissive: 0x1a6b68, emissiveIntensity: 1, roughness: 0.55 }),
+    'ground',
+  );
+  const chamberFloorMaterial = withProbeWeight(
+    new THREE.MeshStandardMaterial({ color: 0x173a44, emissive: 0x0a262e, emissiveIntensity: 0.8, roughness: 0.86 }),
     'ground',
   );
   const bayFloorParts: THREE.BufferGeometry[] = [];
+  const frameQuads: FlatQuad[] = [];
   for (const bay of trainingCorridor.bays) {
     const shape = new THREE.Shape([
       toShapePoint(bay.minX, bay.minZ),
@@ -387,20 +591,76 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
       toShapePoint(bay.minX, bay.maxZ),
     ]);
     bayFloorParts.push(new THREE.ShapeGeometry(shape));
+    // As wide as the niche can spare: a bay is cut to hold a pad, so anything narrower than the frame
+    // would put the marking under the pad it is marking.
+    const frameWidth = Math.min(0.16, Math.max(0.06, (Math.min(bay.maxX - bay.minX, bay.maxZ - bay.minZ) - 1.8) / 2));
+    const inset = 0.05;
+    const lowX = bay.minX + inset;
+    const highX = bay.maxX - inset;
+    const lowZ = bay.minZ + inset;
+    const highZ = bay.maxZ - inset;
+    frameQuads.push(
+      [[lowX, lowZ], [highX, lowZ], [highX, lowZ + frameWidth], [lowX, lowZ + frameWidth]],
+      [[lowX, highZ - frameWidth], [highX, highZ - frameWidth], [highX, highZ], [lowX, highZ]],
+      [[lowX, lowZ], [lowX + frameWidth, lowZ], [lowX + frameWidth, highZ], [lowX, highZ]],
+      [[highX - frameWidth, lowZ], [highX, lowZ], [highX, highZ], [highX - frameWidth, highZ]],
+    );
   }
-  const chamberFloor = new THREE.CircleGeometry(trainingCorridor.coreChamber.radius, 24);
-  bayFloorParts.push(chamberFloor);
-  const bayFloors = new THREE.Mesh(mergeGeometries(bayFloorParts) as THREE.BufferGeometry, bayFloorMaterial);
+  // The chamber wears two rings instead of a frame: it is the end of the channel, and a circle says
+  // "well" where a rectangle says "slot". The outer ring is the rim of the well and the inner one stops
+  // at the foot of the plinth, so the crystal stands in a marked circle instead of on bare floor.
+  const chamberRings: FlatQuad[] = [];
+  for (const [inner, outer] of [[1.24, 1.48], [0.98, 1.08]] as const) {
+    const steps = 28;
+    for (let step = 0; step < steps; step += 1) {
+      const from = (step / steps) * Math.PI * 2;
+      const to = ((step + 1) / steps) * Math.PI * 2;
+      const at = (radius: number, angle: number): EdgePoint => [
+        trainingCorridor.coreChamber.x + Math.cos(angle) * radius,
+        trainingCorridor.coreChamber.z + Math.sin(angle) * radius,
+      ];
+      chamberRings.push([at(inner, from), at(outer, from), at(outer, to), at(inner, to)]);
+    }
+  }
+  // One geometry per material, merged again per slot: three draw calls for every marking on the ground,
+  // and a group per bay would have cost one per bay plus one per ring segment.
+  const bayFloors = new THREE.Mesh(
+    mergeBySlot(
+      [
+        mergeGeometries(bayFloorParts) as THREE.BufferGeometry,
+        flatQuads(NICHE_FRAME_Y - NICHE_FLOOR_Y, [...frameQuads, ...chamberRings]),
+        new THREE.CircleGeometry(trainingCorridor.coreChamber.radius, 24),
+      ],
+      [0, 1, 2],
+    ) as THREE.BufferGeometry,
+    [bayFloorMaterial, bayFrameMaterial, chamberFloorMaterial],
+  );
   for (const part of bayFloorParts) {
     part.dispose();
   }
   bayFloors.rotation.x = -Math.PI / 2;
-  bayFloors.position.y = 0.05;
+  bayFloors.position.y = NICHE_FLOOR_Y;
   bayFloors.receiveShadow = true;
   bayFloors.name = 'niche-floors';
   scene.add(bayFloors);
 
+  // The pad is the one place on the map that is lit on purpose, and it is lit from above by hand: a
+  // bright cap with the sides falling away reads as a socket waiting for something, where a uniformly
+  // glowing hexagon reads as a puddle of the same colour as the road it stands off.
   const padGeometry = new THREE.CylinderGeometry(0.62, 0.72, 0.14, 6);
+  const padShade = new Float32Array(padGeometry.getAttribute('position').count * 3);
+  {
+    const position = padGeometry.getAttribute('position');
+    const normal = padGeometry.getAttribute('normal');
+    for (let vertex = 0; vertex < position.count; vertex += 1) {
+      const normalY = normal.getY(vertex);
+      const scale = normalY > 0.5 ? 1 : normalY < -0.5 ? 0.4 : position.getY(vertex) > 0 ? 1.18 : 0.5;
+      padShade[vertex * 3] = scale;
+      padShade[vertex * 3 + 1] = scale;
+      padShade[vertex * 3 + 2] = scale;
+    }
+    padGeometry.setAttribute('color', new THREE.BufferAttribute(padShade, 3));
+  }
   const padViews = new Map<string, PadView>();
   const padPickTargets: THREE.Mesh[] = [];
   for (const pad of config.map.buildPads) {
@@ -412,11 +672,12 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
       padGeometry,
       withProbeWeight(
         new THREE.MeshStandardMaterial({
-          color: 0x2b7073,
-          emissive: 0x0b3135,
-          emissiveIntensity: 0.9,
+          color: 0x2a8a82,
+          emissive: 0x0c3f3c,
+          emissiveIntensity: 0.78,
           roughness: 0.48,
           metalness: 0.18,
+          vertexColors: true,
         }),
         'padBase',
       ),
@@ -427,9 +688,11 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
     base.name = `pad-base:${pad.id}`;
     group.add(base);
 
+    // The ring opens in the free state, because the free state is what the first frame has to say: a pad
+    // that starts in a colour no state owns is a pad whose first change is a jump.
     const ring = new THREE.Mesh(
       new THREE.RingGeometry(0.72, 0.8, 6),
-      new THREE.MeshBasicMaterial({ color: 0x6ee2cf, transparent: true, opacity: 0.48, side: THREE.DoubleSide }),
+      new THREE.MeshBasicMaterial({ color: 0x7cf0dc, transparent: true, opacity: 0.6, side: THREE.DoubleSide }),
     );
     ring.rotation.x = -Math.PI / 2;
     ring.position.y = 0.205;
@@ -450,7 +713,9 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
   const coreBase = new THREE.Mesh(
     new THREE.CylinderGeometry(0.8, 0.95, 0.32, 8),
     withProbeWeight(
-      new THREE.MeshStandardMaterial({ color: 0x285a62, roughness: 0.38, metalness: 0.42 }),
+      // Dark on purpose: the crystal is the only thing in the chamber that is allowed to be bright, and a
+      // pale plinth beside it competes with the one thing the player is defending.
+      new THREE.MeshStandardMaterial({ color: 0x1c3b44, roughness: 0.34, metalness: 0.45 }),
       'coreBase',
     ),
   );
@@ -481,27 +746,60 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
   core.add(coreRing);
   scene.add(core);
 
+  // Motes, sampled along the road instead of spread over a rectangle: what drifts across the frame is
+  // then the channel itself, and the last leg of it — the one that carries the eye to the core — carries
+  // motes too. Their phase is accumulated from the frame delta rather than read off the clock, so
+  // reduced motion freezes them where they are and the same tick always draws the same picture.
+  const MOTE_COUNT = 54;
+  const moteBase = new Float32Array(MOTE_COUNT * 3);
+  const moteSeeds: Array<{ sway: number; lift: number; speed: number; phase: number }> = [];
+  {
+    const cumulative: number[] = [0];
+    for (const segment of roadSegments) {
+      cumulative.push(cumulative[cumulative.length - 1] + segment.length);
+    }
+    for (let index = 0; index < MOTE_COUNT; index += 1) {
+      const wanted = ((index + 0.5) / MOTE_COUNT) * routeLength;
+      let leg = 0;
+      while (leg < roadSegments.length - 1 && cumulative[leg + 1] < wanted) {
+        leg += 1;
+      }
+      const segment = roadSegments[leg];
+      const span = cumulative[leg + 1] - cumulative[leg];
+      const along = span <= 0 ? 0 : (wanted - cumulative[leg]) / span;
+      const across = (((index * 37) % 11) / 10 - 0.5) * ROAD_HALF_WIDTH * 1.7;
+      const tangentX = segment.length <= 0 ? 1 : (segment.bx - segment.ax) / segment.length;
+      const tangentZ = segment.length <= 0 ? 0 : (segment.bz - segment.az) / segment.length;
+      moteBase[index * 3] = segment.ax + (segment.bx - segment.ax) * along - tangentZ * across;
+      moteBase[index * 3 + 1] = 0.3 + ((index * 7) % 11) * 0.075;
+      moteBase[index * 3 + 2] = segment.az + (segment.bz - segment.az) * along + tangentX * across;
+      moteSeeds.push({
+        sway: 0.12 + ((index * 5) % 7) * 0.03,
+        lift: 0.1 + ((index * 3) % 5) * 0.04,
+        speed: 0.24 + ((index * 11) % 9) * 0.06,
+        phase: (index * 1.7) % (Math.PI * 2),
+      });
+    }
+  }
   const particles = new THREE.Points(
     new THREE.BufferGeometry(),
-    new THREE.PointsMaterial({ color: 0x6ee2cf, size: 0.045, transparent: true, opacity: 0.62 }),
+    new THREE.PointsMaterial({ color: 0x7cf0dc, size: 0.05, transparent: true, opacity: 0.5, depthWrite: false }),
   );
-  const particlePositions = new Float32Array(54 * 3);
-  for (let index = 0; index < 54; index += 1) {
-    particlePositions[index * 3] = -5.4 + (index % 9) * 1.35;
-    particlePositions[index * 3 + 1] = 0.35 + ((index * 7) % 11) * 0.08;
-    particlePositions[index * 3 + 2] = -3.2 + ((index * 5) % 8) * 0.72;
-  }
-  particles.geometry.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+  const particlePositions = new Float32Array(MOTE_COUNT * 3);
+  particlePositions.set(moteBase);
+  const particleAttribute = new THREE.BufferAttribute(particlePositions, 3);
+  particles.geometry.setAttribute('position', particleAttribute);
   scene.add(particles);
 
-  const padFreeColor = new THREE.Color(0x2b7073);
-  const padFreeEmissive = new THREE.Color(0x0b3135);
-  const padOccupiedColor = new THREE.Color(0x3a4b55);
-  const padOccupiedEmissive = new THREE.Color(0x0a1a1e);
-  const padFreeRing = new THREE.Color(0x6ee2cf);
+  const padFreeColor = new THREE.Color(0x2a8a82);
+  const padFreeEmissive = new THREE.Color(0x0c3f3c);
+  const padOccupiedColor = new THREE.Color(0x2c3a42);
+  const padOccupiedEmissive = new THREE.Color(0x0a171b);
+  const padFreeRing = new THREE.Color(0x7cf0dc);
   const padOccupiedRing = new THREE.Color(0xffc56b);
-  const padErrorEmissive = new THREE.Color(0x5a1410);
+  const padErrorEmissive = new THREE.Color(0x6e1a12);
   const padErrorRing = new THREE.Color(0xff6f61);
+  const padErrorColor = new THREE.Color(0x8a2a20);
   const coreHealthy = new THREE.Color(0x2ac7b5);
   const coreHealthyRing = new THREE.Color(0x6ee2cf);
   const coreFailing = new THREE.Color(0xe46c62);
@@ -512,16 +810,20 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
   let coreDefeated = false;
   let coreDamagedUntil = 0;
   let reducedMotion = false;
+  let motePhase = 0;
 
+  // Three states, and the picture has to answer "may I build here" before the player reads a word of the
+  // dock. Free is the only lit thing in the niche, taken is a dark socket with a tired ring, and a
+  // refusal is the only red on the map — the one colour nothing else in the scene is allowed to wear.
   const refreshPadStyle = (padView: PadView, elapsed: number) => {
     const flashing = elapsed < padView.errorUntil;
     const baseMaterial = padView.base.material as THREE.MeshStandardMaterial;
     const ringMaterial = padView.ring.material as THREE.MeshBasicMaterial;
-    baseMaterial.color.copy(padView.occupied ? padOccupiedColor : padFreeColor);
+    baseMaterial.color.copy(flashing ? padErrorColor : padView.occupied ? padOccupiedColor : padFreeColor);
     baseMaterial.emissive.copy(flashing ? padErrorEmissive : padView.occupied ? padOccupiedEmissive : padFreeEmissive);
-    baseMaterial.emissiveIntensity = flashing ? 1.3 : padView.occupied ? 0.4 : 0.9;
+    baseMaterial.emissiveIntensity = flashing ? 1.45 : padView.occupied ? 0.35 : 0.78;
     ringMaterial.color.copy(flashing ? padErrorRing : padView.occupied ? padOccupiedRing : padFreeRing);
-    ringMaterial.opacity = flashing ? 0.95 : padView.occupied ? 0.72 : 0.48;
+    ringMaterial.opacity = flashing ? 1 : padView.occupied ? 0.5 : 0.6;
   };
 
   return {
@@ -571,7 +873,16 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
       coreRing.scale.setScalar(corePulse);
       coreCrystal.rotation.y += ambientDelta * 0.6;
       coreRing.rotation.z += ambientDelta * 0.25;
-      particles.rotation.y += ambientDelta * 0.08;
+      motePhase += ambientDelta;
+      for (let index = 0; index < MOTE_COUNT; index += 1) {
+        const seed = moteSeeds[index];
+        const wave = Math.sin(motePhase * seed.speed + seed.phase);
+        const drift = Math.cos(motePhase * seed.speed * 0.7 + seed.phase);
+        particlePositions[index * 3] = moteBase[index * 3] + drift * seed.sway;
+        particlePositions[index * 3 + 1] = moteBase[index * 3 + 1] + wave * seed.lift;
+        particlePositions[index * 3 + 2] = moteBase[index * 3 + 2] + wave * seed.sway * 0.5;
+      }
+      particleAttribute.needsUpdate = true;
     },
     flashPadError: (padId: string, elapsed: number) => {
       const padView = padViews.get(padId);
