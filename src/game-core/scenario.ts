@@ -131,26 +131,40 @@ const trainingRoutes: RouteDefinition[] = [
 //
 // The gate used to stand at (11, 11), outside the ring's corner, where it saw 3.90 of its own approach
 // and 1.39 of each of the two ring sides leaving that corner, and nothing else. The flanks stand 2.0
-// out and see one ring side each and nothing else — 3.95 at Pulse's reach against the gate's 5.30, and
-// worth twice as much summed over the four routes, 15.80 against 9.50. So the flanks were the stronger
-// pair and this comment was wrong, not merely badly argued.
+// out and see one ring side each and nothing else — 3.95 at Pulse's reach against the gate's 5.30 then,
+// and worth twice as much summed over the four routes, 15.80 against 9.50. So the flanks were the
+// stronger pair and this comment was wrong, not merely badly argued.
 //
-// The gate now stands at (7, 7): the same diagonal, inside the corner, where it sees both ring sides
-// leaving that corner and none of the approach at all. That is 22.80 at Pulse 2.8 summed over the four
-// routes, above every flank, and the rank the design wanted is now bought by coverage instead of paid
-// for by position. The mirror symmetry is untouched — (7, 7) reflects to itself under the quarter's
-// own diagonal exactly as (11, 11) did.
+// The gate then stood at (7, 7): the same diagonal, inside the corner, where it sees both ring sides
+// leaving that corner and none of the approach at all. It bought the rank the design wanted — 5.70
+// against 3.95 at Pulse's reach — with coverage instead of position, and it kept the mirror symmetry,
+// because (7, 7) reflects to itself under the quarter's own diagonal exactly as (11, 11) did. But the
+// ring is 2.4 from (7, 7) and Grove Lens reaches 2.4, so the gate saw *nothing* at Grove's range, and
+// Grove Lens is the one tower here that shoots at the air. A spot that is the best money on the map
+// and is blind to a third of what comes is not a strong spot, it is a promise the geometry does not
+// keep, and the player has no way to see the difference before paying for it.
 //
-// The cost is named here rather than left for the player to find: the ring is 2.4 from (7, 7) and
-// Grove Lens reaches 2.4, so the gate covers *nothing* at Grove's range and a Grove Lens standing
-// there is a dead tower. The gate is a long-range spot, the flanks are the Grove spots, and (7.4, 7.4)
-// would be better than both at all three ranges on the same diagonal. The last is the owner's call.
+// It stands at (7.4, 7.4) now, and four tenths along the diagonal is the whole of the fix: 2.0 to the
+// road instead of 2.4, so Grove Lens sees 5.30, Pulse 7.90 and Frost 9.20 — the best place on the map
+// at all three reaches, not only at the long ones, and exactly twice what the flank is worth at
+// Grove's. The lattice is what makes that move legal and the half-step illegal: 7.4 is a cell centre
+// and 6.4..8.4 are cell boundaries, so the court is still exactly the five cells it is drawn over. At
+// 7.2 the court's own edge lands on a cell centre, and the rock is then cut by cells the floor is not
+// drawn on; at 7.6 the same court comes out thirty-six cells wide in one quarter and thirty in two
+// others, and four identical districts stop being identical.
+//
+// What the move costs is the lip, and it is named here rather than left for the player to find. Two
+// cells of rock stood between (7, 7) and the road; one stands now — the same single cell and the same
+// 2.0 of road distance the eight flanks have carried all along. That is the argument for it: the map
+// ends up with one rule for a niche near the road instead of two, and the flanks are eight courts that
+// already read correctly at exactly that distance. The position that would have merged the court into
+// the road outright is 7.6, and 7.6 is not on the lattice either.
 //
 // The corner spot this map could otherwise have had — the bend of the approach sees both of its legs
 // at once and is the best place on the map — still has no mirror image anywhere, so it remains the one
 // thing a three-niche quarter cannot hold while its four quarters stay reflections of each other.
 const northQuarterPads: Array<{ role: string; position: Vec2 }> = [
-  { role: 'gate', position: { x: 7, z: 7 } },
+  { role: 'gate', position: { x: 7.4, z: 7.4 } },
   { role: 'flank-a', position: { x: 11.4, z: 4.2 } },
   { role: 'flank-b', position: { x: 4.2, z: 11.4 } },
 ];
