@@ -13,17 +13,16 @@ import type { EnemyDefinition, SpawnGroup, WaveDefinition } from './types.ts';
 //     Carapace. Add the spawn window and that pair is a bigger term in the length of a wave than its
 //     health is, which is why the speeds below are a tuning knob and the counts are not: an enemy
 //     costs gold, and gold is the one number the match length cannot be bought with.
-//   * The twelve pads cover 49.63 units of road at Pulse's reach, 21.31 at Grove's and 57.15 at
+//   * The twelve pads cover 56.90 units of road at Pulse's reach, 42.61 at Grove's and 62.02 at
 //     Frost's. Against one enemy walking a whole lap a full board of four Pulse and eight Grove
-//     sustains about 13.3 damage a second, which is roughly 1800 damage per lap. (Measured on the
-//     committed map; 0032's pending move of the gate niche raises it to 17.1 and 2300, and moves
-//     none of the numbers below — wave length here is set by the window and the approach, not by the
-//     kill queue.)
+//     sustains about 17.1 damage a second, which is roughly 2270 damage per lap — and none of that
+//     depends on the gate niche moving, because wave length here is set by the spawn window and the
+//     approach, not by the kill queue.
 //   * Nothing on this roster but the boss exceeds that per-lap budget, and a tower shoots whichever
 //     enemy is furthest along its route, so enemies die roughly in the order they were spawned. A leak
 //     is therefore not a matter of tuning: it needs an enemy that outlasts the whole board for a full
-//     lap, and the next heaviest thing here is a Carapace at 253. That is why nine of the ten waves
-//     end with the core untouched and the tenth costs four — see `maw`.
+//     lap, and the next heaviest thing here is a Carapace at 253, nine times lighter. That is why nine
+//     of the ten waves end with the core untouched and the tenth costs four — see `maw`.
 //   * Pulse fires 18 every 8 ticks, Grove 10 every 12 with a 1.1 splash, Frost 7 every 10 with a
 //     0.5 slow. At 20 ticks a second those are 45, 16.7 and 14 damage a second each, so a board of
 //     four Pulse and eight Grove can put out 313 — and spends about a sixth of it, because a tower
@@ -98,7 +97,7 @@ const trainingEnemies: EnemyDefinition[] = [
     // see the four facts at the top of this file for why nothing else on the roster can come round a
     // second time. Measured, not argued — the maw walks its 104 units in 153 seconds, of which 42 are
     // the approach nothing can reach, so it is under fire for 111 seconds before it returns to the
-    // gate it started from and has absorbed about 1500 of its 3000. It pays one lap, four core damage
+    // gate it started from and has absorbed about 1900 of its 3000. It pays one lap, four core damage
     // against a core of ten, and is still standing; two of them would be eight and one more would end
     // the run, so there is one, and it comes from one base.
     id: 'maw',
