@@ -85,8 +85,13 @@ const turned = (point: Vec2, times: number): Vec2 => {
 };
 
 // The base route, walked from the north-east corner: in along the map's east edge, a turn onto the
-// ring, and once round it back to the same corner. The repeated last point is what closes the loop —
-// the enemy arrives at the gate it came in by and starts the lap again.
+// ring, once round it, and back down the same approach to the gate it came in by. The last point
+// repeats the first, and that repeat is what closes the loop: a circuit whose end is not its start
+// does not end, it leaps. With the approach walked in both directions the lap is 104.0 — 75.2 of ring,
+// 14.4 of approach each way — and the enemy arrives at the gate on its feet, pays a leak for the lap
+// and starts again from the mouth. An earlier version of this list stopped at the ring corner, which
+// left a 10.2 gap to the gate: the route was 89.6 long, looked closed, and moved the enemy across ten
+// units of open ground in a single tick, once per lap, per enemy.
 const gateRoute: Vec2[] = [
   { x: BASE_CORNER, z: BASE_CORNER },
   { x: BASE_CORNER, z: RING_HALF },
@@ -95,6 +100,8 @@ const gateRoute: Vec2[] = [
   { x: -RING_HALF, z: -RING_HALF },
   { x: -RING_HALF, z: RING_HALF },
   { x: RING_HALF, z: RING_HALF },
+  { x: BASE_CORNER, z: RING_HALF },
+  { x: BASE_CORNER, z: BASE_CORNER },
 ];
 
 // Each base is named for the side of the map its approach runs along, so the four ids are four
@@ -116,15 +123,34 @@ const trainingRoutes: RouteDefinition[] = [
 // twelve read as four identical districts instead of twelve unrelated spots, and it is why there is
 // one niche on the diagonal rather than a pair straddling it — the road is already on that line.
 //
-// What separates the niches is coverage, and it is not equal. The gate stands 1.6 from the approach
-// and sees the approach *and* both ring sides leaving the corner, so it is worth roughly twice a
-// flank. The flanks stand 2.0 out, which puts them at the reach of Grove Lens and inside Frost Relay:
-// a real second choice, not a worse copy of the first. The corner spots this map could have had — the
-// approach's own bend sees both of its legs at once and is the best place on the map — have no mirror
-// image anywhere, so they are the one thing a three-niche quarter cannot hold while its four quarters
-// stay reflections of each other. That is a cost of the symmetry, and it is the owner's to weigh.
+// What separates the niches is coverage, and it is not equal. It is also not the ranking this comment
+// used to claim. Coverage is measured the way a tower shoots — against the ribbon, over the whole road
+// at once, because the player does not know which side the wave comes from — and under that measure a
+// niche covering its own approach is worth barely more than one covering none of it: a spot that sees
+// only the leg it stands on pays for the same tower as a spot that sees the whole ring.
+//
+// The gate used to stand at (11, 11), outside the ring's corner, where it saw 3.90 of its own approach
+// and 1.39 of each of the two ring sides leaving that corner, and nothing else. The flanks stand 2.0
+// out and see one ring side each and nothing else — 3.95 at Pulse's reach against the gate's 5.30, and
+// worth twice as much summed over the four routes, 15.80 against 9.50. So the flanks were the stronger
+// pair and this comment was wrong, not merely badly argued.
+//
+// The gate now stands at (7, 7): the same diagonal, inside the corner, where it sees both ring sides
+// leaving that corner and none of the approach at all. That is 22.80 at Pulse 2.8 summed over the four
+// routes, above every flank, and the rank the design wanted is now bought by coverage instead of paid
+// for by position. The mirror symmetry is untouched — (7, 7) reflects to itself under the quarter's
+// own diagonal exactly as (11, 11) did.
+//
+// The cost is named here rather than left for the player to find: the ring is 2.4 from (7, 7) and
+// Grove Lens reaches 2.4, so the gate covers *nothing* at Grove's range and a Grove Lens standing
+// there is a dead tower. The gate is a long-range spot, the flanks are the Grove spots, and (7.4, 7.4)
+// would be better than both at all three ranges on the same diagonal. The last is the owner's call.
+//
+// The corner spot this map could otherwise have had — the bend of the approach sees both of its legs
+// at once and is the best place on the map — still has no mirror image anywhere, so it remains the one
+// thing a three-niche quarter cannot hold while its four quarters stay reflections of each other.
 const northQuarterPads: Array<{ role: string; position: Vec2 }> = [
-  { role: 'gate', position: { x: 11, z: 11 } },
+  { role: 'gate', position: { x: 7, z: 7 } },
   { role: 'flank-a', position: { x: 11.4, z: 4.2 } },
   { role: 'flank-b', position: { x: 4.2, z: 11.4 } },
 ];
