@@ -3,10 +3,14 @@
 // is what the game draws — a form is tuned here instead of through an edit-build-screenshot cycle.
 //
 // How to open: `npm run dev`, then http://localhost:5173/tools/look/look.html
-// Three query parameters:
+// Query parameters:
+//   ?scale=       pixels per world unit. Two named values and no default worth guessing:
+//                   `game`  17.2 — the scale the match opens on, measured on the 1280x720 view
+//                             (scene 1234x403). This is the default, and it is the one a decision
+//                             about readability belongs on.
+//                   `loupe` 50.5 — 2.9x the match, for working on a form. The player never sees it.
+//                   a number is a number you typed, and the sheet says so on the caption.
 //   ?gap=<units>   spacing between the creatures, default: derived so the row always fits
-//   ?scale=<px>    pixels per world unit, default 50.5 — the scale the match opens at.
-//                  400 is a loupe for small detail and is not what the player sees.
 //   ?kind=<id>     one creature and a slowed twin of it, centred — what the loupe needs, because at
 //                  400 px per unit the whole roster no longer fits and a cropped row is neither a
 //                  shape nor a comparison.
@@ -33,19 +37,51 @@ setEnvironmentTexture(pmrem.fromScene(new RoomEnvironment(), 0.04).texture);
 const query = new URLSearchParams(location.search);
 const WIDTH = 1400;
 const HEIGHT = 760;
-// Pixels per world unit. The default is the scale the match opens at, so what is on the sheet is
-// what the player sees — and at that scale a creature is a coloured speck, which is the point. 400 is
-// a loupe for working on a form, and it is not a view of the game.
-const PX_PER_UNIT = Number(query.get('scale') ?? '50.5');
+// Pixels per world unit. The default is the scale the match actually opens at, measured through the
+// seam on the 1280x720 view, so what is on the sheet is what the player sees. Before 0031 this was
+// 50.5 and the comment above called it the match scale: it was 2.9 times larger than the game, and
+// every readability decision taken on this sheet since 0022 was taken at a scale that never shipped.
+// The loupe is still here, under a name that says what it is.
+const GAME_SCALE = 17.19;
+const LOUPE_SCALE = 50.5;
+const requestedScale = query.get('scale');
+const PX_PER_UNIT = requestedScale === null || requestedScale === 'game'
+  ? GAME_SCALE
+  : requestedScale === 'loupe'
+    ? LOUPE_SCALE
+    : Number(requestedScale);
 const FRAME_WIDTH = WIDTH / PX_PER_UNIT;
+// The caption is the part that keeps the tool honest: a picture of the roster at a scale nobody plays
+// at looks exactly like a picture of the roster at the scale they do.
+const scaleCaption = requestedScale === null || requestedScale === 'game'
+  ? 'the scale the match opens at, measured on the 1280x720 view (scene 1234x403)'
+  : requestedScale === 'loupe'
+    ? 'a loupe for working on a form — 2.9x the match, the player never sees this'
+    : 'a number typed into ?scale=, not a claim about the match';
+const caption = document.createElement('div');
+caption.textContent = `${PX_PER_UNIT} px per world unit — ${scaleCaption}. `
+  + `The row is ${FRAME_WIDTH.toFixed(1)} units wide, wider than the match frame: `
+  + 'the sheet fits the whole roster in one row. Add ?gap= to close it up.';
+Object.assign(caption.style, {
+  position: 'fixed',
+  top: '10px',
+  left: '12px',
+  maxWidth: '900px',
+  padding: '6px 10px',
+  borderRadius: '6px',
+  background: 'rgba(4, 12, 18, 0.82)',
+  color: '#cfe6e2',
+  font: '13px/1.45 system-ui, sans-serif',
+});
+document.body.append(caption);
 
 const keyLight = new THREE.DirectionalLight(0xffe4bf, 3.4);
 keyLight.position.set(6, 14, 8);
 keyLight.castShadow = true;
 keyLight.shadow.mapSize.set(1024, 1024);
-// The shadow frustum follows the frame: at the match scale the row is twenty-eight units wide and a
-// fixed fourteen-unit box would drop the shadows of the creatures at both ends, which are the two the
-// player is comparing.
+// The shadow frustum follows the frame, which is now 81 units wide at the match scale and 28 at the
+// loupe: a fixed fourteen-unit box would drop the shadows of the creatures at both ends, which are the
+// two the player is comparing.
 const shadowSpan = Math.max(14, FRAME_WIDTH * 0.6);
 keyLight.shadow.camera.left = -shadowSpan;
 keyLight.shadow.camera.right = shadowSpan;
@@ -106,7 +142,10 @@ enemies.applySnapshot({ ...snapshot, enemies: snapshot.enemies.map((e) => ({ ...
 
 const camera = new THREE.OrthographicCamera(-1.8, 1.8, 0.95, -0.95, 0.1, 100);
 const target = new THREE.Vector3(0, 0.4, 0);
-const azimuth = Math.PI / 4;
+// Zero, because that is the azimuth the match opens at: the map is 4-fold symmetric and the frame is
+// fitted on a symmetry axis. The sheet looking down the other diagonal would be a second, different
+// "the game" for a tool whose whole job is to be the game.
+const azimuth = 0;
 const elevation = Math.asin(10 / 16.16);
 const radius = 6;
 const horizontal = Math.cos(elevation) * radius;

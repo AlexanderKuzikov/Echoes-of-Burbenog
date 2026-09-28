@@ -1011,7 +1011,14 @@ const CAMERA_FRAME_BIAS = 0.1;
 const CAMERA_CLICK_SLOP_PX = 4;
 
 const cameraRig = {
-  azimuth: Math.PI / 4,
+  // Zero is a symmetry axis of this map: the ring and its four feeds repeat every 90 degrees, so the
+  // match opens on the same view four times out of four. The frame is fitted from the view the match
+  // opens on, and between two axes the four L-shaped feeds point straight at the camera, which
+  // stretches the road's depth 1.41 times for a view the player gets once in four turns. On the axes
+  // the frame still holds the whole road; at the diagonals it gives up the outer 3.3 units of the two
+  // far feed ends, and the wheel puts them back — the road is whole again from zoom 1.82, and the
+  // wheel goes to 3.2.
+  azimuth: 0,
   elevation: Math.asin(10 / CAMERA_RADIUS),
   zoom: 1,
   targetX: 0,
@@ -1040,7 +1047,12 @@ const resetCamera = (): void => {
 // guessed. `max(height, width / aspect)` is the only frustum that both contains the bounds and has
 // the canvas's aspect: anything else either distorts the map or crops it. A hardcoded view height was
 // two numbers that only ever fit one window.
-const FRAME_MARGIN = 1.2;
+//
+// 1.1 is not a round number: it is the smallest margin that still keeps all twelve niches inside the
+// frame across the eighty measured camera positions, and 1.05 loses one of them on four of them. A
+// niche that leaves the frame is a build spot the player cannot click, and that costs more than the
+// strip of rock a tenth of the margin buys.
+const FRAME_MARGIN = 1.1;
 const framePoint = new THREE.Vector3();
 
 const measureCorridor = (): { centerX: number; centerY: number; halfWidth: number; halfHeight: number } => {
