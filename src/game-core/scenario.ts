@@ -1,13 +1,12 @@
 import type {
   BuildPadDefinition,
-  EnemyDefinition,
   MapDefinition,
   MatchConfig,
   MatchRules,
   RouteDefinition,
   TowerDefinition,
-  WaveDefinition,
 } from './types.ts';
+import { trainingEnemies, trainingWaves } from './contact.ts';
 
 const trainingTowers: TowerDefinition[] = [
   {
@@ -44,36 +43,6 @@ const trainingTowers: TowerDefinition[] = [
   },
 ];
 
-const trainingEnemies: EnemyDefinition[] = [
-  {
-    id: 'husk',
-    name: 'Husk',
-    maxHealth: 90,
-    speed: 0.72,
-    reward: 10,
-    coreDamage: 1,
-    tags: ['ground'],
-  },
-  {
-    id: 'runner',
-    name: 'Runner',
-    maxHealth: 52,
-    speed: 1.05,
-    reward: 8,
-    coreDamage: 1,
-    tags: ['ground'],
-  },
-  {
-    id: 'wisp',
-    name: 'Wisp',
-    maxHealth: 44,
-    speed: 0.86,
-    reward: 12,
-    coreDamage: 1,
-    tags: ['ground', 'air'],
-  },
-];
-
 // One road, five turns, core at the dead end. Every leg runs along a grid multiple of 0.4 and the
 // raster that carves the massif works in the same 0.4 cells, so the road band lands on whole cells
 // and the ribbon drawn from these points covers exactly what the wall leaves open. Two roads would
@@ -103,18 +72,6 @@ const trainingPads: BuildPadDefinition[] = [
   { id: 'niche-deep', position: { x: -0.6, z: -2.6 } },
   { id: 'niche-bend', position: { x: -4.2, z: 1.8 } },
   { id: 'niche-heart', position: { x: -6.2, z: 1.8 } },
-];
-
-const trainingWaves: WaveDefinition[] = [
-  {
-    id: 'first-contact',
-    prepTicks: 30,
-    groups: [
-      { enemyId: 'husk', count: 7, startTick: 0, intervalTicks: 14, routeId: 'burrow-spine' },
-      { enemyId: 'runner', count: 6, startTick: 8, intervalTicks: 18, routeId: 'burrow-spine' },
-      { enemyId: 'wisp', count: 3, startTick: 36, intervalTicks: 24, routeId: 'burrow-spine' },
-    ],
-  },
 ];
 
 // Carving geometry for the presentation layer. It is deliberately not part of `MapDefinition`: the
