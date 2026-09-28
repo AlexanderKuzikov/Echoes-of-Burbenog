@@ -47,10 +47,15 @@ const slowedBodyEmissive = 1.15;
 // decides how big a kind walks into a corridor 1.2 wide, and every part of it moves with that number
 // instead of carrying its own idea of size.
 //
-// All three are built from faceted primitives, the way the rock, the pads and the towers are: flat
+// All of them are built from faceted primitives, the way the rock, the pads and the towers are: flat
 // planes catch the key light in steps, and a creature made of them reads as carved rather than
-// inflated. The floater's orb is the one smooth form in the module, on purpose — it is the only light
+// inflated. The wisp's orb is the one smooth form in the module, on purpose — it is the only light
 // in the scene that is not a solid.
+//
+// The roster is seven kinds and each one spends a category rather than a shade. A category is a
+// statement about how the creature meets the world — does it touch, how wide is it against how tall,
+// what breaks its outline — and only then a colour. Seven hues on one round body would be seven
+// shades of the same thing, which is what this table used to be.
 
 type EnemyForm = {
   shell: THREE.BufferGeometry;
@@ -66,8 +71,9 @@ type EnemyLook = {
   barWidth: number;
   shell: { color: number; emissive: number; roughness: number; metalness: number };
   accent: { color: number; emissive: number; emissiveIntensity: number; roughness: number; metalness: number };
-  // The idle language of a kind, and the reason a still frame shows three different creatures even
-  // before their shape is read: a tank shifts its weight, a sprinter fidgets, a floater drifts.
+  // The idle language of a kind, and the reason a still frame shows seven different creatures even
+  // before their shape is read: a tank shifts its weight, a sprinter fidgets, a floater drifts, a
+  // swarmling twitches, a shell rolls, a mote banks, a boss heaves.
   motion: { bob: number; bobRate: number; sway: number; swayRate: number; yaw: number; yawRate: number };
   form: () => EnemyForm;
 };
@@ -136,10 +142,12 @@ const eyes = (bucket: THREE.BufferGeometry[], radius: number, spread: number, he
 };
 
 // The tank. A wide low barrel for a shell, a head carried in front of it and below its deck, a pair
-// of shoulder nubs, and a pale blade standing on the back. It is the widest and the flattest of the
-// three, so the player tells it from the runner by outline and not by shade: on a dark rock, hue is
-// the last thing to arrive. A drum and not a squashed polyhedron, because a polyhedron's corners turn
-// into a star, and a star is what the floater already is.
+// of shoulder nubs, and a pale blade standing on the back. It is the flattest thing that walks, and
+// the blade is the only part of it that rises: a wider shell behind it takes the low-mass category
+// and leaves the flat deck with a spike on it as this one's own. So the player tells it from the
+// runner by outline and not by shade — on dark rock, hue is the last thing to arrive. A drum and not
+// a squashed polyhedron, because a polyhedron's corners turn into a star, and a star is what the
+// floater already is.
 const buildHusk = (): EnemyForm => {
   const shell: THREE.BufferGeometry[] = [];
   const accent: THREE.BufferGeometry[] = [];
@@ -170,9 +178,9 @@ const buildHusk = (): EnemyForm => {
 
 // The sprinter. One slim spire raked forward, a head with eyes carried low in front of it, two short
 // legs, a tail, and a blade swept back over the spire. Nothing here is a mass: a wide mass is the
-// tank and a round one is the floater, so the runner is the only creature on the road that is
-// thinner than it is tall, and a spike reads as a spike from every angle where a flat fin would show
-// the player its edge twice per lap.
+// tank and a round one is the floater, so the runner is a single solid stroke and it is the tallest
+// thing on the road — a spike reads as a spike from every angle where a flat fin would show the
+// player its edge twice per lap.
 const buildRunner = (): EnemyForm => {
   const shell: THREE.BufferGeometry[] = [];
   const accent: THREE.BufferGeometry[] = [];
@@ -193,8 +201,8 @@ const buildRunner = (): EnemyForm => {
 };
 
 // The floater. A spiked orb inside a tilted halo, hung above the road on a tail that almost reaches
-// it. The gap under the body is the tell: neither of the other two leaves the ground, so the player
-// reads "this one does not touch" before the shape resolves at all.
+// it. The gap under the body is the tell: nothing else in the roster leaves the ground by more than a
+// leg, so the player reads "this one does not touch" before the shape resolves at all.
 const buildWisp = (): EnemyForm => {
   const shell: THREE.BufferGeometry[] = [];
   const accent: THREE.BufferGeometry[] = [];
@@ -223,9 +231,117 @@ const buildWisp = (): EnemyForm => {
   return { shell: mergeParts(shell), accent: mergeParts(accent) };
 };
 
+// The swarm runner. A small angular body on two long thin raked legs, a shorter pair behind it, a
+// beak, a tail and a pair of antennae longer than the body. It carries no mass at all: a wide mass is
+// the tank, a round one is the floater, a solid stroke is the sprinter, and this is the one creature
+// whose outline is mostly gaps. It is also the smallest thing that walks, and size is a category the
+// player reads before shape has resolved — a wave of them is a shimmer on the road, not a queue.
+const buildSwarmling = (): EnemyForm => {
+  const shell: THREE.BufferGeometry[] = [];
+  const accent: THREE.BufferGeometry[] = [];
+
+  part(shell, new THREE.OctahedronGeometry(0.5).scale(0.34, 0.26, 0.44).translate(0, 0.46, 0.02));
+  part(shell, new THREE.ConeGeometry(0.11, 0.28, 4).rotateX(Math.PI / 2).scale(1, 0.72, 1).translate(0, 0.44, 0.26));
+  part(shell, new THREE.ConeGeometry(0.05, 0.24, 4).rotateX(-Math.PI / 2 - 0.5).translate(0, 0.5, -0.24));
+  for (const side of [-1, 1]) {
+    part(shell, new THREE.CylinderGeometry(0.026, 0.036, 0.48, 4).rotateZ(side * -0.16).translate(side * 0.13, 0.24, 0.02));
+    part(shell, new THREE.CylinderGeometry(0.02, 0.028, 0.3, 4).rotateX(-0.4).translate(side * 0.11, 0.15, -0.14));
+  }
+
+  // The antennae are the accent rather than a crest because they are the read: two bright strokes
+  // leaning out of a dark speck, which is all a wave of them needs to look like it is coming.
+  for (const side of [-1, 1]) {
+    part(accent, new THREE.ConeGeometry(0.018, 0.7, 3).rotateX(Math.PI / 2 - 1.05).translate(side * 0.08, 0.58, 0.24));
+  }
+  eyes(accent, 0.042, 0.07, 0.5, 0.2);
+
+  return { shell: mergeParts(shell), accent: mergeParts(accent) };
+};
+
+// The siege shell. The widest and the tallest body on the road: a faceted dome on a flared skirt, a
+// low spine along the top, two spurs swept off the back, and a wedge plough hanging off the front.
+// Nothing on it rises except the spine, which is the whole argument — the blade standing above a deck
+// is the tank, a tall stroke is the sprinter, and a boss that copied either would be a larger one of
+// them. Layers are the tank's own language too, so this one is told by its outline instead: a wide
+// low base, one unbroken arc above it, a glowing nose that hangs over the road, and no spike.
+const buildCarapace = (): EnemyForm => {
+  const shell: THREE.BufferGeometry[] = [];
+  const accent: THREE.BufferGeometry[] = [];
+
+  part(shell, new THREE.CylinderGeometry(0.5, 0.74, 0.3, 7).scale(1, 1, 1.1).translate(0, 0.2, -0.04));
+  part(shell, new THREE.IcosahedronGeometry(0.5, 0).scale(1.2, 0.82, 1.34).translate(0, 0.6, -0.04));
+  part(shell, new THREE.ConeGeometry(0.2, 1.4, 4).rotateX(Math.PI / 2).scale(0.65, 0.55, 1).translate(0, 0.98, -0.06));
+  for (const side of [-1, 1]) {
+    part(shell, new THREE.ConeGeometry(0.15, 0.72, 4).rotateX(-Math.PI / 2 + 0.3).rotateY(side * -0.34).translate(side * 0.34, 0.52, -0.52));
+  }
+
+  // The plough is the accent rather than a mark laid on the shell. A dark body needs its light where
+  // the player is already looking — the nose it walks with — and a mark floating half a millimetre
+  // above a dome reads as a sticker, while a glowing wedge is part of the silhouette at any distance.
+  part(accent, new THREE.ConeGeometry(0.42, 1, 4).rotateX(Math.PI / 2 + 0.36).scale(1.5, 1, 0.8).translate(0, 0.28, 0.48));
+  part(accent, new THREE.ConeGeometry(0.13, 0.62, 4).rotateX(Math.PI / 2).scale(0.8, 0.6, 1).translate(0, 1.08, -0.06));
+
+  return { shell: mergeParts(shell), accent: mergeParts(accent) };
+};
+
+// The cheap flier. A solid brim over a bright crown and a small point below it, hanging clear of the
+// road. The brim is the argument: it is the one horizontal plate in the roster, so it cannot be read
+// as a sphere however the light falls, and it is solid rather than a ring — a ring around a round
+// body is what the wisp already is. It carries no face and no small marks, because it is drawn at
+// twenty-five pixels and only two areas that size are ever going to arrive.
+const buildMote = (): EnemyForm => {
+  const shell: THREE.BufferGeometry[] = [];
+  const accent: THREE.BufferGeometry[] = [];
+
+  part(shell, new THREE.CylinderGeometry(0.6, 0.6, 0.22, 9).scale(1, 1, 1.06).translate(0, 0.9, 0));
+
+  part(accent, new THREE.ConeGeometry(0.3, 0.66, 5).translate(0, 1.2, -0.02));
+  part(accent, new THREE.ConeGeometry(0.32, 0.4, 5).rotateX(Math.PI).translate(0, 0.68, 0));
+  eyes(accent, 0.05, 0.11, 1.24, 0.05);
+
+  return { shell: mergeParts(shell), accent: mergeParts(accent) };
+};
+
+// The boss. A heavy six-sided body on four splayed legs with three spines along its back, and a jaw
+// held open at the front: an upper plate tilted down and a lower plate tilted up with a gap between
+// them, filled with two rows of teeth. It is the only creature whose silhouette contains a void, and
+// that is the read — at the scale the match is played the player sees a dark wide thing with a bright
+// gape in it long before they see that it has a back. The plates stay flat and untapered on purpose:
+// a wedge tapers to a point, and a point has no room along its edge for a row of teeth.
+const buildMaw = (): EnemyForm => {
+  const shell: THREE.BufferGeometry[] = [];
+  const accent: THREE.BufferGeometry[] = [];
+
+  part(shell, new THREE.CylinderGeometry(0.44, 0.52, 0.6, 6).rotateY(Math.PI / 6).scale(1.28, 1, 1.15).translate(0, 0.5, -0.34));
+  for (const z of [-0.66, -0.42, -0.18]) {
+    part(shell, new THREE.ConeGeometry(0.16, 0.56, 4).scale(0.95, 1, 1.5).translate(0, 0.88, z));
+  }
+  // Two plates and a gap. The gap is set by hand — a fifth of a unit here is eight pixels at the scale
+  // the match opens at — because a jaw that closes looks like a beak, and a beak is a small thing on
+  // the road.
+  part(shell, new THREE.BoxGeometry(0.8, 0.18, 0.86).rotateX(0.36).translate(0, 0.8, 0.24));
+  part(shell, new THREE.BoxGeometry(0.72, 0.16, 0.88).rotateX(0.28).translate(0, 0.14, 0.26));
+  for (const side of [-1, 1]) {
+    part(shell, new THREE.CylinderGeometry(0.11, 0.15, 0.44, 4).translate(side * 0.44, 0.22, 0.1));
+    part(shell, new THREE.CylinderGeometry(0.11, 0.15, 0.44, 4).translate(side * 0.42, 0.22, -0.44));
+    part(shell, new THREE.BoxGeometry(0.24, 0.07, 0.28).translate(side * 0.45, 0.035, 0.1));
+    part(shell, new THREE.BoxGeometry(0.24, 0.07, 0.28).translate(side * 0.43, 0.035, -0.44));
+  }
+
+  for (const x of [-0.24, -0.12, 0, 0.12, 0.24]) {
+    part(accent, new THREE.ConeGeometry(0.045, 0.2, 3).rotateX(Math.PI).translate(x, 0.56, 0.5));
+  }
+  for (const x of [-0.2, -0.07, 0.07, 0.2]) {
+    part(accent, new THREE.ConeGeometry(0.04, 0.16, 3).translate(x, 0.35, 0.56));
+  }
+  eyes(accent, 0.055, 0.17, 0.78, 0.56);
+
+  return { shell: mergeParts(shell), accent: mergeParts(accent) };
+};
+
 // A kind the content grew after this table was written still has to arrive as a creature and not as
 // a fallback sphere: a plain dome with a low crest, the same materials, and its own entry so it can
-// be given a shape of its own later without touching the other two.
+// be given a shape of its own later without touching the other six.
 const buildUnknown = (): EnemyForm => {
   const shell: THREE.BufferGeometry[] = [];
   const accent: THREE.BufferGeometry[] = [];
@@ -270,6 +386,56 @@ const enemyLooks: Record<string, EnemyLook> = {
     accent: { color: 0x9fd4e8, emissive: 0x8fdcff, emissiveIntensity: 0.25, roughness: 0.2, metalness: 0.15 },
     motion: { bob: 0.045, bobRate: 1, sway: 0, swayRate: 1, yaw: 0.5, yawRate: 0.45 },
     form: buildWisp,
+  },
+  swarmling: {
+    scale: 0.46,
+    barY: 0.5,
+    barWidth: 0.19,
+    // Acid and small. Its shell glows the colour it is painted, so under frost it turns from lime to
+    // a hotter yellow-green, and at eight pixels across the whole creature that jump is the only cue
+    // it will ever need — which is the point of a kind this cheap.
+    shell: { color: 0xa8e04a, emissive: 0x6f9a2a, roughness: 0.6, metalness: 0.1 },
+    accent: { color: 0xf4ffcf, emissive: 0xdaff8c, emissiveIntensity: 0.3, roughness: 0.4, metalness: 0.05 },
+    motion: { bob: 0.022, bobRate: 9, sway: 0.05, swayRate: 6, yaw: 0.16, yawRate: 3.2 },
+    form: buildSwarmling,
+  },
+  carapace: {
+    scale: 0.6,
+    barY: 0.79,
+    barWidth: 0.68,
+    // The one dark shell in the roster. Everything else is painted mid or hot, so the slowest and
+    // toughest thing on the road is the only creature that swallows the key light instead of throwing
+    // it back, and its amber plough is the only bright mark on it. The emissive is a full step lighter
+    // than the paint on purpose: a dark body with a dark glow shows nothing when the frost lands.
+    shell: { color: 0x4a6a8c, emissive: 0x5c86b4, roughness: 0.92, metalness: 0.05 },
+    accent: { color: 0xffb257, emissive: 0xff9a3c, emissiveIntensity: 0.3, roughness: 0.45, metalness: 0.1 },
+    motion: { bob: 0.008, bobRate: 0.55, sway: 0.022, swayRate: 0.42, yaw: 0.05, yawRate: 0.24 },
+    form: buildCarapace,
+  },
+  mote: {
+    scale: 0.42,
+    barY: 0.72,
+    barWidth: 0.4,
+    // A light blue brim and nothing else on the shell. Near-white would have been the obvious choice
+    // for a cheap flier and it is the wrong one: this scene's key light is hot, a near-white body
+    // clips, and a clipped body is a featureless dot — which is the thing the roster cannot afford to
+    // have one more of.
+    shell: { color: 0x7cc4e8, emissive: 0x4a90c0, roughness: 0.38, metalness: 0.05 },
+    accent: { color: 0xf2fbff, emissive: 0xdcf4ff, emissiveIntensity: 0.4, roughness: 0.22, metalness: 0.05 },
+    motion: { bob: 0.03, bobRate: 1.7, sway: 0.09, swayRate: 1.1, yaw: 0.22, yawRate: 0.9 },
+    form: buildMote,
+  },
+  maw: {
+    scale: 0.74,
+    barY: 1,
+    barWidth: 0.76,
+    // Oxblood rather than the husk's rust: the two are neighbours in hue, so they are separated by
+    // value instead — the tank is a mid orange that reads as an orange, and this is a body dark
+    // enough to be a hole in the road with teeth in it.
+    shell: { color: 0x8e1f30, emissive: 0x7a1a2a, roughness: 0.8, metalness: 0.08 },
+    accent: { color: 0xffe8d2, emissive: 0xffd9b0, emissiveIntensity: 0.22, roughness: 0.5, metalness: 0.05 },
+    motion: { bob: 0.026, bobRate: 0.8, sway: 0.038, swayRate: 0.6, yaw: 0.12, yawRate: 0.3 },
+    form: buildMaw,
   },
   unknown: {
     scale: 0.68,
