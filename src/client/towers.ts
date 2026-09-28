@@ -256,10 +256,19 @@ const spireBody = (seat: THREE.Object3D, look: TowerLook): THREE.Mesh => {
 };
 
 // Grove Lens: the opposite of the spire on both axes at once — wider than it is tall, and open in
-// the middle. A short post carries a big ring that leans back, and the lens lies in the plane of
-// that ring rather than sitting on top of it, so the tower reads as an eye and not as a roof with a
-// gem on it. The hole is the difference from an enemy, which is a solid round body.
-const lensTilt = -0.72;
+// the middle. A short post carries a cradle that leans back, and the lens lies in the plane of that
+// cradle rather than sitting on top of it, so the tower reads as an eye and not as a roof with a gem
+// on it. The cradle is a 270° arc, not a closed ring, and that is a correction rather than a style:
+// `0022` gave the wisp a closed halo around a round body, and a closed ring around a bright disc on a
+// violet drum was the same picture in the same colour. An opening is a bracket, a halo is a halo.
+// Tilted towards the player rather than away from them: the disc is flat along the cradle's own up,
+// so a lean that turned its face from the camera showed the lens edge-on and the cradle as a bowl with
+// a rim. This way the opening and the lens both face the road.
+const lensTilt = 0.72;
+const lensArc = (3 * Math.PI) / 2;
+// A torus sweep runs from angle 0, so the middle of the opening sits at `(arc + 2π) / 2`; this turns it
+// to the top of the ring, where a cradle opens.
+const lensArcTurn = Math.PI / 2 - (lensArc + Math.PI * 2) / 2;
 const lensBody = (seat: THREE.Object3D, look: TowerLook): THREE.Mesh => {
   structurePart(seat, {
     geometry: new THREE.CylinderGeometry(0.5, 0.56, 0.18, 8),
@@ -286,25 +295,31 @@ const lensBody = (seat: THREE.Object3D, look: TowerLook): THREE.Mesh => {
     roughness: 0.35,
     metalness: 0.5,
   });
-  const frame = structurePart(seat, {
-    geometry: new THREE.TorusGeometry(0.36, 0.055, 8, 24),
+  // The cradle is tilted on a mount of its own, so the lean and the turn of the opening are two
+  // rotations that cannot fight over one axis.
+  const cradle = new THREE.Group();
+  cradle.position.y = 0.78;
+  cradle.rotation.x = lensTilt;
+  seat.add(cradle);
+  const frame = structurePart(cradle, {
+    geometry: new THREE.TorusGeometry(0.36, 0.055, 8, 24, lensArc),
     color: look.roof,
     role: 'towerRoof',
-    y: 0.78,
+    y: 0,
     roughness: 0.28,
     metalness: 0.45,
   });
-  frame.rotation.x = lensTilt;
+  frame.rotation.z = lensArcTurn;
   // Flattened in the geometry rather than in the node's scale, because the scale of this node belongs
   // to the shot flash: a flash that swelled the lens along one axis only would read as a squashed
-  // gem instead of a bright one. The disc is narrower than the ring's aperture on purpose — a lens
-  // that fills its frame reads as a ball in a hoop, and the hole is the whole difference from an enemy.
+  // gem instead of a bright one. The disc is narrower than the aperture on purpose — a lens that
+  // fills its frame reads as a ball in a hoop.
   const lensGeometry = new THREE.SphereGeometry(0.24, 14, 10);
   lensGeometry.scale(1, 0.32, 1);
-  const lens = crystalPart(seat, lensGeometry, look.accent, 0.78, 0.16, 0.1);
+  const lens = crystalPart(cradle, lensGeometry, look.accent, 0, 0.16, 0.1);
   // A sphere is flat along its own Y, so this quarter turn is what puts the lens in the plane of the
-  // ring instead of flat on the post.
-  lens.rotation.x = lensTilt + Math.PI / 2;
+  // cradle instead of flat on the post.
+  lens.rotation.x = Math.PI / 2;
   return lens;
 };
 
@@ -383,9 +398,13 @@ const towerLooks: Record<string, TowerLook> = {
   },
   'grove-lens': {
     accent: 0x8cd6ff,
-    base: 0x2b2740,
-    stem: 0x413a63,
-    roof: 0x8d6bb5,
+    // Pale sage rather than the violet this tower started in. The violet is the wisp's: `0022` gave it
+    // a purple body in a halo, and a violet tower in a violet ring on the same board meant two
+    // readings of one shape in one colour. A desaturated sage is clear of the enemies (orange, amber,
+    // purple), clear of the spire's teal, and the name was asking for it anyway.
+    base: 0x2c3a33,
+    stem: 0x41544a,
+    roof: 0x7f9a86,
     scale: 0.94,
     tiltX: 0,
     tiltZ: 0.02,
