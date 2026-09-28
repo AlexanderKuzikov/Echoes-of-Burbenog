@@ -6,13 +6,13 @@ import type { MatchConfig, MatchSnapshot } from '../game-core/index.ts';
 import { withProbeWeight } from './shared.ts';
 
 // ---------------------------------------------------------------------------------------------
-// The corridor, the core chamber and the build pads.
+// The contour, the core chamber and the build pads.
 //
-// The road is one polyline and the massif is everything the road and the niches do not occupy.
-// Both come out of a single raster, so a wall cannot land on the road and a niche cannot end up
-// walled in — one cut, one truth, and the geometry the player looks at is the geometry the map is.
-// The old plane and its grid are gone with it: on an open field every spot was worth the same, and
-// the channel is what makes a spot worth something.
+// The road is one closed ring plus four approaches, and the massif is everything the road and the
+// niches do not occupy. Both come out of a single raster, so a wall cannot land on the road and a
+// niche cannot end up walled in — one cut, one truth, and the geometry the player looks at is the
+// geometry the map is. The old plane and its grid are gone with it: on an open field every spot was
+// worth the same, and the channel is what makes a spot worth something.
 // ---------------------------------------------------------------------------------------------
 
 export type PadView = {
@@ -68,22 +68,99 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
   const insideBay = (bay: BayDefinition, x: number, z: number): boolean =>
     x >= bay.minX && x <= bay.maxX && z >= bay.minZ && z <= bay.maxZ;
 
+  // Four routes over one road. The contour is walked by all four and each approach by exactly one, and
+  // that difference is what is drawn: taken route by route, the same road gets built four times over,
+  // and a road built twice is a road two copies of which will eventually disagree at a corner. So a
+  // segment is keyed by its two endpoints, counted across the walks, and drawn once. What the raster
+  // and the coverage measure is the same set — the road, not the four ways onto it.
+  type Point = { x: number; z: number };
+  const pointKey = (x: number, z: number): string => `${x},${z}`;
+  const segmentKey = (from: Point, to: Point): string => {
+    const head = pointKey(from.x, from.z);
+    const tail = pointKey(to.x, to.z);
+    return head < tail ? `${head}>${tail}` : `${tail}>${head}`;
+  };
+  const walkCount = new Map<string, number>();
+  for (const route of config.map.routes) {
+    for (let index = 1; index < route.points.length; index += 1) {
+      const key = segmentKey(route.points[index - 1], route.points[index]);
+      walkCount.set(key, (walkCount.get(key) ?? 0) + 1);
+    }
+  }
+
   const roadSegments: RoadSegment[] = [];
+  const contourSegments: RoadSegment[] = [];
+  const counted = new Set<string>();
   for (const route of config.map.routes) {
     for (let index = 1; index < route.points.length; index += 1) {
       const start = route.points[index - 1];
       const end = route.points[index];
-      roadSegments.push({
+      const key = segmentKey(start, end);
+      if (counted.has(key)) {
+        continue;
+      }
+      counted.add(key);
+      const segment: RoadSegment = {
         ax: start.x,
         az: start.z,
         bx: end.x,
         bz: end.z,
         length: Math.hypot(end.x - start.x, end.z - start.z),
-      });
+      };
+      roadSegments.push(segment);
+      if ((walkCount.get(key) ?? 0) > 1) {
+        contourSegments.push(segment);
+      }
     }
   }
   const routeSegmentCount = roadSegments.length;
   const routeLength = roadSegments.reduce((total, segment) => total + segment.length, 0);
+
+  // The contour arrives as a graph, not as a list: the four routes hand it over starting at four
+  // different corners, so the loop is recovered by following endpoints instead of by trusting one
+  // route's order. An approach is already in travel order and is simply cut where the shared part
+  // starts. Both halves come out of the route lists and nothing else, so the picture cannot say a
+  // road the core does not have.
+  const roadDraws: Array<{ name: string; points: Point[] }> = [];
+  if (contourSegments.length > 1) {
+    const contourPoints: Point[] = [{ x: contourSegments[0].ax, z: contourSegments[0].az }];
+    const walked = new Set<number>();
+    let current = contourPoints[0];
+    for (;;) {
+      const next = contourSegments.findIndex((segment, index) => {
+        if (walked.has(index)) {
+          return false;
+        }
+        return (segment.ax === current.x && segment.az === current.z)
+          || (segment.bx === current.x && segment.bz === current.z);
+      });
+      if (next < 0) {
+        break;
+      }
+      const segment = contourSegments[next];
+      walked.add(next);
+      current = segment.ax === current.x && segment.az === current.z
+        ? { x: segment.bx, z: segment.bz }
+        : { x: segment.ax, z: segment.az };
+      contourPoints.push(current);
+      if (current.x === contourPoints[0].x && current.z === contourPoints[0].z) {
+        break;
+      }
+    }
+    roadDraws.push({ name: 'contour:burrow-cross', points: contourPoints });
+  }
+  for (const route of config.map.routes) {
+    const points: Point[] = [route.points[0]];
+    for (let index = 1; index < route.points.length; index += 1) {
+      if ((walkCount.get(segmentKey(route.points[index - 1], route.points[index])) ?? 0) !== 1) {
+        break;
+      }
+      points.push(route.points[index]);
+    }
+    if (points.length > 1) {
+      roadDraws.push({ name: `route:${route.id}`, points });
+    }
+  }
 
   const distanceToSegment = (px: number, pz: number, segment: RoadSegment): number => {
     const deltaX = segment.bx - segment.ax;
@@ -271,14 +348,14 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
   const PATH_Y = 0.08;
   const PATH_EDGE_WIDTH = 0.17;
   const PATH_EDGE_Y = PATH_Y + 0.012;
-  for (const route of config.map.routes) {
-    const ribbon = new THREE.Shape(offsetRibbon(route.points, ROAD_HALF_WIDTH));
+  for (const walk of roadDraws) {
+    const ribbon = new THREE.Shape(offsetRibbon(walk.points, ROAD_HALF_WIDTH));
     // The lit band runs inside the border, so it can never be swallowed by a terrace it did not measure.
     // It breaks where a niche opens onto the road, because a lit line across a niche mouth would seal
     // the one opening the player is looking for, and where the road enters the core chamber, because
     // the channel is supposed to end in the well rather than run into its wall.
-    const outer = offsetEdges(route.points, ROAD_HALF_WIDTH);
-    const inner = offsetEdges(route.points, ROAD_HALF_WIDTH - PATH_EDGE_WIDTH);
+    const outer = offsetEdges(walk.points, ROAD_HALF_WIDTH);
+    const inner = offsetEdges(walk.points, ROAD_HALF_WIDTH - PATH_EDGE_WIDTH);
     const edgeQuads: FlatQuad[] = [];
     for (const side of ['left', 'right'] as const) {
       const border = outer[side];
@@ -307,7 +384,7 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
     road.rotation.x = -Math.PI / 2;
     road.position.y = PATH_Y;
     road.receiveShadow = true;
-    road.name = `route:${route.id}`;
+    road.name = walk.name;
     scene.add(road);
   }
 
@@ -581,6 +658,13 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
     new THREE.MeshStandardMaterial({ color: 0x173a44, emissive: 0x0a262e, emissiveIntensity: 0.8, roughness: 0.86 }),
     'ground',
   );
+  // The base mark is the only marking on the map that is not teal, and that is the whole of its job:
+  // the teal family says "this ground is yours", and the road's mouth is the one piece of ground that
+  // is not. Ember rather than red on purpose — red is the refusal colour, and nothing here is a refusal.
+  const baseMarkMaterial = withProbeWeight(
+    new THREE.MeshStandardMaterial({ color: 0x8a4a2e, emissive: 0x53200f, emissiveIntensity: 0.95, roughness: 0.72 }),
+    'ground',
+  );
   const bayFloorParts: THREE.BufferGeometry[] = [];
   const frameQuads: FlatQuad[] = [];
   for (const bay of trainingCorridor.bays) {
@@ -592,8 +676,9 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
     ]);
     bayFloorParts.push(new THREE.ShapeGeometry(shape));
     // As wide as the niche can spare: a bay is cut to hold a pad, so anything narrower than the frame
-    // would put the marking under the pad it is marking.
-    const frameWidth = Math.min(0.16, Math.max(0.06, (Math.min(bay.maxX - bay.minX, bay.maxZ - bay.minZ) - 1.8) / 2));
+    // would put the marking under the pad it is marking. A two-unit court has a quarter of a unit of
+    // floor outside the pad in it, and that is what the frame is drawn on.
+    const frameWidth = Math.min(0.12, Math.max(0.06, (Math.min(bay.maxX - bay.minX, bay.maxZ - bay.minZ) - 1.5) / 4));
     const inset = 0.05;
     const lowX = bay.minX + inset;
     const highX = bay.maxX - inset;
@@ -607,10 +692,14 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
     );
   }
   // The chamber wears two rings instead of a frame: it is the end of the channel, and a circle says
-  // "well" where a rectangle says "slot". The outer ring is the rim of the well and the inner one stops
-  // at the foot of the plinth, so the crystal stands in a marked circle instead of on bare floor.
+  // "well" where a rectangle says "slot". Both are fractions of the chamber's own radius, so a wider
+  // well is a different number in `trainingCorridor` and not four numbers here to re-derive. The outer
+  // ring is the rim of the well and the inner one stops at the foot of the plinth, so the crystal
+  // stands in a marked circle instead of on bare floor.
   const chamberRings: FlatQuad[] = [];
-  for (const [inner, outer] of [[1.24, 1.48], [0.98, 1.08]] as const) {
+  for (const [inner, outer] of [[0.775, 0.925], [0.6125, 0.675]] as const) {
+    const innerRadius = inner * trainingCorridor.coreChamber.radius;
+    const outerRadius = outer * trainingCorridor.coreChamber.radius;
     const steps = 28;
     for (let step = 0; step < steps; step += 1) {
       const from = (step / steps) * Math.PI * 2;
@@ -619,10 +708,61 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
         trainingCorridor.coreChamber.x + Math.cos(angle) * radius,
         trainingCorridor.coreChamber.z + Math.sin(angle) * radius,
       ];
-      chamberRings.push([at(inner, from), at(outer, from), at(outer, to), at(inner, to)]);
+      chamberRings.push([at(innerRadius, from), at(outerRadius, from), at(outerRadius, to), at(innerRadius, to)]);
     }
   }
-  // One geometry per material, merged again per slot: three draw calls for every marking on the ground,
+  // Each base gets a mark of its own, and it is the one thing this map needs that the corridor did
+  // not: four quarters that the player can point at. Twelve identical pads around one ring read as
+  // one plate with twelve sockets, and nothing on the ground says where any of the four comes in. A
+  // bracket either side of the road's mouth and one tick pointing out of the map say it without a
+  // word — and it is drawn in a colder stone than the teal that means "build here", because a mark in
+  // the build colour at a spot with no pad on it sends the player looking for something that is not
+  // there. The brackets are set outside the road's half width, so the road never covers them.
+  const baseMarkQuads: FlatQuad[] = [];
+  const BASE_MARK_INNER = 1;
+  const BASE_MARK_OUTER = 1.14;
+  const BASE_MARK_ARC = (100 * Math.PI) / 180;
+  const BASE_MARK_STEPS = 12;
+  for (const route of config.map.routes) {
+    const base = route.points[0];
+    const next = route.points[1];
+    if (!base || !next) {
+      continue;
+    }
+    const roadLength = Math.hypot(next.x - base.x, next.z - base.z) || 1;
+    const alongX = (next.x - base.x) / roadLength;
+    const alongZ = (next.z - base.z) / roadLength;
+    const outwardLength = Math.hypot(base.x, base.z) || 1;
+    const outwardX = base.x / outwardLength;
+    const outwardZ = base.z / outwardLength;
+    // Angles measured from the direction the road leaves in: the brackets sit across it, and the tick
+    // sits on the far side, so the three marks read as one arrow pointing into the map.
+    const heading = Math.atan2(alongZ, alongX);
+    const tick = Math.atan2(outwardZ, outwardX);
+    const at = (radius: number, angle: number): EdgePoint => [
+      base.x + Math.cos(angle) * radius,
+      base.z + Math.sin(angle) * radius,
+    ];
+    for (const side of [Math.PI / 2, -Math.PI / 2]) {
+      const middle = heading + side;
+      for (let step = 0; step < BASE_MARK_STEPS; step += 1) {
+        const from = middle - BASE_MARK_ARC / 2 + (step / BASE_MARK_STEPS) * BASE_MARK_ARC;
+        const to = middle - BASE_MARK_ARC / 2 + ((step + 1) / BASE_MARK_STEPS) * BASE_MARK_ARC;
+        baseMarkQuads.push([
+          at(BASE_MARK_INNER, from), at(BASE_MARK_OUTER, from),
+          at(BASE_MARK_OUTER, to), at(BASE_MARK_INNER, to),
+        ]);
+      }
+    }
+    const tickWidth = 0.16;
+    const tickFrom = 1.42;
+    const tickTo = 1.86;
+    baseMarkQuads.push([
+      at(tickFrom, tick - tickWidth), at(tickTo, tick - tickWidth),
+      at(tickTo, tick + tickWidth), at(tickFrom, tick + tickWidth),
+    ]);
+  }
+  // One geometry per material, merged again per slot: four draw calls for every marking on the ground,
   // and a group per bay would have cost one per bay plus one per ring segment.
   const bayFloors = new THREE.Mesh(
     mergeBySlot(
@@ -630,10 +770,11 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
         mergeGeometries(bayFloorParts) as THREE.BufferGeometry,
         flatQuads(NICHE_FRAME_Y - NICHE_FLOOR_Y, [...frameQuads, ...chamberRings]),
         new THREE.CircleGeometry(trainingCorridor.coreChamber.radius, 24),
+        flatQuads(NICHE_FRAME_Y - NICHE_FLOOR_Y, baseMarkQuads),
       ],
-      [0, 1, 2],
+      [0, 1, 2, 3],
     ) as THREE.BufferGeometry,
-    [bayFloorMaterial, bayFrameMaterial, chamberFloorMaterial],
+    [bayFloorMaterial, bayFrameMaterial, chamberFloorMaterial, baseMarkMaterial],
   );
   for (const part of bayFloorParts) {
     part.dispose();
