@@ -175,6 +175,11 @@ type DebugReading = {
     wallBlocks: number;
     openCells: number;
     coreEndsRoute: boolean;
+    // The stand the map is viewed from, the frustum it was fitted into, and what a click on each
+    // niche would do from there.
+    frame: { left: number; right: number; top: number; bottom: number; aspect: number };
+    rig: { azimuth: number; elevation: number; zoom: number; targetX: number; targetZ: number };
+    picks: Array<{ padId: string; pickable: boolean; blocker: string | null; onScreen: boolean }>;
     pads: Array<{
       padId: string;
       x: number;
@@ -1176,6 +1181,105 @@ test('cuts one corridor with niches off the road and pads that differ in what th
     signatures.add(Object.entries(pad.coverage).map(([towerId, covered]) => `${towerId}:${covered}`).join('|'));
   }
   expect(signatures.size).toBe(geometry.pads.length);
+});
+
+test('turns, zooms and slides the map, resets it, and keeps every niche clickable', async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto('/');
+  await expectBooted(page);
+  await enterAsNewMatch(page);
+  await waitForAssetsReady(page);
+
+  const canvas = page.getByTestId('scene-canvas');
+  const box = await canvas.boundingBox();
+  if (!box) {
+    throw new Error('scene canvas has no layout box');
+  }
+  const centreX = box.x + box.width / 2;
+  const centreY = box.y + box.height / 2;
+
+  const opening = await readDebugOrThrow(page);
+  const home = opening.mapGeometry.rig;
+  const homeFrame = opening.mapGeometry.frame;
+  expect(home.zoom).toBe(1);
+  expect(home.targetX).toBe(0);
+  expect(home.targetZ).toBe(0);
+  // The frame is fitted to the channel, so the whole of it is on screen at the view the match opens on
+  // — a map that opens cropped is a map that opened wrong — and it is not so much larger than the
+  // corridor that the map has become a stamp in the middle of the viewport.
+  expect(homeFrame.right - homeFrame.left).toBeLessThan(opening.mapGeometry.routeLength * 2);
+  expect(homeFrame.top - homeFrame.bottom).toBeGreaterThan(4);
+  for (const pick of opening.mapGeometry.picks) {
+    expect(pick.onScreen).toBe(true);
+    expect(pick.blocker).toBeNull();
+  }
+
+  // Left drag turns the map. It is a drag, not a click, so nothing may be built by it.
+  await page.mouse.move(centreX - 260, centreY - 40);
+  await page.mouse.down();
+  await page.mouse.move(centreX - 160, centreY - 20, { steps: 6 });
+  await page.mouse.move(centreX - 40, centreY + 10, { steps: 6 });
+  await page.mouse.up();
+  const turned = await readDebugOrThrow(page);
+  expect(turned.snapshot.towers).toHaveLength(0);
+  expect(turned.mapGeometry.rig.azimuth).not.toBeCloseTo(home.azimuth, 3);
+  expect(turned.mapGeometry.rig.elevation).not.toBeCloseTo(home.elevation, 3);
+  // The honest part: rock in front of a niche means the click misses, so the map has to be built so
+  // that turning it never puts a wall in front of a build site.
+  for (const pick of turned.mapGeometry.picks) {
+    expect(pick.blocker).toBeNull();
+  }
+
+  // The wheel zooms, and stops at both ends instead of turning the map inside out.
+  const wheel = async (deltaY: number, times: number) => {
+    for (let step = 0; step < times; step += 1) {
+      await page.mouse.wheel(0, deltaY);
+    }
+  };
+  await page.mouse.move(centreX, centreY);
+  await wheel(-120, 3);
+  const closer = await readDebugOrThrow(page);
+  expect(closer.mapGeometry.rig.zoom).toBeLessThan(home.zoom);
+  expect(closer.mapGeometry.frame.right - closer.mapGeometry.frame.left).toBeLessThan(
+    turned.mapGeometry.frame.right - turned.mapGeometry.frame.left,
+  );
+  await wheel(120, 20);
+  const far = await readDebugOrThrow(page);
+  expect(far.mapGeometry.rig.zoom).toBeGreaterThan(closer.mapGeometry.rig.zoom);
+  await wheel(-120, 20);
+  const nearest = await readDebugOrThrow(page);
+  expect(nearest.mapGeometry.rig.zoom).toBeLessThanOrEqual(0.5);
+
+  // Right drag slides the map, and cannot walk it off the board.
+  await page.mouse.move(centreX, centreY);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.move(centreX - 180, centreY - 90, { steps: 8 });
+  await page.mouse.up({ button: 'right' });
+  const slid = await readDebugOrThrow(page);
+  expect(slid.mapGeometry.rig.targetX).not.toBeCloseTo(nearest.mapGeometry.rig.targetX, 2);
+  expect(slid.mapGeometry.rig.targetZ).not.toBeCloseTo(nearest.mapGeometry.rig.targetZ, 2);
+  await page.mouse.move(centreX + 400, centreY + 300);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.move(centreX + 40, centreY + 240, { steps: 8 });
+  await page.mouse.up({ button: 'right' });
+  const edge = await readDebugOrThrow(page);
+  expect(Math.abs(edge.mapGeometry.rig.targetX)).toBeLessThanOrEqual(11);
+  expect(Math.abs(edge.mapGeometry.rig.targetZ)).toBeLessThanOrEqual(7);
+
+  // R puts the view back exactly, and a click after all of that still builds.
+  await page.keyboard.press('r');
+  const reset = await readDebugOrThrow(page);
+  expect(reset.mapGeometry.rig.azimuth).toBeCloseTo(home.azimuth, 6);
+  expect(reset.mapGeometry.rig.elevation).toBeCloseTo(home.elevation, 6);
+  expect(reset.mapGeometry.rig.zoom).toBe(home.zoom);
+  expect(reset.mapGeometry.rig.targetX).toBe(0);
+  expect(reset.mapGeometry.rig.targetZ).toBe(0);
+  await expect(page.getByTestId('camera-hint')).toBeVisible();
+
+  await clickPad(page, 'niche-corner');
+  const built = await readDebugOrThrow(page);
+  expect(built.snapshot.pads['niche-corner']).toBe('pulse-spire');
+  expect(built.rendered.towers).toBe(1);
 });
 
 test('places the selected tower on a clicked build pad through the command contract', async ({ page }) => {

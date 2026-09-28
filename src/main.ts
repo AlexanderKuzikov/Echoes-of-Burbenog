@@ -182,10 +182,16 @@ type MapGeometryReading = {
   wallBlocks: number;
   openCells: number;
   coreEndsRoute: boolean;
-  // The frustum the corridor was fitted into, in world units. A map that is silently cropped by a
-  // hardcoded view height is a map the player cannot see, and the numbers are how that gets said out
-  // loud instead of by eye.
+  // The frustum the corridor was fitted into, in world units, plus the stand it was fitted from. A
+  // map that is silently cropped by a hardcoded view height is a map the player cannot see, and the
+  // numbers are how that gets said out loud instead of by eye.
   frame: { left: number; right: number; top: number; bottom: number; aspect: number };
+  fit: { halfWidth: number; halfHeight: number; fitHalfHeight: number; canvasAspect: number };
+  rig: { azimuth: number; elevation: number; zoom: number; targetX: number; targetZ: number };
+  // What a click on each pad would do from where the camera stands right now, and what stands in the
+  // way when it would not. Honest picking means some angles can hide a niche, and the point of
+  // measuring it is that the answer is a number instead of a shrug.
+  picks: Array<{ padId: string; pickable: boolean; blocker: string | null; onScreen: boolean }>;
   pads: Array<{
     padId: string;
     x: number;
@@ -661,14 +667,6 @@ const camera = new THREE.OrthographicCamera(-8, 8, 5, -5, 0.1, 100);
 camera.position.set(9, 10, 9);
 camera.lookAt(cameraTarget);
 
-// The horizontal part of the view direction, and the only thing the massif layout reads. A wall
-// standing between the viewer and the channel is what hides the road, so height is spent on the far
-// bank and withheld from the near one. This is the diorama rule, and it is a layout decision, not a
-// lighting one: the same cells are cut from the same raster either way.
-const VIEW_DIRECTION = new THREE.Vector3().subVectors(camera.position, cameraTarget).setY(0).normalize();
-const VIEW_DIR_X = VIEW_DIRECTION.x;
-const VIEW_DIR_Z = VIEW_DIRECTION.z;
-
 const hemisphereLight = new THREE.HemisphereLight(0xa9c9e8, 0x142329, 2.2);
 scene.add(hemisphereLight);
 
@@ -848,15 +846,13 @@ const insideBay = (bay: BayDefinition, x: number, z: number): boolean =>
   x >= bay.minX && x <= bay.maxX && z >= bay.minZ && z <= bay.maxZ;
 
 const openCells = new Uint8Array(rasterColumns * rasterRows);
-const corridorBounds = { minX: Number.POSITIVE_INFINITY, maxX: Number.NEGATIVE_INFINITY, minZ: Number.POSITIVE_INFINITY, maxZ: Number.NEGATIVE_INFINITY };
-const noteBounds = (x: number, z: number) => {
-  corridorBounds.minX = Math.min(corridorBounds.minX, x);
-  corridorBounds.maxX = Math.max(corridorBounds.maxX, x);
-  corridorBounds.minZ = Math.min(corridorBounds.minZ, z);
-  corridorBounds.maxZ = Math.max(corridorBounds.maxZ, z);
-};
+// Every open cell, as a point to frame. The fit used to measure the rectangle around the corridor,
+// which is mostly rock: fitting that meant either cropping the road or pushing the camera so far back
+// that the road became a stamp. The channel itself is what has to be on screen, and the rock behind
+// it is allowed to run off the edges.
+const corridorSamplePoints: Array<[number, number]> = [];
 for (const point of config.map.routes.flatMap((route) => route.points)) {
-  noteBounds(point.x, point.z);
+  corridorSamplePoints.push([point.x, point.z]);
 }
 
 for (let row = 0; row < rasterRows; row += 1) {
@@ -873,15 +869,16 @@ for (let row = 0; row < rasterRows; row += 1) {
     }
     openCells[cellIndex(column, row)] = open ? 1 : 0;
     if (open) {
-      noteBounds(x, z);
+      corridorSamplePoints.push([x, z]);
     }
   }
 }
 
-// Height classes, 0 lowest. The rim (one cell from anything open) stays low all round, so the edge
-// of the channel is a lip the eye can see over and a shot can fly over; behind it the far bank
-// climbs to give the corridor a wall to run against, while the near bank stays low because a tall
-// wall there is a wall in front of the road.
+// Height classes by distance into the rock, and nothing else. An earlier version also asked which
+// side of the channel a cell was on relative to the viewer and kept the near bank low, which is a
+// nice picture from exactly one angle and a wall across the road from every other. Terraces keyed to
+// depth alone are symmetric, so the map can be turned all the way round and the road stays readable
+// — and the ramp is steep enough that a terrace never stands tall enough to hide the road it borders.
 const WALL_HEIGHTS = [0.34, 0.68, 1.4, 1.95] as const;
 // Distance to the open area, by breadth-first search from every open cell at once. The queue is
 // walked with a moving index and not with `pop()`: a stack gives a depth-first order, and a
@@ -889,7 +886,6 @@ const WALL_HEIGHTS = [0.34, 0.68, 1.4, 1.95] as const;
 // get the depth of the detour that reached them, which turns "how deep into the rock is this" into
 // "which seed did the walker start from".
 const openDistance = new Int32Array(rasterColumns * rasterRows).fill(-1);
-const openParent = new Int32Array(rasterColumns * rasterRows).fill(-1);
 const frontier: number[] = [];
 for (let index = 0; index < openCells.length; index += 1) {
   if (openCells[index] === 1) {
@@ -916,29 +912,19 @@ for (let cursor = 0; cursor < frontier.length; cursor += 1) {
       continue;
     }
     openDistance[next] = openDistance[index] + 1;
-    openParent[next] = index;
     frontier.push(next);
   }
 }
 
-const cellXOf = (index: number): number => cellCenterX(index % rasterColumns);
-const cellZOf = (index: number): number => {
-  const column = index % rasterColumns;
-  return cellCenterZ((index - column) / rasterColumns);
-};
-
 const wallHeightClass = (index: number): number => {
   const distance = openDistance[index];
-  const parent = openParent[index];
-  if (distance <= 1 || parent < 0) {
+  if (distance <= 1) {
     return 0;
   }
-  const awayX = cellXOf(index) - cellXOf(parent);
-  const awayZ = cellZOf(index) - cellZOf(parent);
-  if (awayX * VIEW_DIR_X + awayZ * VIEW_DIR_Z > 0) {
+  if (distance <= 3) {
     return 1;
   }
-  return distance <= 2 ? 1 : distance <= 4 ? 2 : 3;
+  return distance <= 6 ? 2 : 3;
 };
 
 type WallRect = { minX: number; minZ: number; width: number; depth: number; heightClass: number };
@@ -1006,7 +992,10 @@ const wallHighMaterial = withProbeWeight(
 );
 
 // Every rect of a height class becomes one box, and the boxes of a material become one mesh. A
-// carved massif of a few hundred cells costs two draw calls, not three hundred.
+// carved massif of a few hundred cells costs two draw calls, not three hundred. The meshes also go
+// into the pick list, because rock in front of a niche is rock in the way of a click.
+const wallPickTargets: THREE.Mesh[] = [];
+
 const buildWallGroup = (name: string, material: THREE.Material, classes: readonly number[]): number => {
   const parts: THREE.BufferGeometry[] = [];
   for (const rect of wallRects) {
@@ -1033,6 +1022,7 @@ const buildWallGroup = (name: string, material: THREE.Material, classes: readonl
   mesh.receiveShadow = true;
   mesh.name = name;
   scene.add(mesh);
+  wallPickTargets.push(mesh);
   return parts.length;
 };
 
@@ -1957,50 +1947,114 @@ for (const option of buildOptions) {
   });
 }
 
-// Framing is measured, not guessed: the corridor's own bounds (plus the rim around it and the height
-// of the tallest bank) are projected into the camera and the frustum is grown to whatever aspect the
-// canvas happens to have. A hardcoded view height was two numbers that only ever fit one window.
+// The camera is a stand, not a camera in the photographic sense: an orthographic frustum fitted to
+// the corridor from a direction the player controls. Distance is fixed, because the fog, the near and
+// far planes and every shadow were tuned against it; what moves is where the stand is (azimuth,
+// elevation), what it looks at (the target) and how much of the map the frustum covers (zoom).
+const CAMERA_RADIUS = 16.16;
+const CAMERA_AZIMUTH_STEP = 0.0072;
+const CAMERA_ELEVATION_STEP = 0.005;
+const CAMERA_MIN_ELEVATION = 0.42;
+const CAMERA_MAX_ELEVATION = 1.16;
+const CAMERA_MIN_ZOOM = 0.5;
+const CAMERA_MAX_ZOOM = 3.2;
+const CAMERA_PAN_LIMIT_X = config.map.width / 2 - 1.5;
+const CAMERA_PAN_LIMIT_Z = config.map.depth / 2 - 1.5;
+const CAMERA_FRAME_BIAS = 0.1;
+// A drag that ends here was a click, and a click is a placement. Below it, the gesture was a swipe
+// across the map and placing a tower by accident is worse than not placing one.
+const CAMERA_CLICK_SLOP_PX = 4;
+
+const cameraRig = {
+  azimuth: Math.PI / 4,
+  elevation: Math.asin(10 / CAMERA_RADIUS),
+  zoom: 1,
+  targetX: 0,
+  targetZ: 0,
+};
+
+const defaultCameraRig = { ...cameraRig };
+
+const placeCamera = (): void => {
+  const horizontal = Math.cos(cameraRig.elevation) * CAMERA_RADIUS;
+  camera.position.set(
+    cameraRig.targetX + horizontal * Math.sin(cameraRig.azimuth),
+    Math.sin(cameraRig.elevation) * CAMERA_RADIUS,
+    cameraRig.targetZ + horizontal * Math.cos(cameraRig.azimuth),
+  );
+  camera.lookAt(cameraTarget.set(cameraRig.targetX, 0, cameraRig.targetZ));
+  camera.updateMatrixWorld(true);
+};
+
+const resetCamera = (): void => {
+  Object.assign(cameraRig, defaultCameraRig);
+  applyCameraRig();
+};
+
+// How much vertical world the frustum holds at zoom 1, measured from the corridor rather than
+// guessed. `max(height, width / aspect)` is the only frustum that both contains the bounds and has
+// the canvas's aspect: anything else either distorts the map or crops it. A hardcoded view height was
+// two numbers that only ever fit one window.
 const FRAME_MARGIN = 1.2;
-const NARROW_ASPECT_ZOOM_CAP = 1.9;
 const framePoint = new THREE.Vector3();
 
-const frameCorridor = (aspect: number): void => {
-  const { minX, maxX, minZ, maxZ } = corridorBounds;
-  const pad = CELL_SIZE * 2;
-  camera.position.set(9, 10, 9);
-  camera.lookAt(cameraTarget);
-  camera.updateMatrixWorld(true);
+const measureCorridor = (): { centerX: number; centerY: number; halfWidth: number; halfHeight: number } => {
   let left = Number.POSITIVE_INFINITY;
   let right = Number.NEGATIVE_INFINITY;
   let bottom = Number.POSITIVE_INFINITY;
   let top = Number.NEGATIVE_INFINITY;
-  for (const x of [minX - pad, maxX + pad]) {
-    for (const z of [minZ - pad, maxZ + pad]) {
-      for (const y of [0, WALL_HEIGHTS[WALL_HEIGHTS.length - 1]]) {
-        const view = framePoint.set(x, y, z).applyMatrix4(camera.matrixWorldInverse);
-        left = Math.min(left, view.x);
-        right = Math.max(right, view.x);
-        bottom = Math.min(bottom, view.y);
-        top = Math.max(top, view.y);
-      }
+  for (const [x, z] of corridorSamplePoints) {
+    for (const y of [0, WALL_HEIGHTS[0]]) {
+      const view = framePoint.set(x, y, z).applyMatrix4(camera.matrixWorldInverse);
+      left = Math.min(left, view.x);
+      right = Math.max(right, view.x);
+      bottom = Math.min(bottom, view.y);
+      top = Math.max(top, view.y);
     }
   }
-  const centerX = (left + right) / 2;
-  const centerY = (bottom + top) / 2;
-  let halfWidth = ((right - left) / 2) * FRAME_MARGIN;
-  let halfHeight = ((top - bottom) / 2) * FRAME_MARGIN;
-  if (halfWidth / halfHeight > aspect) {
-    halfHeight = halfWidth / aspect;
-  } else {
-    // A window narrower than the map would otherwise be answered by pulling the camera so far back
-    // that the map becomes a stamp. Past a point, cropping the frame edges beats that.
-    halfWidth = Math.min(halfWidth, halfHeight * aspect * NARROW_ASPECT_ZOOM_CAP);
-    halfHeight = halfWidth / aspect;
-  }
+  return {
+    centerX: (left + right) / 2,
+    centerY: (bottom + top) / 2,
+    halfWidth: ((right - left) / 2) * FRAME_MARGIN,
+    halfHeight: ((top - bottom) / 2) * FRAME_MARGIN,
+  };
+};
+
+// The scale is measured once per viewport, from the view the match opens on, and then held. A camera
+// that also zooms while it turns is two controls arguing: turn far enough and the map silently
+// shrinks, so the player loses their bearings and never asked for it. Turning moves the frustum
+// across the map, the wheel changes the scale on purpose, and the two never touch each other. Turning
+// far enough that the corridor no longer fits is the player's cue to reach for the wheel.
+let fitHalfHeight = 5.4;
+
+const measureHomeFit = (aspect: number): number => {
+  const azimuth = cameraRig.azimuth;
+  const elevation = cameraRig.elevation;
+  cameraRig.azimuth = defaultCameraRig.azimuth;
+  cameraRig.elevation = defaultCameraRig.elevation;
+  placeCamera();
+  const { halfWidth, halfHeight } = measureCorridor();
+  cameraRig.azimuth = azimuth;
+  cameraRig.elevation = elevation;
+  placeCamera();
+  return Math.max(halfHeight, halfWidth / aspect);
+};
+
+const applyCameraRig = (): void => {
+  placeCamera();
+  const aspect = (renderer.domElement.clientWidth || 1) / (renderer.domElement.clientHeight || 1);
+  const { centerX, centerY } = measureCorridor();
+  const halfHeight = fitHalfHeight * cameraRig.zoom;
+  const halfWidth = halfHeight * aspect;
+  // Biased down a little: the channel's own centre puts the core chamber under the sector caption in
+  // the top corner, and the thing being defended should not open the match hidden behind a label. The
+  // space it moves into is the rock below the road, which is the one part of the frame with nothing
+  // in it.
+  const centreY = centerY - halfHeight * CAMERA_FRAME_BIAS;
   camera.left = centerX - halfWidth;
   camera.right = centerX + halfWidth;
-  camera.top = centerY + halfHeight;
-  camera.bottom = centerY - halfHeight;
+  camera.top = centreY + halfHeight;
+  camera.bottom = centreY - halfHeight;
   camera.updateProjectionMatrix();
 };
 
@@ -2015,7 +2069,8 @@ const resize = () => {
   }
   appliedViewportWidth = width;
   appliedViewportHeight = height;
-  frameCorridor(width / height);
+  fitHalfHeight = measureHomeFit(width / height);
+  applyCameraRig();
   renderer.setSize(width, height, false);
 };
 
@@ -3761,13 +3816,17 @@ const adoptEventCounts = (counts: Readonly<EventTally>): void => {
 };
 
 const PAD_PICK_HEIGHT = 0.19;
-// techdebt: fixed generous hit radius, no occlusion test against towers; revisit when camera zoom or drag-rotate lands.
-const PAD_PICK_RADIUS = 0.85;
-const padPickPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -PAD_PICK_HEIGHT);
 const padRaycaster = new THREE.Raycaster();
 const pointerNdc = new THREE.Vector2();
-const planeHit = new THREE.Vector3();
 const projectedPad = new THREE.Vector3();
+
+// Picking is a raycast against the pads and the rock together, and the nearest hit decides. The
+// earlier version hit the pads and, failing that, took the nearest pad within a fixed radius of a
+// point on the ground — which is a guess that only agreed with the picture while the camera stood
+// still. Now that the map can be turned, a guess would build a tower in a place the player cannot
+// see, so rock in front of a pad means the click misses. The road and the niche floors are not in
+// the list: they are the ground, eight centimetres above it, and no sight-line runs under them.
+const pickTargets: THREE.Object3D[] = [...padPickTargets, ...wallPickTargets];
 
 const pickPad = (clientX: number, clientY: number): string | null => {
   const rect = renderer.domElement.getBoundingClientRect();
@@ -3777,26 +3836,9 @@ const pickPad = (clientX: number, clientY: number): string | null => {
   pointerNdc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
   pointerNdc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
   padRaycaster.setFromCamera(pointerNdc, camera);
-
-  const [direct] = padRaycaster.intersectObjects(padPickTargets, false);
-  const directPadId = direct?.object.userData.padId;
-  if (typeof directPadId === 'string') {
-    return directPadId;
-  }
-
-  if (!padRaycaster.ray.intersectPlane(padPickPlane, planeHit)) {
-    return null;
-  }
-  let nearestPadId: string | null = null;
-  let nearestDistance = PAD_PICK_RADIUS;
-  for (const pad of config.map.buildPads) {
-    const distance = Math.hypot(planeHit.x - pad.position.x, planeHit.z - pad.position.z);
-    if (distance <= nearestDistance) {
-      nearestDistance = distance;
-      nearestPadId = pad.id;
-    }
-  }
-  return nearestPadId;
+  const [nearest] = padRaycaster.intersectObjects(pickTargets, false);
+  const padId = nearest?.object.userData.padId;
+  return typeof padId === 'string' ? padId : null;
 };
 
 const projectPadToCanvas = (padId: string): { padId: string; x: number; y: number } | null => {
@@ -3824,6 +3866,124 @@ const flashPadError = (padId: string) => {
   }
 };
 
+// Camera gestures, and the one rule that keeps them from eating placements: a pointer that travels
+// further than the slop was a drag, so the placement only fires for a press that stayed put. Left
+// drag turns the map, right drag slides it, the wheel zooms, and R puts the view back. Every one of
+// them ends up in `cameraRig` and one function applies it — there is no second copy of the view.
+type CameraGesture = 'orbit' | 'pan' | null;
+
+let cameraGesture: CameraGesture = null;
+let cameraGestureMoved = false;
+let gestureStartX = 0;
+let gestureStartY = 0;
+let gestureAzimuth = 0;
+let gestureElevation = 0;
+let gestureTargetX = 0;
+let gestureTargetZ = 0;
+
+const applyCameraGesture = (event: PointerEvent): void => {
+  const deltaX = event.clientX - gestureStartX;
+  const deltaY = event.clientY - gestureStartY;
+  if (Math.hypot(deltaX, deltaY) > CAMERA_CLICK_SLOP_PX) {
+    cameraGestureMoved = true;
+  }
+  if (cameraGesture === 'orbit') {
+    cameraRig.azimuth = gestureAzimuth - deltaX * CAMERA_AZIMUTH_STEP;
+    cameraRig.elevation = Math.min(
+      CAMERA_MAX_ELEVATION,
+      Math.max(CAMERA_MIN_ELEVATION, gestureElevation + deltaY * CAMERA_ELEVATION_STEP),
+    );
+  } else if (cameraGesture === 'pan') {
+    // Pan is in the ground plane, so the pointer's pixels have to become world units through the
+    // camera's own basis: a fixed number per pixel would move the map twice as fast at one zoom as at
+    // another, and in the wrong direction at some azimuths.
+    const unitsPerPixel = (camera.right - camera.left) / Math.max(1, renderer.domElement.clientWidth);
+    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
+    const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+    cameraRig.targetX = Math.min(
+      CAMERA_PAN_LIMIT_X,
+      Math.max(-CAMERA_PAN_LIMIT_X, gestureTargetX - (right.x * deltaX - up.x * deltaY) * unitsPerPixel),
+    );
+    cameraRig.targetZ = Math.min(
+      CAMERA_PAN_LIMIT_Z,
+      Math.max(-CAMERA_PAN_LIMIT_Z, gestureTargetZ - (right.z * deltaX - up.z * deltaY) * unitsPerPixel),
+    );
+  }
+  if (cameraGestureMoved) {
+    applyCameraRig();
+  }
+};
+
+renderer.domElement.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0 && event.button !== 2) {
+    return;
+  }
+  cameraGesture = event.button === 0 ? 'orbit' : 'pan';
+  cameraGestureMoved = false;
+  gestureStartX = event.clientX;
+  gestureStartY = event.clientY;
+  gestureAzimuth = cameraRig.azimuth;
+  gestureElevation = cameraRig.elevation;
+  gestureTargetX = cameraRig.targetX;
+  gestureTargetZ = cameraRig.targetZ;
+  try {
+    renderer.domElement.setPointerCapture(event.pointerId);
+  } catch {
+    // Capture keeps a drag alive when the pointer leaves the canvas. A pointer id that was never
+    // really down has nothing to capture, and that is not a reason to drop the gesture.
+  }
+});
+
+renderer.domElement.addEventListener('pointermove', (event) => {
+  if (cameraGesture === null) {
+    return;
+  }
+  applyCameraGesture(event);
+});
+
+const endCameraGesture = (event: PointerEvent): void => {
+  if (cameraGesture === null) {
+    return;
+  }
+  cameraGesture = null;
+  if (renderer.domElement.hasPointerCapture(event.pointerId)) {
+    renderer.domElement.releasePointerCapture(event.pointerId);
+  }
+};
+
+renderer.domElement.addEventListener('pointerup', endCameraGesture);
+renderer.domElement.addEventListener('pointercancel', endCameraGesture);
+// A right drag is a camera gesture, not a request for the browser's menu, and the menu would sit
+// exactly where the player is trying to look.
+renderer.domElement.addEventListener('contextmenu', (event) => {
+  event.preventDefault();
+});
+
+renderer.domElement.addEventListener(
+  'wheel',
+  (event) => {
+    event.preventDefault();
+    // Scaled by the delta, not by its sign: a trackpad and a notched wheel report different amounts
+    // per notch, and both should feel like the same zoom per notch. Capped per event so one violent
+    // flick cannot jump the whole range.
+    const step = Math.max(-0.35, Math.min(0.35, event.deltaY * 0.0015));
+    cameraRig.zoom = Math.min(CAMERA_MAX_ZOOM, Math.max(CAMERA_MIN_ZOOM, cameraRig.zoom + step));
+    applyCameraRig();
+  },
+  { passive: false },
+);
+
+window.addEventListener('keydown', (event) => {
+  if (event.key !== 'r' && event.key !== 'R' && event.key !== 'к' && event.key !== 'К') {
+    return;
+  }
+  const target = event.target as HTMLElement | null;
+  if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+    return;
+  }
+  resetCamera();
+});
+
 // A pad click and Start Wave are the only two ways a player starts anything, and both go through the one
 // function that decides where the intent goes. There is no third path and no mode that builds locally.
 const attemptPlacement = (padId: string) => {
@@ -3831,6 +3991,12 @@ const attemptPlacement = (padId: string) => {
 };
 
 renderer.domElement.addEventListener('click', (event) => {
+  if (cameraGestureMoved) {
+    // The press that became a drag already moved the camera; placing on the way up would be a tower
+    // the player never aimed at.
+    cameraGestureMoved = false;
+    return;
+  }
   const padId = pickPad(event.clientX, event.clientY);
   if (padId) {
     attemptPlacement(padId);
@@ -4059,6 +4225,30 @@ window.__ECHOES_DEBUG__ = {
         bottom: camera.bottom,
         aspect: (camera.right - camera.left) / (camera.top - camera.bottom),
       },
+      fit: {
+        ...measureCorridor(),
+        fitHalfHeight,
+        canvasAspect:
+          (renderer.domElement.clientWidth || 1) / (renderer.domElement.clientHeight || 1),
+      },
+      rig: { ...cameraRig },
+      picks: config.map.buildPads.map((pad) => {
+        const point = projectPadToCanvas(pad.id);
+        const rect = renderer.domElement.getBoundingClientRect();
+        if (!point) {
+          return { padId: pad.id, pickable: false, blocker: 'off-screen', onScreen: false };
+        }
+        pointerNdc.set((point.x / rect.width) * 2 - 1, -((point.y / rect.height) * 2 - 1));
+        padRaycaster.setFromCamera(pointerNdc, camera);
+        const [nearest] = padRaycaster.intersectObjects(pickTargets, false);
+        const hitPadId = nearest?.object.userData.padId;
+        return {
+          padId: pad.id,
+          pickable: hitPadId === pad.id,
+          blocker: hitPadId === pad.id ? null : nearest?.object.name || 'nothing',
+          onScreen: point.x >= 0 && point.x <= rect.width && point.y >= 0 && point.y <= rect.height,
+        };
+      }),
       coreEndsRoute: config.map.routes.some((route) => {
         const last = route.points[route.points.length - 1];
         return last.x === config.map.corePosition.x && last.z === config.map.corePosition.z;

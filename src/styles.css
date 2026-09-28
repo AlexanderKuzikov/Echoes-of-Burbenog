@@ -535,6 +535,24 @@ h1 {
   background: #e46c62;
 }
 
+/* The camera controls are told in words, not drawn as buttons: they are held, not pressed, and a
+   hint that cannot be pressed is cheaper than a dock control that can. The border keeps it from
+   reading as a fourth legend entry with no mark. */
+.map-legend [data-testid="camera-hint"] {
+  padding-left: 12px;
+  border-left: 1px solid rgba(143, 184, 184, 0.2);
+  color: #7e9b9a;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+
+@media (max-width: 1024px) {
+  .map-legend [data-testid="camera-hint"] {
+    display: none;
+  }
+}
+
 .selection-card {
   right: 20px;
   top: 50%;
