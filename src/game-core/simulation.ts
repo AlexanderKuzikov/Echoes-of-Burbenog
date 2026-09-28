@@ -542,6 +542,20 @@ export class Simulation {
           this.state.enemies = [];
           return;
         }
+        if (route.circuit !== true) {
+          // An ordinary route ends here: the enemy has arrived and leaves, so the leak is spent.
+          continue;
+        }
+        // A circuit does not end the walk. The lap is paid for and the enemy comes round again,
+        // which is what lets a wave be survived by letting it past and killing it on a later pass.
+        // Position is taken from the remainder of the lap rather than from the route start, so a
+        // fast enemy keeps its place instead of snapping to the entry on every circuit.
+        const wrapped = nextDistance - route.totalLength;
+        enemy.distance = wrapped;
+        const position = pointAtDistance(route, wrapped);
+        enemy.x = position.x;
+        enemy.z = position.z;
+        survivors.push(enemy);
         continue;
       }
       enemy.distance = nextDistance;

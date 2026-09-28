@@ -68,6 +68,13 @@ export type BuildPadDefinition = {
 export type RouteDefinition = {
   id: string;
   points: Vec2[];
+  /**
+   * A circuit is walked over and over. An ordinary route ends at the core: the enemy arrives, deals
+   * its damage and is gone, so every leak is final. A circuit deals the same damage and starts the
+   * lap again, which is what makes an early wave survivable by letting things past and killing them
+   * on a later pass — and it is the only reason a match can hold more waves than the core has health.
+   */
+  circuit?: boolean;
 };
 
 export type MapDefinition = {
