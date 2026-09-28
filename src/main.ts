@@ -1,12 +1,15 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
-import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { TICK_RATE, createSimulation, createTrainingScenario } from './game-core/index.ts';
 import type { Command, CommandResult, MatchSnapshot, MatchStatus, SimulationEvent } from './game-core/index.ts';
-import { trainingCorridor } from './game-core/scenario.ts';
-import type { BayDefinition } from './game-core/scenario.ts';
+import { createMap, WALL_HEIGHTS } from './client/map.ts';
+import { createTowers } from './client/towers.ts';
+import type { LoadedModel, TowerClipReading, TowerModelReading } from './client/towers.ts';
+import { createEnemies } from './client/enemies.ts';
+import { createCombatFx } from './client/combat-fx.ts';
+import { PROBE_WEIGHTS, isProbeMaterial, setEnvironmentTexture, withProbeWeight } from './client/shared.ts';
+import type { ProbeMaterialReading, ProbeRole } from './client/shared.ts';
 import {
   CONTENT_VERSION,
   DEFAULT_SESSION_PORT,
@@ -310,19 +313,6 @@ type DebugState = {
 
 type FeedbackState = 'idle' | 'accepted' | 'rejected' | 'terminal';
 
-type CombatBurst = {
-  mesh: THREE.Mesh;
-  started: number;
-  duration: number;
-};
-
-type ShotTrace = {
-  beam: THREE.Mesh;
-  flash: THREE.Mesh;
-  started: number;
-  duration: number;
-};
-
 type EventFeedEntry = {
   type: SimulationEvent['type'];
   text: string;
@@ -332,107 +322,6 @@ type BuildOption = {
   button: HTMLButtonElement;
   towerId: string;
   name: string;
-};
-
-type PadView = {
-  id: string;
-  base: THREE.Mesh;
-  ring: THREE.Mesh;
-  occupied: boolean;
-  errorUntil: number;
-};
-
-type LoadedModel = {
-  entry: ModelManifestEntry;
-  scene: THREE.Group;
-  emissiveNode: string;
-  clips: THREE.AnimationClip[];
-};
-
-type TowerModelReading = {
-  entityId: number;
-  towerId: string;
-  source: 'procedural' | 'model';
-  modelId: string | null;
-  meshCount: number;
-  crystalNode: string | null;
-  crystalBaseY: number;
-  crystalY: number;
-  crystalScale: number;
-  crystalEmissive: number;
-  // Null on a tower without a skeleton. `time` and `pose` are the facts the determinism claim rests
-  // on: the same tick has to give the same two numbers in a run and in the replay of that run.
-  clip: TowerClipReading | null;
-};
-
-type TowerClipReading = {
-  clipName: string;
-  duration: number;
-  // Slot-derived offset the clip starts at, in seconds. Two spires never stand in the same pose,
-  // and the offset comes from the order the towers were built, so it replays with them.
-  phase: number;
-  time: number;
-  playing: boolean;
-  boneName: string;
-  pose: [number, number, number, number];
-};
-
-type ProbeMaterialReading = {
-  // Scene-graph path of the mesh that owns the material, which is what localises a material whose
-  // role was never declared.
-  path: string;
-  className: string;
-  // The role that declared this material's weight, or null when nothing declared one.
-  role: string | null;
-  envMapIntensity: number;
-  // Whether the material owns the probe itself. A standard material without its own `envMap` has
-  // its `envMapIntensity` overwritten by the renderer, so a weight reported without this flag is
-  // a value the picture never saw.
-  ownsProbe: boolean;
-  // Instance identity: two views of one model must never report the same one, or they would be
-  // sharing a material and a crystal flash would light every view of that tower at once.
-  materialId: string;
-  // True only when a declared role is present, the material carries that role's weight, and the
-  // renderer will actually read it.
-  explicit: boolean;
-};
-
-// The animated part of a tower view. It is presentation state and lives with the view: the
-// snapshot does not know it exists, and nothing in the simulation reads it. `applied` is the
-// presentation time the clip has been brought up to, so the update is a difference between two
-// readings of one clock and never a function of where in the frame the view was created.
-type TowerClip = {
-  mixer: THREE.AnimationMixer;
-  action: THREE.AnimationAction;
-  clipName: string;
-  duration: number;
-  phase: number;
-  bone: THREE.Bone;
-  applied: number;
-};
-
-type TowerView = {
-  towerId: string;
-  group: THREE.Group;
-  crystal: THREE.Mesh;
-  crystalMaterial: THREE.MeshStandardMaterial;
-  // The idle bob is measured from wherever the emissive node starts, so a loaded model and
-  // the procedural placeholder cannot drift apart on a hardcoded height.
-  crystalBaseY: number;
-  source: 'procedural' | 'model';
-  modelId: string | null;
-  clip: TowerClip | null;
-  firedUntil: number;
-  aimAngle: number;
-  // Releases exactly what this view owns: the geometry and the source materials of a loaded
-  // model stay with the registry, or the next view of the same model would get a disposed one.
-  release: () => void;
-};
-
-type EnemyView = {
-  group: THREE.Group;
-  body: THREE.Mesh;
-  healthFill: THREE.Mesh;
 };
 
 declare global {
@@ -615,52 +504,11 @@ scene.environment = environmentTarget.texture;
 roomEnvironment.dispose();
 pmremGenerator.dispose();
 
-// The share of the environment probe each material takes, and the only dimmer left in the scene.
-// `envMapIntensity` defaults to 1, so leaving a material unset would read as "full probe" — the
-// wrong default for a deliberately dark tactical read. Ground and routes take almost none of it:
-// a rough near-dielectric surface gains nothing from a soft room and only loses the slate it was
-// authored as. The share grows with the metalness of the part, and the generated model keeps the
-// whole probe, because it is the reason the probe exists.
-const PROBE_WEIGHTS = {
-  ground: 0.1,
-  path: 0.15,
-  padBase: 0.2,
-  towerBase: 0.25,
-  towerStem: 0.35,
-  towerRoof: 0.4,
-  towerCrystal: 0.3,
-  enemyBody: 0.2,
-  enemyCrest: 0.25,
-  coreBase: 0.3,
-  coreCrystal: 0.45,
-  model: 1,
-} as const;
-
-type ProbeRole = keyof typeof PROBE_WEIGHTS;
-
-// Writes the declared weight onto the material and names the role that declared it. The stamp is
-// what tells "set on purpose" apart from "inherited": 1 is both the Three.js default and the
-// weight of the generated model, so the value alone cannot.
-//
-// The `envMap` line is load-bearing and must not be "cleaned up". Three.js only reads
-// `material.envMapIntensity` when the material owns an `envMap`: with `envMap === null` and the
-// probe on `scene.environment`, the renderer overwrites that uniform with the scene's own
-// `environmentIntensity` and the weight below is silently ignored. Measured on a frozen midwave
-// frame, dropping this line brightens the ground by about 16 levels of luminance instead of
-// darkening it, while every reported weight still reads as declared. Owning the probe is what
-// makes this the last dimmer in the scene: with no material left on the scene path, a scene-wide
-// multiplier has nothing left to multiply.
-const withProbeWeight = <T extends THREE.MeshStandardMaterial>(material: T, role: ProbeRole): T => {
-  material.envMap = environmentTarget.texture;
-  material.envMapIntensity = PROBE_WEIGHTS[role];
-  material.userData.probeRole = role;
-  return material;
-};
-
-// `MeshPhysicalMaterial` extends `MeshStandardMaterial`, so this single check covers both classes
-// that sample the probe. `MeshBasicMaterial` and `PointsMaterial` never read it and stay untouched.
-const isProbeMaterial = (material: THREE.Material): material is THREE.MeshStandardMaterial =>
-  material instanceof THREE.MeshStandardMaterial;
+// The one prefiltered probe texture of the page, handed to the shared block that writes probe
+// weights. A material that takes a share of the probe has to own this texture by name — `three`
+// reads `envMapIntensity` only for a material that holds an `envMap` of its own — and the page is
+// the only place it is made.
+setEnvironmentTexture(environmentTarget.texture);
 
 const cameraTarget = new THREE.Vector3(0, 0, 0);
 const camera = new THREE.OrthographicCamera(-8, 8, 5, -5, 0.1, 100);
@@ -700,794 +548,24 @@ ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
 scene.add(ground);
 
-// ---------------------------------------------------------------------------------------------
-// The corridor.
-//
-// The road is one polyline and the massif is everything the road and the niches do not occupy.
-// Both come out of a single raster, so a wall cannot land on the road and a niche cannot end up
-// walled in — one cut, one truth, and the geometry the player looks at is the geometry the map is.
-// The old plane and its grid are gone with it: on an open field every spot was worth the same, and
-// the channel is what makes a spot worth something.
-// ---------------------------------------------------------------------------------------------
+// The corridor, the massif, the niche floors, the core chamber and the pads. Four domains
+// share this file, so the map is the one that owns the ground a match is fought on.
+const mapPresentation = createMap(scene, config);
 
-const ROAD_HALF_WIDTH = trainingCorridor.roadHalfWidth;
-
-type RoadSegment = { ax: number; az: number; bx: number; bz: number; length: number };
-const roadSegments: RoadSegment[] = [];
-for (const route of config.map.routes) {
-  for (let index = 1; index < route.points.length; index += 1) {
-    const start = route.points[index - 1];
-    const end = route.points[index];
-    roadSegments.push({
-      ax: start.x,
-      az: start.z,
-      bx: end.x,
-      bz: end.z,
-      length: Math.hypot(end.x - start.x, end.z - start.z),
-    });
-  }
-}
-const routeSegmentCount = roadSegments.length;
-const routeLength = roadSegments.reduce((total, segment) => total + segment.length, 0);
-
-const distanceToSegment = (px: number, pz: number, segment: RoadSegment): number => {
-  const deltaX = segment.bx - segment.ax;
-  const deltaZ = segment.bz - segment.az;
-  const lengthSquared = deltaX * deltaX + deltaZ * deltaZ;
-  const along =
-    lengthSquared <= 0
-      ? 0
-      : Math.max(0, Math.min(1, ((px - segment.ax) * deltaX + (pz - segment.az) * deltaZ) / lengthSquared));
-  return Math.hypot(px - (segment.ax + deltaX * along), pz - (segment.az + deltaZ * along));
-};
-
-const distanceToRoad = (px: number, pz: number): number => {
-  let nearest = Number.POSITIVE_INFINITY;
-  for (const segment of roadSegments) {
-    nearest = Math.min(nearest, distanceToSegment(px, pz, segment));
-  }
-  return nearest;
-};
-
-// How much road a spot sees at a given tower range. This is the currency the map is designed in, so
-// it is measured the way a tower shoots: against the ribbon, not against the niche it stands in.
-// Sampling the polyline keeps it honest for any range without a closed-form circle/segment clip.
-const COVERAGE_SAMPLE = 0.05;
-const corridorCoverage = (px: number, pz: number, range: number): number => {
-  let covered = 0;
-  for (const segment of roadSegments) {
-    const samples = Math.max(1, Math.ceil(segment.length / COVERAGE_SAMPLE));
-    const step = segment.length / samples;
-    for (let sample = 0; sample <= samples; sample += 1) {
-      const along = Math.min(segment.length, sample * step);
-      const t = segment.length <= 0 ? 0 : along / segment.length;
-      if (Math.hypot(px - (segment.ax + (segment.bx - segment.ax) * t), pz - (segment.az + (segment.bz - segment.az) * t)) <= range) {
-        covered += step;
-      }
-    }
-  }
-  return Math.round(covered * 100) / 100;
-};
-
-// The road as a closed ribbon: each leg offset sideways, the corners mitred, left side forward and
-// right side back. A box per leg would leave a notch at every turn and overlap at every other one —
-// a road that has to be read as a road cannot be built out of pieces that do not meet.
-const toShapePoint = (x: number, z: number): THREE.Vector2 => new THREE.Vector2(x, -z);
-
-const offsetRibbon = (points: readonly { x: number; z: number }[], offset: number): THREE.Vector2[] => {
-  const left: THREE.Vector2[] = [];
-  const right: THREE.Vector2[] = [];
-  for (let index = 0; index < points.length; index += 1) {
-    const point = points[index];
-    const isFirst = index === 0;
-    const isLast = index === points.length - 1;
-    const previous = points[Math.max(0, index - 1)];
-    const next = points[Math.min(points.length - 1, index + 1)];
-    const inX = point.x - previous.x;
-    const inZ = point.z - previous.z;
-    const inLength = Math.hypot(inX, inZ) || 1;
-    const outX = next.x - point.x;
-    const outZ = next.z - point.z;
-    const outLength = Math.hypot(outX, outZ) || 1;
-    const normalX = -inZ / inLength;
-    const normalZ = inX / inLength;
-    const outNormalX = -outZ / outLength;
-    const outNormalZ = outX / outLength;
-    // An end has one leg, not two, so it gets that leg's normal and nothing to mitre against: the
-    // spawn end uses the leg leaving it, the core end the leg arriving at it. Averaging a leg with a
-    // zero-length one is how a gate ends up a unit and a half past the spawn, or a NaN in the shape.
-    const miterX = isFirst ? outNormalX : isLast ? normalX : normalX + outNormalX;
-    const miterZ = isFirst ? outNormalZ : isLast ? normalZ : normalZ + outNormalZ;
-    const miterLength = Math.hypot(miterX, miterZ);
-    const reach = isFirst || isLast
-      ? offset
-      : offset / Math.max(0.4, (miterX * normalX + miterZ * normalZ) / miterLength);
-    // Clamped, because a hairpin would otherwise send the corner to infinity and a spike is not a
-    // turn. Two and a half widths is past any turn a corridor map has.
-    const clamped = Math.max(-Math.abs(offset) * 2.5, Math.min(Math.abs(offset) * 2.5, reach));
-    left.push(toShapePoint(point.x + (miterX / miterLength) * clamped, point.z + (miterZ / miterLength) * clamped));
-    right.push(toShapePoint(point.x - (miterX / miterLength) * clamped, point.z - (miterZ / miterLength) * clamped));
-  }
-  return [...left, ...right.reverse()];
-};
-
-const pathMaterial = withProbeWeight(
-  new THREE.MeshStandardMaterial({
-    color: 0x2e5c5c,
-    emissive: 0x0c2425,
-    emissiveIntensity: 0.65,
-    roughness: 0.82,
-    side: THREE.DoubleSide,
-  }),
-  'path',
-);
-const PATH_Y = 0.08;
-for (const route of config.map.routes) {
-  const ribbon = new THREE.Shape(offsetRibbon(route.points, ROAD_HALF_WIDTH));
-  const road = new THREE.Mesh(new THREE.ShapeGeometry(ribbon), pathMaterial);
-  road.rotation.x = -Math.PI / 2;
-  road.position.y = PATH_Y;
-  road.receiveShadow = true;
-  road.name = `route:${route.id}`;
-  scene.add(road);
-}
-
-// The raster. Cells whose centre is within half a road of the polyline, inside a niche, or inside
-// the core chamber are open; everything else is rock. Both the road and the niche rectangles are
-// authored on the same 0.4 lattice, so "a niche one cell away from the road" and "a niche opening
-// onto it" are two states this code can actually tell apart instead of two intentions.
-const CELL_SIZE = 0.4;
-const rasterColumns = Math.round(config.map.width / CELL_SIZE);
-const rasterRows = Math.round(config.map.depth / CELL_SIZE);
-const cellCenterX = (column: number): number => -config.map.width / 2 + (column + 0.5) * CELL_SIZE;
-const cellCenterZ = (row: number): number => -config.map.depth / 2 + (row + 0.5) * CELL_SIZE;
-const cellIndex = (column: number, row: number): number => row * rasterColumns + column;
-const insideBay = (bay: BayDefinition, x: number, z: number): boolean =>
-  x >= bay.minX && x <= bay.maxX && z >= bay.minZ && z <= bay.maxZ;
-
-const openCells = new Uint8Array(rasterColumns * rasterRows);
-// Every open cell, as a point to frame. The fit used to measure the rectangle around the corridor,
-// which is mostly rock: fitting that meant either cropping the road or pushing the camera so far back
-// that the road became a stamp. The channel itself is what has to be on screen, and the rock behind
-// it is allowed to run off the edges.
-const corridorSamplePoints: Array<[number, number]> = [];
-for (const point of config.map.routes.flatMap((route) => route.points)) {
-  corridorSamplePoints.push([point.x, point.z]);
-}
-
-for (let row = 0; row < rasterRows; row += 1) {
-  for (let column = 0; column < rasterColumns; column += 1) {
-    const x = cellCenterX(column);
-    const z = cellCenterZ(row);
-    let open = distanceToRoad(x, z) <= ROAD_HALF_WIDTH + 1e-6;
-    if (!open && trainingCorridor.bays.some((bay) => insideBay(bay, x, z))) {
-      open = true;
-    }
-    if (!open) {
-      const chamber = trainingCorridor.coreChamber;
-      open = Math.hypot(x - chamber.x, z - chamber.z) <= chamber.radius;
-    }
-    openCells[cellIndex(column, row)] = open ? 1 : 0;
-    if (open) {
-      corridorSamplePoints.push([x, z]);
-    }
-  }
-}
-
-// Height classes by distance into the rock, and nothing else. An earlier version also asked which
-// side of the channel a cell was on relative to the viewer and kept the near bank low, which is a
-// nice picture from exactly one angle and a wall across the road from every other. Terraces keyed to
-// depth alone are symmetric, so the map can be turned all the way round and the road stays readable
-// — and the ramp is steep enough that a terrace never stands tall enough to hide the road it borders.
-const WALL_HEIGHTS = [0.34, 0.68, 1.4, 1.95] as const;
-// Distance to the open area, by breadth-first search from every open cell at once. The queue is
-// walked with a moving index and not with `pop()`: a stack gives a depth-first order, and a
-// depth-first distance field is not a distance field — the cells near the far end of the first seed
-// get the depth of the detour that reached them, which turns "how deep into the rock is this" into
-// "which seed did the walker start from".
-const openDistance = new Int32Array(rasterColumns * rasterRows).fill(-1);
-const frontier: number[] = [];
-for (let index = 0; index < openCells.length; index += 1) {
-  if (openCells[index] === 1) {
-    openDistance[index] = 0;
-    frontier.push(index);
-  }
-}
-for (let cursor = 0; cursor < frontier.length; cursor += 1) {
-  const index = frontier[cursor];
-  const column = index % rasterColumns;
-  const row = (index - column) / rasterColumns;
-  const neighbours: Array<[number, number]> = [
-    [column - 1, row],
-    [column + 1, row],
-    [column, row - 1],
-    [column, row + 1],
-  ];
-  for (const [nextColumn, nextRow] of neighbours) {
-    if (nextColumn < 0 || nextColumn >= rasterColumns || nextRow < 0 || nextRow >= rasterRows) {
-      continue;
-    }
-    const next = cellIndex(nextColumn, nextRow);
-    if (openCells[next] === 1 || openDistance[next] >= 0) {
-      continue;
-    }
-    openDistance[next] = openDistance[index] + 1;
-    frontier.push(next);
-  }
-}
-
-const wallHeightClass = (index: number): number => {
-  const distance = openDistance[index];
-  if (distance <= 1) {
-    return 0;
-  }
-  if (distance <= 3) {
-    return 1;
-  }
-  return distance <= 6 ? 2 : 3;
-};
-
-type WallRect = { minX: number; minZ: number; width: number; depth: number; heightClass: number };
-const wallRects: WallRect[] = [];
-const claimedCells = new Uint8Array(rasterColumns * rasterRows);
-for (let row = 0; row < rasterRows; row += 1) {
-  for (let column = 0; column < rasterColumns; column += 1) {
-    const index = cellIndex(column, row);
-    if (openCells[index] === 1 || claimedCells[index] === 1) {
-      continue;
-    }
-    const heightClass = wallHeightClass(index);
-    const sameCell = (checkColumn: number, checkRow: number): boolean => {
-      const check = cellIndex(checkColumn, checkRow);
-      return openCells[check] === 0 && claimedCells[check] === 0 && wallHeightClass(check) === heightClass;
-    };
-    let width = 1;
-    while (column + width < rasterColumns && sameCell(column + width, row)) {
-      width += 1;
-    }
-    let depth = 1;
-    let grow = true;
-    while (grow && row + depth < rasterRows) {
-      for (let step = 0; step < width; step += 1) {
-        if (!sameCell(column + step, row + depth)) {
-          grow = false;
-          break;
-        }
-      }
-      if (grow) {
-        depth += 1;
-      }
-    }
-    for (let stepRow = 0; stepRow < depth; stepRow += 1) {
-      for (let stepColumn = 0; stepColumn < width; stepColumn += 1) {
-        claimedCells[cellIndex(column + stepColumn, row + stepRow)] = 1;
-      }
-    }
-    wallRects.push({
-      minX: cellCenterX(column) - CELL_SIZE / 2,
-      minZ: cellCenterZ(row) - CELL_SIZE / 2,
-      width: width * CELL_SIZE,
-      depth: depth * CELL_SIZE,
-      heightClass,
-    });
-  }
-}
-
-// The rim gets a faint self-glow because it is the edge the player reads the corridor by: a lip of
-// lit rock between the road and the mass behind it. The mass behind the rim does not, or the whole
-// map would glow.
-const wallLowMaterial = withProbeWeight(
-  new THREE.MeshStandardMaterial({
-    color: 0x24454f,
-    emissive: 0x0a2126,
-    emissiveIntensity: 0.55,
-    roughness: 0.84,
-    metalness: 0.12,
-  }),
-  'ground',
-);
-const wallHighMaterial = withProbeWeight(
-  new THREE.MeshStandardMaterial({ color: 0x1a323a, roughness: 0.9, metalness: 0.08 }),
-  'ground',
-);
-
-// Every rect of a height class becomes one box, and the boxes of a material become one mesh. A
-// carved massif of a few hundred cells costs two draw calls, not three hundred. The meshes also go
-// into the pick list, because rock in front of a niche is rock in the way of a click.
-const wallPickTargets: THREE.Mesh[] = [];
-
-const buildWallGroup = (name: string, material: THREE.Material, classes: readonly number[]): number => {
-  const parts: THREE.BufferGeometry[] = [];
-  for (const rect of wallRects) {
-    if (!classes.includes(rect.heightClass)) {
-      continue;
-    }
-    const height = WALL_HEIGHTS[rect.heightClass];
-    const box = new THREE.BoxGeometry(rect.width, height, rect.depth);
-    box.translate(rect.minX + rect.width / 2, height / 2, rect.minZ + rect.depth / 2);
-    parts.push(box);
-  }
-  if (parts.length === 0) {
-    return 0;
-  }
-  const merged = mergeGeometries(parts);
-  for (const part of parts) {
-    part.dispose();
-  }
-  if (!merged) {
-    return 0;
-  }
-  const mesh = new THREE.Mesh(merged, material);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  mesh.name = name;
-  scene.add(mesh);
-  wallPickTargets.push(mesh);
-  return parts.length;
-};
-
-const wallBlockCount = buildWallGroup('massif:low', wallLowMaterial, [0, 1]);
-buildWallGroup('massif:high', wallHighMaterial, [2, 3]);
-
-// Niche floors and the core chamber: the open ground a tower stands on, kept a shade apart from the
-// road so a recess reads as a recess and not as a widening the road happens to have.
-const bayFloorMaterial = withProbeWeight(
-  new THREE.MeshStandardMaterial({ color: 0x11303a, emissive: 0x082024, emissiveIntensity: 0.7, roughness: 0.88 }),
-  'ground',
-);
-const bayFloorParts: THREE.BufferGeometry[] = [];
-for (const bay of trainingCorridor.bays) {
-  const shape = new THREE.Shape([
-    toShapePoint(bay.minX, bay.minZ),
-    toShapePoint(bay.maxX, bay.minZ),
-    toShapePoint(bay.maxX, bay.maxZ),
-    toShapePoint(bay.minX, bay.maxZ),
-  ]);
-  bayFloorParts.push(new THREE.ShapeGeometry(shape));
-}
-const chamberFloor = new THREE.CircleGeometry(trainingCorridor.coreChamber.radius, 24);
-bayFloorParts.push(chamberFloor);
-const bayFloors = new THREE.Mesh(mergeGeometries(bayFloorParts) as THREE.BufferGeometry, bayFloorMaterial);
-for (const part of bayFloorParts) {
-  part.dispose();
-}
-bayFloors.rotation.x = -Math.PI / 2;
-bayFloors.position.y = 0.05;
-bayFloors.receiveShadow = true;
-bayFloors.name = 'niche-floors';
-scene.add(bayFloors);
-
-const padGeometry = new THREE.CylinderGeometry(0.62, 0.72, 0.14, 6);
-const padViews = new Map<string, PadView>();
-const padPickTargets: THREE.Mesh[] = [];
-for (const pad of config.map.buildPads) {
-  const group = new THREE.Group();
-  group.position.set(pad.position.x, 0, pad.position.z);
-  group.name = `pad:${pad.id}`;
-
-  const base = new THREE.Mesh(
-    padGeometry,
-    withProbeWeight(
-      new THREE.MeshStandardMaterial({
-        color: 0x2b7073,
-        emissive: 0x0b3135,
-        emissiveIntensity: 0.9,
-        roughness: 0.48,
-        metalness: 0.18,
-      }),
-      'padBase',
-    ),
-  );
-  base.position.y = 0.12;
-  base.castShadow = true;
-  base.receiveShadow = true;
-  base.name = `pad-base:${pad.id}`;
-  group.add(base);
-
-  const ring = new THREE.Mesh(
-    new THREE.RingGeometry(0.72, 0.8, 6),
-    new THREE.MeshBasicMaterial({ color: 0x6ee2cf, transparent: true, opacity: 0.48, side: THREE.DoubleSide }),
-  );
-  ring.rotation.x = -Math.PI / 2;
-  ring.position.y = 0.205;
-  ring.name = `pad-ring:${pad.id}`;
-  group.add(ring);
-
-  base.userData.padId = pad.id;
-  ring.userData.padId = pad.id;
-  padPickTargets.push(base, ring);
-
-  scene.add(group);
-  padViews.set(pad.id, { id: pad.id, base, ring, occupied: false, errorUntil: 0 });
-}
-
-const towerVisuals: Record<string, { accent: number; roof: number; scale: number }> = {
-  'pulse-spire': { accent: 0x6ee2cf, roof: 0xd29b62, scale: 1 },
-  'grove-lens': { accent: 0x8cd6ff, roof: 0x8d6bb5, scale: 0.95 },
-  'frost-relay': { accent: 0xffc56b, roof: 0xbe6b55, scale: 1.05 },
-};
-const unknownTowerVisual = { accent: 0x9fd6c8, roof: 0x5b7f86, scale: 1 };
-
-const towerViews = new Map<number, TowerView>();
+// The tower views, the models they borrow from the registry, and the clip each one plays.
 const modelStore = new Map<string, LoadedModel>();
-
-// The loaded scene stays the single owner of its geometry and of its source materials. A view
-// borrows that geometry and gets its own material copies, because the crystal emissive is
-// per-tower presentation state: on a shared material one tower firing would flash every tower
-// of that type at the same time. `SkeletonUtils.clone` is what makes a skinned model clonable at
-// all — it rebuilds the skeleton and rebinds the copy to its own bones — and it hands geometry and
-// materials back by reference, so the material copies are made here, after the clone.
-const cloneModelNode = (source: THREE.Object3D, owned: THREE.Material[]): THREE.Object3D => {
-  const clone = SkeletonUtils.clone(source);
-  clone.traverse((child) => {
-    if (!(child instanceof THREE.Mesh)) {
-      return;
-    }
-    // `Material.copy` carries the probe across: `envMap`, `envMapIntensity` and the `userData`
-    // stamp are all part of what a copy is, so a per-view material must not arrive with a
-    // declared weight of 1 and no probe of its own.
-    const material = (child.material as THREE.Material).clone();
-    owned.push(material);
-    child.material = material;
-    child.castShadow = true;
-    child.receiveShadow = true;
-  });
-  return clone;
-};
-
-// One clip per view, started at a slot-derived offset instead of at a random moment. The offset
-// comes from the order the towers were built in, which the replay reproduces, so two spires never
-// stand in the same pose and a restart still lands on the same one.
-const TOWER_CLIP_PHASE_SECONDS = 0.37;
-
-const startTowerClip = (root: THREE.Object3D, clip: THREE.AnimationClip, phase: number): TowerClip | null => {
-  if (clip.tracks.length === 0) {
-    return null;
-  }
-  // Every channel of the clip has to land on a bone of this copy, not just the first one: the mixer
-  // resolves a track by name inside the root it was given, and a name it cannot find is a channel
-  // that silently does nothing.
-  const bones: THREE.Bone[] = [];
-  for (const track of clip.tracks) {
-    const name = track.name.split('.')[0] ?? '';
-    const bone = root.getObjectByName(name) as THREE.Bone | undefined;
-    if (bone?.isBone !== true) {
-      throw new AssetContractError(`clip ${clip.name} drives ${name}, which is not a bone of the model`);
-    }
-    bones.push(bone);
-  }
-  const mixer = new THREE.AnimationMixer(root);
-  const action = mixer.clipAction(clip);
-  action.setLoop(THREE.LoopRepeat, Infinity);
-  // Reduced motion does not slow the clip down, it stops it: without a play call the bones stay in
-  // the rest pose the model was authored in.
-  if (!reducedMotion) {
-    action.play();
-  }
-  action.time = phase % clip.duration;
-  return { mixer, action, clipName: clip.name, duration: clip.duration, phase, bone: bones[0] as THREE.Bone, applied: presentationTime() };
-};
-
-const readTowerClip = (clip: TowerClip): TowerClipReading => ({
-  clipName: clip.clipName,
-  duration: clip.duration,
-  phase: clip.phase,
-  time: clip.action.time,
-  playing: clip.action.isRunning(),
-  boneName: clip.bone.name,
-  pose: [clip.bone.quaternion.x, clip.bone.quaternion.y, clip.bone.quaternion.z, clip.bone.quaternion.w],
-});
-
-const createModelTowerView = (towerId: string, model: LoadedModel, slot: number): TowerView => {
-  const visual = towerVisuals[towerId] ?? unknownTowerVisual;
-  const owned: THREE.Material[] = [];
-  const root = cloneModelNode(model.scene, owned) as THREE.Group;
-  const group = new THREE.Group();
-  group.name = `tower:${towerId}`;
-  group.scale.setScalar(visual.scale);
-  group.add(root);
-  const emissive = root.getObjectByName(model.emissiveNode);
-  if (!(emissive instanceof THREE.Mesh) || !(emissive.material instanceof THREE.MeshStandardMaterial)) {
-    throw new AssetContractError(`model ${model.entry.id} has no ${model.emissiveNode} mesh to animate`);
-  }
-  const crystalMaterial = emissive.material;
-  crystalMaterial.emissiveIntensity = towerCrystalIdleIntensity;
-  const clip = model.clips[0] === undefined ? null : startTowerClip(root, model.clips[0], slot * TOWER_CLIP_PHASE_SECONDS);
-  return {
-    towerId,
-    group,
-    crystal: emissive,
-    crystalMaterial,
-    crystalBaseY: emissive.position.y,
-    source: 'model',
-    modelId: model.entry.id,
-    clip,
-    firedUntil: 0,
-    aimAngle: 0,
-    release: () => {
-      // A mixer keeps its bindings and its actions alive on its own, so a tower that is removed
-      // has to give them back: thirty removed towers would otherwise leave thirty mixers running
-      // against a skeleton nothing renders any more.
-      if (clip !== null) {
-        clip.mixer.stopAllAction();
-        clip.mixer.uncacheRoot(root);
-      }
-      for (const material of owned) {
-        material.dispose();
-      }
-    },
-  };
-};
-
-const createProceduralTowerView = (towerId: string): TowerView => {
-  const visual = towerVisuals[towerId] ?? unknownTowerVisual;
-  const group = new THREE.Group();
-  group.scale.setScalar(visual.scale);
-  group.name = `tower:${towerId}`;
-
-  const base = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.46, 0.56, 0.3, 6),
-    withProbeWeight(
-      new THREE.MeshStandardMaterial({ color: 0x1d4651, roughness: 0.46, metalness: 0.34 }),
-      'towerBase',
-    ),
-  );
-  base.position.y = 0.15;
-  base.castShadow = true;
-  base.receiveShadow = true;
-  group.add(base);
-
-  const stem = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.2, 0.28, 0.78, 6),
-    withProbeWeight(
-      new THREE.MeshStandardMaterial({ color: 0x346f75, roughness: 0.34, metalness: 0.5 }),
-      'towerStem',
-    ),
-  );
-  stem.position.y = 0.5;
-  stem.castShadow = true;
-  group.add(stem);
-
-  const roof = new THREE.Mesh(
-    new THREE.ConeGeometry(0.45, 0.42, 6),
-    withProbeWeight(
-      new THREE.MeshStandardMaterial({ color: visual.roof, roughness: 0.3, metalness: 0.3 }),
-      'towerRoof',
-    ),
-  );
-  roof.position.y = 1.08;
-  roof.castShadow = true;
-  group.add(roof);
-
-  const crystal = new THREE.Mesh(
-    new THREE.OctahedronGeometry(0.18, 0),
-    withProbeWeight(
-      new THREE.MeshStandardMaterial({
-        color: visual.accent,
-        emissive: visual.accent,
-        emissiveIntensity: towerCrystalIdleIntensity,
-        roughness: 0.18,
-        metalness: 0.15,
-      }),
-      'towerCrystal',
-    ),
-  );
-  crystal.position.y = 1.43;
-  group.add(crystal);
-
-  const aura = new THREE.Mesh(
-    new THREE.TorusGeometry(0.57, 0.025, 8, 32),
-    new THREE.MeshBasicMaterial({ color: visual.accent, transparent: true, opacity: 0.7 }),
-  );
-  aura.rotation.x = Math.PI / 2;
-  aura.position.y = 0.18;
-  group.add(aura);
-
-  return {
-    towerId,
-    group,
-    crystal,
-    crystalMaterial: crystal.material as THREE.MeshStandardMaterial,
-    crystalBaseY: crystal.position.y,
-    source: 'procedural',
-    modelId: null,
-    // The placeholder has no rig, so there is no clip and nothing to stop when the view is released.
-    clip: null,
-    firedUntil: 0,
-    aimAngle: 0,
-    release: () => disposeInstance(group),
-  };
-};
-
-const createTowerView = (towerId: string, slot: number): TowerView => {
-  const model = modelStore.get(towerId);
-  return model ? createModelTowerView(towerId, model, slot) : createProceduralTowerView(towerId);
-};
-
-const enemyVisuals: Record<string, { color: number; scale: number }> = {
-  husk: { color: 0xe46c62, scale: 0.84 },
-  runner: { color: 0xf0a85d, scale: 0.68 },
-  wisp: { color: 0xd85c8b, scale: 0.76 },
-};
-const unknownEnemyVisual = { color: 0xc9a27a, scale: 0.74 };
-
-const enemyViews = new Map<number, EnemyView>();
-const createEnemyView = (enemyId: string): EnemyView => {
-  const visual = enemyVisuals[enemyId] ?? unknownEnemyVisual;
-  const group = new THREE.Group();
-  group.scale.setScalar(visual.scale);
-  group.name = `enemy:${enemyId}`;
-
-  const body = new THREE.Mesh(
-    new THREE.IcosahedronGeometry(0.32, 1),
-    withProbeWeight(
-      new THREE.MeshStandardMaterial({ color: visual.color, emissive: visual.color, emissiveIntensity: 0.45, roughness: 0.62 }),
-      'enemyBody',
-    ),
-  );
-  body.castShadow = true;
-  group.add(body);
-
-  const crest = new THREE.Mesh(
-    new THREE.ConeGeometry(0.18, 0.42, 5),
-    withProbeWeight(new THREE.MeshStandardMaterial({ color: 0xf3b77b, roughness: 0.5 }), 'enemyCrest'),
-  );
-  crest.position.y = 0.34;
-  crest.rotation.z = Math.PI;
-  group.add(crest);
-
-  const healthBack = new THREE.Mesh(
-    new THREE.BoxGeometry(0.88, 0.08, 0.04),
-    new THREE.MeshBasicMaterial({ color: 0x152229 }),
-  );
-  healthBack.position.y = 0.78;
-  group.add(healthBack);
-
-  const healthFill = new THREE.Mesh(
-    new THREE.BoxGeometry(0.76, 0.045, 0.045),
-    new THREE.MeshBasicMaterial({ color: 0x74e0b4 }),
-  );
-  healthFill.position.set(0, 0.78, 0.025);
-  group.add(healthFill);
-
-  return { group, body, healthFill };
-};
-
-const disposeInstance = (object: THREE.Object3D) => {
-  object.traverse((child) => {
-    const mesh = child as THREE.Mesh;
-    mesh.geometry?.dispose();
-    const material = mesh.material;
-    if (Array.isArray(material)) {
-      for (const entry of material) {
-        entry.dispose();
-      }
-    } else {
-      material?.dispose();
-    }
-  });
-};
-
-const combatBursts: CombatBurst[] = [];
-const combatBurstGeometry = new THREE.RingGeometry(0.22, 0.34, 18);
-const combatBurstColor = new THREE.Color(0x9ff0c9);
-
-const removeCombatBurst = (burst: CombatBurst) => {
-  scene.remove(burst.mesh);
-  (burst.mesh.material as THREE.Material).dispose();
-};
-
-// One shared geometry for every beam and every flash; only the materials belong to a shot, and they
-// are disposed with it. A shot allocates two small meshes and gives them back within
-// `shotTraceSeconds`, so the ceiling exists to survive a burst of fire, not to grow.
-const shotBeamGeometry = new THREE.BoxGeometry(1, 1, 1);
-const shotFlashGeometry = new THREE.SphereGeometry(0.18, 10, 8);
-const shotTraces: ShotTrace[] = [];
-let shotTraceCount = 0;
-const shotForward = new THREE.Vector3(0, 0, 1);
-const shotDirection = new THREE.Vector3();
-const shotMuzzle = new THREE.Vector3();
-const shotImpact = new THREE.Vector3();
-
-const removeShotTrace = (trace: ShotTrace) => {
-  scene.remove(trace.beam);
-  scene.remove(trace.flash);
-  (trace.beam.material as THREE.Material).dispose();
-  (trace.flash.material as THREE.Material).dispose();
-};
-
-const spawnShotTrace = (from: THREE.Vector3, to: THREE.Vector3) => {
-  shotDirection.copy(to).sub(from);
-  const length = shotDirection.length();
-  if (!(length > 0.05)) {
-    return;
-  }
-  shotDirection.multiplyScalar(1 / length);
-  const beam = new THREE.Mesh(
-    shotBeamGeometry,
-    new THREE.MeshBasicMaterial({
-      color: shotBeamColor,
-      transparent: true,
-      opacity: 0.85,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    }),
-  );
-  beam.scale.set(shotBeamThickness, shotBeamThickness, length);
-  beam.position.copy(from).addScaledVector(shotDirection, length * 0.5);
-  beam.quaternion.setFromUnitVectors(shotForward, shotDirection);
-  const flash = new THREE.Mesh(
-    shotFlashGeometry,
-    new THREE.MeshBasicMaterial({
-      color: shotFlashColor,
-      transparent: true,
-      opacity: 0.9,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    }),
-  );
-  flash.position.copy(to);
-  scene.add(beam);
-  scene.add(flash);
-  shotTraces.push({ beam, flash, started: elapsed, duration: shotTraceSeconds });
-  shotTraceCount += 1;
-  while (shotTraces.length > MAX_SHOT_TRACES) {
-    const stale = shotTraces.shift();
-    if (stale) {
-      removeShotTrace(stale);
-    }
-  }
-};
-
-const core = new THREE.Group();
-core.position.set(config.map.corePosition.x, 0.3, config.map.corePosition.z);
-core.name = 'core';
-const coreBase = new THREE.Mesh(
-  new THREE.CylinderGeometry(0.8, 0.95, 0.32, 8),
-  withProbeWeight(
-    new THREE.MeshStandardMaterial({ color: 0x285a62, roughness: 0.38, metalness: 0.42 }),
-    'coreBase',
-  ),
-);
-coreBase.castShadow = true;
-core.add(coreBase);
-const coreCrystal = new THREE.Mesh(
-  new THREE.OctahedronGeometry(0.7, 1),
-  withProbeWeight(
-    new THREE.MeshStandardMaterial({
-      color: 0x7ce7d2,
-      emissive: 0x2ac7b5,
-      emissiveIntensity: 1.8,
-      roughness: 0.16,
-      metalness: 0.22,
-    }),
-    'coreCrystal',
-  ),
-);
-coreCrystal.position.y = 1.05;
-coreCrystal.castShadow = true;
-core.add(coreCrystal);
-const coreRing = new THREE.Mesh(
-  new THREE.TorusGeometry(1.05, 0.035, 8, 36),
-  new THREE.MeshBasicMaterial({ color: 0x6ee2cf, transparent: true, opacity: 0.62 }),
-);
-coreRing.rotation.x = Math.PI / 2;
-coreRing.position.y = 0.24;
-core.add(coreRing);
-scene.add(core);
-
-const particles = new THREE.Points(
-  new THREE.BufferGeometry(),
-  new THREE.PointsMaterial({ color: 0x6ee2cf, size: 0.045, transparent: true, opacity: 0.62 }),
-);
-const particlePositions = new Float32Array(54 * 3);
-for (let index = 0; index < 54; index += 1) {
-  particlePositions[index * 3] = -5.4 + (index % 9) * 1.35;
-  particlePositions[index * 3 + 1] = 0.35 + ((index * 7) % 11) * 0.08;
-  particlePositions[index * 3 + 2] = -3.2 + ((index * 5) % 8) * 0.72;
-}
-particles.geometry.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
-scene.add(particles);
+const towers = createTowers(scene, modelStore, padDefinitions);
+const enemies = createEnemies(scene);
+// Kill bursts and shot traces. A burst is born from an enemy event and a trace from a tower event,
+// and both need the position of a view that belongs to somebody else, so they get their own module
+// and are handed plain positions.
+const combatFx = createCombatFx(scene);
+// One presentation flag for the whole page, told to every domain the moment it changes, and set once
+// here so a browser that already asked for reduced motion is obeyed before the first frame. The page
+// reads it too: the guard, the ambient delta and the tower clip all have to agree.
+mapPresentation.setReducedMotion(reducedMotion);
+enemies.setReducedMotion(reducedMotion);
+towers.setReducedMotion(reducedMotion);
 
 const buildButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-tower-id]'));
 const buildOptions: BuildOption[] = buildButtons.map((button) => {
@@ -1765,39 +843,6 @@ const applyAssetStatus = () => {
   paintDevDiagnostics();
 };
 
-// Two-phase swap. A view built before the registry answered keeps rendering, and once the model
-// is in it is replaced in place: no entity is recreated, no position changes and the snapshot is
-// not touched, so a late model cannot make two replays of the same run look different.
-const upgradeTowerViews = () => {
-  for (const [entityId, view] of [...towerViews]) {
-    if (view.source === 'model' || !modelStore.has(view.towerId)) {
-      continue;
-    }
-    // The slot is the order the towers were built in, so a tower that is upgraded in place keeps
-    // the clip phase it would have had if the model had arrived on time.
-    const slot = [...towerViews.keys()].indexOf(entityId);
-    const next = createTowerView(view.towerId, slot);
-    next.group.position.copy(view.group.position);
-    next.group.rotation.y = view.group.rotation.y;
-    next.firedUntil = view.firedUntil;
-    next.aimAngle = view.aimAngle;
-    scene.remove(view.group);
-    view.release();
-    scene.add(next.group);
-    towerViews.set(entityId, next);
-  }
-};
-
-const countMeshes = (object: THREE.Object3D): number => {
-  let total = 0;
-  object.traverse((child) => {
-    if (child instanceof THREE.Mesh) {
-      total += 1;
-    }
-  });
-  return total;
-};
-
 // Walks the live scene rather than a list of known materials: a standard material added later
 // without a declared weight has to turn up here as undeclared, instead of quietly rendering at
 // the full probe the Three.js default gives it.
@@ -1891,7 +936,7 @@ const bootAssets = async () => {
     assetRegistry.markFailed(refusal, accepted);
   }
   applyAssetStatus();
-  upgradeTowerViews();
+  towers.upgradeWithModels(presentationTime());
 };
 
 const rejectionMessages: Record<string, string> = {
@@ -2003,7 +1048,7 @@ const measureCorridor = (): { centerX: number; centerY: number; halfWidth: numbe
   let right = Number.NEGATIVE_INFINITY;
   let bottom = Number.POSITIVE_INFINITY;
   let top = Number.NEGATIVE_INFINITY;
-  for (const [x, z] of corridorSamplePoints) {
+  for (const [x, z] of mapPresentation.corridorSamplePoints) {
     for (const y of [0, WALL_HEIGHTS[0]]) {
       const view = framePoint.set(x, y, z).applyMatrix4(camera.matrixWorldInverse);
       left = Math.min(left, view.x);
@@ -2084,64 +1129,16 @@ const mountSizeObserver = new ResizeObserver(() => {
 mountSizeObserver.observe(sceneMount);
 resize();
 
-const padFreeColor = new THREE.Color(0x2b7073);
-const padFreeEmissive = new THREE.Color(0x0b3135);
-const padOccupiedColor = new THREE.Color(0x3a4b55);
-const padOccupiedEmissive = new THREE.Color(0x0a1a1e);
-const padFreeRing = new THREE.Color(0x6ee2cf);
-const padOccupiedRing = new THREE.Color(0xffc56b);
-const padErrorEmissive = new THREE.Color(0x5a1410);
-const padErrorRing = new THREE.Color(0xff6f61);
-const coreHealthy = new THREE.Color(0x2ac7b5);
-const coreHealthyRing = new THREE.Color(0x6ee2cf);
-const coreFailing = new THREE.Color(0xe46c62);
-const coreWarningRing = new THREE.Color(0xffc56b);
-const baseBodyEmissive = 0.45;
-const slowedBodyEmissive = 1.15;
-const enemyBaseY = 0.28;
-const padErrorFlashSeconds = 0.7;
-const towerCrystalIdleIntensity = 2.4;
-const towerCrystalFireIntensity = 5.2;
-const towerFireFlashSeconds = 0.22;
-const coreDamageFlashSeconds = 0.6;
-const combatBurstSeconds = 0.55;
 const EVENT_FEED_LIMIT = 5;
 const RECENT_EVENT_LIMIT = 16;
-const MAX_COMBAT_BURSTS = 14;
-
-// A shot is the whole point of a tower: without a visible line from the muzzle to the target, a
-// placement reads as nothing happening until an enemy stops existing. The trace is presentation
-// state only — it is not in the snapshot, not in the command log and not in the room, so two
-// clients watching the same match each draw their own from the same event.
-const shotTraceSeconds = 0.2;
-const shotBeamThickness = 0.07;
-const MAX_SHOT_TRACES = 18;
-const shotBeamColor = new THREE.Color(0xbff6e6);
-const shotFlashColor = new THREE.Color(0xffffff);
-// Where a shot leaves a tower and where it lands on a body. Both are presentation constants, and
-// both are read from the views at the moment of the event rather than recomputed from content.
-const towerMuzzleHeight = 0.92;
-const enemyImpactHeight = 0.3;
 
 let elapsed = 0;
-let enemyBobOffset = 0;
 // Presentation time is the time the match clock has been stepped for, which is the tick the
 // projection is at times one tick. It is not wall time: `elapsed` above is, and it keeps running
 // while the match is paused, which is what the ambient bob wants. A skeleton follows the match
 // instead, so a paused snapshot and a paused screenshot show the same pose, and a restarted match
 // puts every tower back into the pose its tick implies.
 const presentationTime = (): number => snapshot.tick * STEP_SECONDS;
-
-const refreshPadStyle = (padView: PadView) => {
-  const flashing = elapsed < padView.errorUntil;
-  const baseMaterial = padView.base.material as THREE.MeshStandardMaterial;
-  const ringMaterial = padView.ring.material as THREE.MeshBasicMaterial;
-  baseMaterial.color.copy(padView.occupied ? padOccupiedColor : padFreeColor);
-  baseMaterial.emissive.copy(flashing ? padErrorEmissive : padView.occupied ? padOccupiedEmissive : padFreeEmissive);
-  baseMaterial.emissiveIntensity = flashing ? 1.3 : padView.occupied ? 0.4 : 0.9;
-  ringMaterial.color.copy(flashing ? padErrorRing : padView.occupied ? padOccupiedRing : padFreeRing);
-  ringMaterial.opacity = flashing ? 0.95 : padView.occupied ? 0.72 : 0.48;
-};
 
 const phaseLabels: Record<MatchStatus, string> = {
   preparation: 'Preparation',
@@ -2187,8 +1184,6 @@ const objectiveSummary = (state: MatchSnapshot): string => {
   return `Core lost on wave ${state.waveIndex + 1}`;
 };
 
-let coreDefeated = false;
-let coreDamagedUntil = 0;
 let snapshot = simulation.getSnapshot();
 
 const terminalFeedbackLabels: Record<'victory' | 'defeat', string> = {
@@ -2309,72 +1304,13 @@ const syncHud = () => {
 const applySnapshot = (next: MatchSnapshot) => {
   snapshot = next;
 
-  for (const padView of padViews.values()) {
-    const occupant = next.pads[padView.id];
-    const occupied = occupant !== null && occupant !== undefined;
-    if (occupied === padView.occupied) {
-      continue;
-    }
-    padView.occupied = occupied;
-    refreshPadStyle(padView);
-  }
-
-  const aliveTowers = new Set<number>();
-  for (const tower of next.towers) {
-    aliveTowers.add(tower.entityId);
-    let view = towerViews.get(tower.entityId);
-    if (!view) {
-      const pad = padDefinitions.get(tower.padId);
-      if (!pad) {
-        continue;
-      }
-      view = createTowerView(tower.towerId, towerViews.size);
-      view.group.position.set(pad.position.x, 0.14, pad.position.z);
-      scene.add(view.group);
-      towerViews.set(tower.entityId, view);
-    }
-  }
-  for (const [entityId, view] of towerViews) {
-    if (aliveTowers.has(entityId)) {
-      continue;
-    }
-    scene.remove(view.group);
-    view.release();
-    towerViews.delete(entityId);
-  }
-
-  const aliveEnemies = new Set<number>();
-  for (const enemy of next.enemies) {
-    aliveEnemies.add(enemy.entityId);
-    let view = enemyViews.get(enemy.entityId);
-    if (!view) {
-      view = createEnemyView(enemy.enemyId);
-      scene.add(view.group);
-      enemyViews.set(enemy.entityId, view);
-    }
-    view.group.position.set(enemy.x, enemyBaseY, enemy.z);
-    const healthRatio = enemy.maxHealth > 0 ? Math.max(0, Math.min(1, enemy.health / enemy.maxHealth)) : 0;
-    view.healthFill.scale.x = Math.max(healthRatio, 0.001);
-    view.healthFill.position.x = -0.38 + 0.38 * healthRatio;
-    const bodyMaterial = view.body.material as THREE.MeshStandardMaterial;
-    bodyMaterial.emissiveIntensity = enemy.slowTicks > 0 ? slowedBodyEmissive : baseBodyEmissive;
-  }
-  for (const [entityId, view] of enemyViews) {
-    if (aliveEnemies.has(entityId)) {
-      continue;
-    }
-    scene.remove(view.group);
-    disposeInstance(view.group);
-    enemyViews.delete(entityId);
-  }
-
-  const integrity = next.maxCoreHealth > 0 ? next.coreHealth / next.maxCoreHealth : 0;
-  coreCrystal.material.emissiveIntensity = 0.6 + 1.5 * integrity;
-  const defeated = next.status === 'defeat';
-  if (defeated !== coreDefeated) {
-    coreDefeated = defeated;
-    coreCrystal.material.emissive.copy(defeated ? coreFailing : coreHealthy);
-  }
+  // The three domains read the same snapshot and each owns its own views. The order they are called
+  // in is the order their views were built in before this was split into modules, except for the
+  // core: it used to be projected after the enemy views and now it is projected with the pads, and
+  // nothing in between writes anything the core reads or reads anything the core writes.
+  mapPresentation.applySnapshot(next, elapsed);
+  towers.applySnapshot(next, presentationTime());
+  enemies.applySnapshot(next);
 
   // One report per match, captured while the frame is still in sync with the events of
   // the terminal tick, so a replay can be compared against the run it reproduced.
@@ -2479,13 +1415,6 @@ const dispatchPlayerCommand = (command: Command): CommandResult => {
   return result;
 };
 
-const clearCombatBursts = () => {
-  for (const burst of combatBursts) {
-    removeCombatBurst(burst);
-  }
-  combatBursts.length = 0;
-};
-
 const resetEventPresentations = () => {
   for (const type of Object.keys(eventCounts) as Array<keyof typeof eventCounts>) {
     eventCounts[type] = 0;
@@ -2494,11 +1423,9 @@ const resetEventPresentations = () => {
   eventFeedEntries.length = 0;
   renderEventFeed();
   eventsDrained = 0;
-  coreDamagedUntil = 0;
-  clearCombatBursts();
-  for (const view of towerViews.values()) {
-    view.firedUntil = 0;
-  }
+  mapPresentation.resetCoreDamage();
+  combatFx.clearCombatBursts();
+  towers.resetFired();
 };
 
 // The tick a rebuild stops on, or `null` when the run it rebuilt is free to continue. It answers a
@@ -3654,11 +2581,7 @@ const readRunState = (tick: number): FreshRunReading => ({
   replayIndex,
   replaying,
   matchReports: matchReports.map((report) => ({ ...report, eventCounts: { ...report.eventCounts } })),
-  poses: Array.from(towerViews, ([entityId, view]) => ({
-    entityId,
-    towerId: view.towerId,
-    clip: view.clip === null ? null : readTowerClip(view.clip),
-  })),
+  poses: towers.poseReadings(),
 });
 
 const readRebuildReading = (arrival: { requestedTick: number; tick: number }): RebuildReading => ({
@@ -3707,60 +2630,26 @@ const renderEventFeed = () => {
   );
 };
 
-const spawnCombatBurst = (position: THREE.Vector3) => {
-  const mesh = new THREE.Mesh(
-    combatBurstGeometry,
-    new THREE.MeshBasicMaterial({
-      color: combatBurstColor,
-      transparent: true,
-      opacity: 0.85,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-    }),
-  );
-  mesh.rotation.x = -Math.PI / 2;
-  mesh.position.set(position.x, enemyBaseY + 0.08, position.z);
-  scene.add(mesh);
-  combatBursts.push({ mesh, started: elapsed, duration: combatBurstSeconds });
-  while (combatBursts.length > MAX_COMBAT_BURSTS) {
-    const stale = combatBursts.shift();
-    if (stale) {
-      removeCombatBurst(stale);
-    }
-  }
-};
-
+// The three domains that react to a single event, each handed a position rather than a view: the
+// tower that fired is asked where its shot runs, the enemy that died where its burst goes, the core
+// how long it flashes. Nothing here knows how any of them is drawn.
 const applyEventPresentation = (event: SimulationEvent) => {
   if (event.type === 'towerFired') {
-    const view = towerViews.get(event.entityId);
-    if (!view || reducedMotion) {
-      return;
-    }
-    view.firedUntil = elapsed + towerFireFlashSeconds;
-    const target = enemyViews.get(event.targetId);
-    if (target) {
-      // Three.js rotates local +X toward -Z, so the Y angle is negated.
-      view.aimAngle = Math.atan2(
-        -(target.group.position.z - view.group.position.z),
-        target.group.position.x - view.group.position.x,
-      );
-      // The shot itself, from the muzzle to where the target is standing on the tick the event
-      // describes. Without it the only evidence of a tower working is the target's disappearance.
-      shotMuzzle.set(view.group.position.x, view.group.position.y + towerMuzzleHeight, view.group.position.z);
-      shotImpact.set(target.group.position.x, target.group.position.y + enemyImpactHeight, target.group.position.z);
-      spawnShotTrace(shotMuzzle, shotImpact);
+    const shot = towers.onFired(event.entityId, enemies.positionOf(event.targetId), elapsed);
+    if (shot) {
+      combatFx.spawnShotTrace(shot.from, shot.to, elapsed);
     }
     return;
   }
   if (event.type === 'enemyKilled') {
-    const view = enemyViews.get(event.entityId);
-    if (view && !reducedMotion) {
-      spawnCombatBurst(view.group.position);
+    const position = enemies.positionOf(event.entityId);
+    if (position !== null && !reducedMotion) {
+      combatFx.spawnCombatBurst(position, elapsed);
     }
     return;
   }
   if (event.type === 'coreDamaged') {
-    coreDamagedUntil = elapsed + coreDamageFlashSeconds;
+    mapPresentation.flashCoreDamage(elapsed);
   }
 };
 
@@ -3826,7 +2715,7 @@ const projectedPad = new THREE.Vector3();
 // still. Now that the map can be turned, a guess would build a tower in a place the player cannot
 // see, so rock in front of a pad means the click misses. The road and the niche floors are not in
 // the list: they are the ground, eight centimetres above it, and no sight-line runs under them.
-const pickTargets: THREE.Object3D[] = [...padPickTargets, ...wallPickTargets];
+const pickTargets: THREE.Object3D[] = mapPresentation.pickTargets;
 
 const pickPad = (clientX: number, clientY: number): string | null => {
   const rect = renderer.domElement.getBoundingClientRect();
@@ -3859,11 +2748,7 @@ const projectPadToCanvas = (padId: string): { padId: string; x: number; y: numbe
 };
 
 const flashPadError = (padId: string) => {
-  const padView = padViews.get(padId);
-  if (padView) {
-    padView.errorUntil = elapsed + padErrorFlashSeconds;
-    refreshPadStyle(padView);
-  }
+  mapPresentation.flashPadError(padId, elapsed);
 };
 
 // Camera gestures, and the one rule that keeps them from eating placements: a pointer that travels
@@ -4031,19 +2916,13 @@ loadButton.addEventListener('click', () => {
 newMatchButton.addEventListener('click', newMatch);
 reducedMotionQuery.addEventListener('change', (event) => {
   reducedMotion = event.matches;
-  if (!reducedMotion) {
-    return;
-  }
-  // Turning reduced motion on mid-match has to do the same thing it does from the start: the clip
-  // stops, and the bones go back to the rest pose instead of freezing wherever the last frame left
-  // them. Reading the pose from `setTime(0)` before the action stops is what applies it.
-  for (const view of towerViews.values()) {
-    if (view.clip === null) {
-      continue;
-    }
-    view.clip.mixer.setTime(0);
-    view.clip.action.stop();
-  }
+  // Each domain is told on the same tick the page is, and the towers own the one thing that has more
+  // to it than a flag: turning reduced motion on mid-match has to do the same thing it does from the
+  // start, so the clip stops and the bones go back to the rest pose instead of freezing wherever the
+  // last frame left them. Reading the pose from `setTime(0)` before the action stops is what applies it.
+  mapPresentation.setReducedMotion(reducedMotion);
+  enemies.setReducedMotion(reducedMotion);
+  towers.setReducedMotion(reducedMotion);
 });
 
 syncSelection();
@@ -4191,17 +3070,17 @@ window.__ECHOES_DEBUG__ = {
   },
   get rendered() {
     return {
-      pads: padViews.size,
-      towers: towerViews.size,
-      enemies: enemyViews.size,
-      routeSegments: routeSegmentCount,
+      pads: mapPresentation.padCount(),
+      towers: towers.viewCount(),
+      enemies: enemies.viewCount(),
+      routeSegments: mapPresentation.routeSegmentCount,
     };
   },
   get towerPositions() {
-    return Array.from(towerViews.values(), (view) => ({ x: view.group.position.x, z: view.group.position.z }));
+    return towers.positions();
   },
   get enemyPositions() {
-    return Array.from(enemyViews.values(), (view) => ({ x: view.group.position.x, z: view.group.position.z }));
+    return enemies.positions();
   },
   get padScreenPositions() {
     return config.map.buildPads
@@ -4210,14 +3089,14 @@ window.__ECHOES_DEBUG__ = {
   },
   get mapGeometry(): MapGeometryReading {
     return {
-      roadHalfWidth: ROAD_HALF_WIDTH,
-      routeLength: Math.round(routeLength * 100) / 100,
-      routeSegments: routeSegmentCount,
+      roadHalfWidth: mapPresentation.roadHalfWidth,
+      routeLength: Math.round(mapPresentation.routeLength * 100) / 100,
+      routeSegments: mapPresentation.routeSegmentCount,
       bends: config.map.routes.reduce((total, route) => total + Math.max(0, route.points.length - 2), 0),
-      bays: trainingCorridor.bays.length,
-      chamberRadius: trainingCorridor.coreChamber.radius,
-      wallBlocks: wallBlockCount,
-      openCells: Array.from(openCells).filter((cell) => cell === 1).length,
+      bays: mapPresentation.bayCount,
+      chamberRadius: mapPresentation.chamberRadius,
+      wallBlocks: mapPresentation.wallBlockCount,
+      openCells: Array.from(mapPresentation.openCells).filter((cell) => cell === 1).length,
       frame: {
         left: camera.left,
         right: camera.right,
@@ -4254,17 +3133,17 @@ window.__ECHOES_DEBUG__ = {
         return last.x === config.map.corePosition.x && last.z === config.map.corePosition.z;
       }),
       pads: config.map.buildPads.map((pad) => {
-        const roadDistance = Math.round(distanceToRoad(pad.position.x, pad.position.z) * 100) / 100;
+        const roadDistance = Math.round(mapPresentation.distanceToRoad(pad.position.x, pad.position.z) * 100) / 100;
         const coverage: Record<string, number> = {};
         for (const tower of config.towers) {
-          coverage[tower.id] = corridorCoverage(pad.position.x, pad.position.z, tower.range);
+          coverage[tower.id] = mapPresentation.corridorCoverage(pad.position.x, pad.position.z, tower.range);
         }
         return {
           padId: pad.id,
           x: pad.position.x,
           z: pad.position.z,
           roadDistance,
-          clearOfRoad: roadDistance > ROAD_HALF_WIDTH + 0.5,
+          clearOfRoad: roadDistance > mapPresentation.roadHalfWidth + 0.5,
           coverage,
         };
       }),
@@ -4346,20 +3225,18 @@ window.__ECHOES_DEBUG__ = {
     };
   },
   get motion() {
-    const clips = Array.from(towerViews.values(), (view) => view.clip);
     return {
       reducedMotion,
-      combatBursts: combatBursts.length,
+      combatBursts: combatFx.liveBursts(),
       // Shots drawn right now, and shots drawn since boot. The live count is what a screenshot can
       // never prove — a trace lives a fraction of a second — so the total is what says a tower is
       // actually firing something, and it grows on the same `towerFired` event the core reports.
-      shotTraces: shotTraces.length,
-      shotsFired: shotTraceCount,
-      enemyBob: enemyBobOffset,
+      shotTraces: combatFx.liveTraces(),
+      shotsFired: combatFx.tracesFired(),
+      enemyBob: enemies.bobOffset(),
       // One mixer per animated view and no more: a tower that was removed or upgraded in place must
       // not leave a second animation running against the same skeleton.
-      clips: clips.filter((clip) => clip !== null).length,
-      clipsPlaying: clips.filter((clip) => clip?.action.isRunning() === true).length,
+      ...towers.clipMotion(),
     };
   },
   get assets() {
@@ -4384,21 +3261,7 @@ window.__ECHOES_DEBUG__ = {
     };
   },
   get towerModels(): TowerModelReading[] {
-    return Array.from(towerViews, ([entityId, view]) => ({
-      entityId,
-      towerId: view.towerId,
-      source: view.source,
-      modelId: view.modelId,
-      meshCount: countMeshes(view.group),
-      // The procedural placeholder has no name on its emissive mesh, so this is also the
-      // cheapest way to see which node of the model the client ended up animating.
-      crystalNode: view.crystal.name || null,
-      crystalBaseY: view.crystalBaseY,
-      crystalY: view.crystal.position.y,
-      crystalScale: view.crystal.scale.x,
-      crystalEmissive: view.crystalMaterial.emissiveIntensity,
-      clip: view.clip === null ? null : readTowerClip(view.clip),
-    }));
+    return towers.modelReadings();
   },
   // The QA seam goes through the same door a pad click does, so a command a test injects cannot take a
   // route the product does not take — in a room that means it is posted, not applied to a local core.
@@ -4462,89 +3325,14 @@ const renderFrame = (timestamp: number) => {
   // Reduced motion freezes ambient movement and transient effects; the projected
   // positions, health and materials stay readable because they come from the snapshot.
   const ambientDelta = reducedMotion ? 0 : frameDelta;
-  enemyBobOffset = 0;
-  for (const padView of padViews.values()) {
-    if (padView.errorUntil > 0 && elapsed >= padView.errorUntil) {
-      padView.errorUntil = 0;
-      refreshPadStyle(padView);
-    }
-  }
-  let towerSlot = 0;
-  for (const view of towerViews.values()) {
-    if (elapsed < view.firedUntil) {
-      view.group.rotation.y = view.aimAngle;
-      view.crystal.scale.setScalar(1.55);
-      view.crystalMaterial.emissiveIntensity = towerCrystalFireIntensity;
-    } else {
-      view.group.rotation.y += ambientDelta * (0.34 + towerSlot * 0.08);
-      view.crystal.scale.setScalar(1);
-      view.crystalMaterial.emissiveIntensity = towerCrystalIdleIntensity;
-    }
-    view.crystal.position.y = view.crystalBaseY + (reducedMotion ? 0 : Math.sin(elapsed * 2.1 + towerSlot) * 0.07);
-    // The clip and the bob share one reduced-motion guard and two clocks. The skeleton is brought
-    // up to the match clock rather than advanced by the frame, so the pose of a tick is a function
-    // of that tick: a tower built by a pad click and the same tower rebuilt by a replay both start
-    // at zero on the tick they were placed, and the terminal tick holds its pose in both runs.
-    if (view.clip !== null && !reducedMotion) {
-      const due = presentationTime() - view.clip.applied;
-      if (due > 0) {
-        view.clip.mixer.update(due);
-        view.clip.applied = presentationTime();
-      }
-    }
-    towerSlot += 1;
-  }
-  let enemySlot = 0;
-  for (const view of enemyViews.values()) {
-    view.group.rotation.y += ambientDelta * (0.7 + enemySlot * 0.12);
-    const bob = reducedMotion ? 0 : Math.sin(elapsed * 2.8 + enemySlot * 0.7) * 0.045;
-    view.group.position.y = enemyBaseY + bob;
-    enemyBobOffset = Math.max(enemyBobOffset, Math.abs(bob));
-    enemySlot += 1;
-  }
-  for (let index = combatBursts.length - 1; index >= 0; index -= 1) {
-    const burst = combatBursts[index];
-    if (!burst) {
-      continue;
-    }
-    const progress = (elapsed - burst.started) / burst.duration;
-    if (progress >= 1) {
-      removeCombatBurst(burst);
-      combatBursts.splice(index, 1);
-      continue;
-    }
-    (burst.mesh.material as THREE.MeshBasicMaterial).opacity = 0.85 * (1 - progress);
-    burst.mesh.scale.setScalar(1 + progress * 1.9);
-  }
-  for (let index = shotTraces.length - 1; index >= 0; index -= 1) {
-    const trace = shotTraces[index];
-    if (!trace) {
-      continue;
-    }
-    const progress = (elapsed - trace.started) / trace.duration;
-    if (progress >= 1) {
-      removeShotTrace(trace);
-      shotTraces.splice(index, 1);
-      continue;
-    }
-    // The beam thins out and the impact flash collapses: a shot that stays at full width reads as
-    // a solid rod, not as light crossing a distance.
-    const fade = 1 - progress;
-    (trace.beam.material as THREE.MeshBasicMaterial).opacity = 0.85 * fade;
-    trace.beam.scale.x = shotBeamThickness * (0.35 + 0.65 * fade);
-    trace.beam.scale.y = trace.beam.scale.x;
-    (trace.flash.material as THREE.MeshBasicMaterial).opacity = 0.9 * fade;
-    trace.flash.scale.setScalar(0.5 + progress * 0.9);
-  }
-  // The terminal state wins over the transient damage pulse, and reduced motion keeps
-  // the readable colour change without the scale pulse.
-  const coreFlashing = elapsed < coreDamagedUntil && !coreDefeated;
-  coreRing.material.color.copy(coreFlashing ? coreWarningRing : coreDefeated ? coreFailing : coreHealthyRing);
-  const corePulse = coreFlashing && !reducedMotion ? 1 + 0.18 * (1 - (coreDamagedUntil - elapsed) / coreDamageFlashSeconds) : 1;
-  coreRing.scale.setScalar(corePulse);
-  coreCrystal.rotation.y += ambientDelta * 0.6;
-  coreRing.rotation.z += ambientDelta * 0.25;
-  particles.rotation.y += ambientDelta * 0.08;
+  // The frame in the order it was drawn before the split: the map, the towers, the enemies, then the
+  // bursts and the shot traces that belong to nobody in particular. The core is drawn with the map now
+  // rather than after the traces, and it shares no state with anything around it.
+  mapPresentation.animate(elapsed, ambientDelta);
+  towers.animate(elapsed, ambientDelta, presentationTime());
+  enemies.animate(elapsed, ambientDelta);
+  combatFx.animate(elapsed);
+
   // The arrival of a rebuild is recorded here, at the end of the frame that got there, so the
   // reading belongs to the same tick as the presentation around it and not to the frame before.
   if (pendingRebuild !== null) {
