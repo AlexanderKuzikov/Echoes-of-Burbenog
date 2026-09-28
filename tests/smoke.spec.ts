@@ -84,9 +84,9 @@ const routeSegmentCount = scenario.map.routes.reduce((total, route) => total + r
 const padCount = scenario.map.buildPads.length;
 const firstWavePrepTicks = scenario.waves[0].prepTicks;
 const placements = [
-  { padId: 'pad-east', towerId: 'pulse-spire' },
-  { padId: 'pad-north', towerId: 'grove-lens' },
-  { padId: 'pad-south', towerId: 'frost-relay' },
+  { padId: 'niche-corner', towerId: 'pulse-spire' },
+  { padId: 'niche-bend', towerId: 'grove-lens' },
+  { padId: 'niche-mouth', towerId: 'frost-relay' },
 ] as const;
 const placementCost = placements.reduce((total, placement) => {
   return total + (scenario.towers.find((tower) => tower.id === placement.towerId)?.cost ?? 0);
@@ -163,6 +163,27 @@ type DebugReading = {
   towerPositions: Array<{ x: number; z: number }>;
   enemyPositions: Array<{ x: number; z: number }>;
   padScreenPositions: Array<{ padId: string; x: number; y: number }>;
+  // The corridor as a measurement: the road it is cut around, the niches it offers, and per pad how
+  // far it stands from the road and how much road each tower range reaches from there.
+  mapGeometry: {
+    roadHalfWidth: number;
+    routeLength: number;
+    routeSegments: number;
+    bends: number;
+    bays: number;
+    chamberRadius: number;
+    wallBlocks: number;
+    openCells: number;
+    coreEndsRoute: boolean;
+    pads: Array<{
+      padId: string;
+      x: number;
+      z: number;
+      roadDistance: number;
+      clearOfRoad: boolean;
+      coverage: Record<string, number>;
+    }>;
+  };
   eventCounts: Record<SimulationEvent['type'], number>;
   recentEvents: SimulationEvent[];
   paused: boolean;
@@ -268,6 +289,7 @@ const readDebug = (page: Page) =>
       towerPositions: debug.towerPositions,
       enemyPositions: debug.enemyPositions,
       padScreenPositions: debug.padScreenPositions,
+      mapGeometry: debug.mapGeometry,
       eventCounts: debug.eventCounts,
       recentEvents: debug.recentEvents,
       paused: debug.paused,
@@ -425,11 +447,11 @@ const clickPad = async (page: Page, padId: string) => {
 
 const armDefendedWave = async (page: Page) => {
   await page.getByRole('button', { name: 'Pulse Spire' }).click();
-  await clickPad(page, 'pad-east');
+  await clickPad(page, 'niche-corner');
   await page.getByRole('button', { name: 'Grove Lens' }).click();
-  await clickPad(page, 'pad-north');
+  await clickPad(page, 'niche-bend');
   await page.getByRole('button', { name: 'Frost Relay' }).click();
-  await clickPad(page, 'pad-south');
+  await clickPad(page, 'niche-mouth');
 };
 
 // Every screenshot scenario waits for the model registry first, so a shot can never be taken
@@ -1054,7 +1076,24 @@ test('drives presentation from MatchSnapshot without duplicated state', async ({
   expect(active.snapshot.waveTick).toBeGreaterThan(0);
   expect(active.snapshot.lastWaveRoll).not.toBeNull();
   expect(active.snapshot.enemies.length).toBeGreaterThan(0);
-  expect(active.snapshot.enemies[0]?.x).toBeLessThanOrEqual(6.5);
+  // Hostiles enter at the gate and are still near it: measured along the route and against the
+  // route's own ends, because where the gate is changed by content and a hardcoded coordinate would
+  // only be a number that happens to hold today.
+  const corridorRoute = scenario.map.routes[0];
+  if (!corridorRoute) {
+    throw new Error('the corridor map needs a route');
+  }
+  const gate = corridorRoute.points[0];
+  const core = corridorRoute.points[corridorRoute.points.length - 1];
+  const corridorLength = corridorRoute.points.reduce((total, point, index) => {
+    const previous = corridorRoute.points[index - 1];
+    return previous ? total + Math.hypot(point.x - previous.x, point.z - previous.z) : total;
+  }, 0);
+  const firstEnemy = active.snapshot.enemies[0];
+  expect(firstEnemy?.distance ?? Number.POSITIVE_INFINITY).toBeLessThan(corridorLength / 4);
+  expect(
+    Math.hypot((firstEnemy?.x ?? 0) - gate.x, (firstEnemy?.z ?? 0) - gate.z),
+  ).toBeLessThan(Math.hypot(gate.x - core.x, gate.z - core.z));
   expectProjectionMatchesSnapshot(active);
 
   await page.waitForFunction(
@@ -1092,6 +1131,53 @@ test('drives presentation from MatchSnapshot without duplicated state', async ({
   await expect(page.getByTestId('gold-value')).toHaveText(String(victoryGold));
 });
 
+test('cuts one corridor with niches off the road and pads that differ in what they cover', async ({ page }) => {
+  test.setTimeout(60_000);
+  await page.goto('/');
+  await expectBooted(page);
+  await enterAsNewMatch(page);
+  await waitForAssetsReady(page);
+
+  const reading = await readDebugOrThrow(page);
+  const geometry = reading.mapGeometry;
+  const towerRanges = new Map(scenario.towers.map((tower) => [tower.id, tower.range]));
+
+  // One road with turns, and the core at its dead end: two roads would be two problems.
+  expect(reading.routeIds).toHaveLength(1);
+  expect(geometry.bends).toBeGreaterThanOrEqual(3);
+  expect(geometry.routeSegments).toBe(routeSegmentCount);
+  expect(geometry.coreEndsRoute).toBe(true);
+  expect(geometry.chamberRadius).toBeGreaterThan(0);
+  expect(geometry.wallBlocks).toBeGreaterThan(0);
+  expect(geometry.openCells).toBeGreaterThan(0);
+
+  // A niche per pad, and no pad standing on the road: the claim is a distance against the width the
+  // road is drawn with, not "the pad looks like it is beside the road".
+  expect(geometry.bays).toBe(reading.padIds.length);
+  expect(geometry.pads).toHaveLength(reading.padIds.length);
+  for (const pad of geometry.pads) {
+    expect(reading.padIds).toContain(pad.padId);
+    expect(pad.roadDistance).toBeGreaterThan(geometry.roadHalfWidth);
+    expect(pad.clearOfRoad).toBe(true);
+  }
+
+  // Every tower reaches the road from every niche, and no two niches reach the same amount of it.
+  // Without the second half the first is decoration: five spots that all cover the same length make
+  // placement a formality again.
+  const signatures = new Set<string>();
+  for (const pad of geometry.pads) {
+    for (const [towerId, range] of towerRanges) {
+      const covered = pad.coverage[towerId];
+      expect(covered).toBeGreaterThan(0);
+      expect(covered).toBeLessThanOrEqual(geometry.routeLength);
+      // A tower that outranges the map would make every niche equal, so the range is part of the map.
+      expect(range).toBeLessThan(geometry.routeLength / 3);
+    }
+    signatures.add(Object.entries(pad.coverage).map(([towerId, covered]) => `${towerId}:${covered}`).join('|'));
+  }
+  expect(signatures.size).toBe(geometry.pads.length);
+});
+
 test('places the selected tower on a clicked build pad through the command contract', async ({ page }) => {
   test.setTimeout(60_000);
   await page.goto('/');
@@ -1102,7 +1188,7 @@ test('places the selected tower on a clicked build pad through the command contr
   expect(initial.selectedTowerId).toBe('pulse-spire');
   expect(initial.feedback.state).toBe('idle');
   expect(initial.snapshot.towers).toEqual([]);
-  expect(initial.snapshot.pads['pad-east']).toBeNull();
+  expect(initial.snapshot.pads['niche-corner']).toBeNull();
   expect(initial.padScreenPositions.map((entry) => entry.padId).sort()).toEqual([...initial.padIds].sort());
   await expect(page.getByTestId('gold-value')).toHaveText(String(startingGold));
 
@@ -1113,29 +1199,29 @@ test('places the selected tower on a clicked build pad through the command contr
   await expect(page.getByTestId('selection-card-name')).toHaveText('Grove Lens');
 
   const groveLensGold = startingGold - costOf('grove-lens');
-  await clickPad(page, 'pad-east');
+  await clickPad(page, 'niche-corner');
 
   const placed = await readDebugOrThrow(page);
-  expect(placed.snapshot.pads['pad-east']).toBe('grove-lens');
+  expect(placed.snapshot.pads['niche-corner']).toBe('grove-lens');
   expect(placed.snapshot.towers).toHaveLength(1);
   expect(placed.snapshot.towers[0]?.towerId).toBe('grove-lens');
-  expect(placed.snapshot.towers[0]?.padId).toBe('pad-east');
+  expect(placed.snapshot.towers[0]?.padId).toBe('niche-corner');
   expect(placed.snapshot.gold).toBe(groveLensGold);
   expect(placed.rendered.towers).toBe(1);
-  expect(placed.towerPositions[0]?.x).toBeCloseTo(padById.get('pad-east')?.position.x ?? 0, 3);
-  expect(placed.towerPositions[0]?.z).toBeCloseTo(padById.get('pad-east')?.position.z ?? 0, 3);
+  expect(placed.towerPositions[0]?.x).toBeCloseTo(padById.get('niche-corner')?.position.x ?? 0, 3);
+  expect(placed.towerPositions[0]?.z).toBeCloseTo(padById.get('niche-corner')?.position.z ?? 0, 3);
   expect(placed.feedback).toEqual({
     state: 'accepted',
-    message: 'Grove Lens built on pad-east',
+    message: 'Grove Lens built on niche-corner',
     reason: null,
   });
   await expect(page.getByTestId('gold-value')).toHaveText(String(groveLensGold));
   await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
 
-  await clickPad(page, 'pad-east');
+  await clickPad(page, 'niche-corner');
 
   const occupied = await readDebugOrThrow(page);
-  expect(occupied.snapshot.pads['pad-east']).toBe('grove-lens');
+  expect(occupied.snapshot.pads['niche-corner']).toBe('grove-lens');
   expect(occupied.snapshot.towers).toHaveLength(1);
   expect(occupied.snapshot.gold).toBe(groveLensGold);
   expect(occupied.rendered.towers).toBe(1);
@@ -1146,15 +1232,15 @@ test('places the selected tower on a clicked build pad through the command contr
   await expect(page.getByTestId('gold-value')).toHaveText(String(groveLensGold));
 
   await page.getByRole('button', { name: 'Frost Relay' }).click();
-  await clickPad(page, 'pad-north');
+  await clickPad(page, 'niche-bend');
   await page.getByRole('button', { name: 'Pulse Spire' }).click();
-  await clickPad(page, 'pad-south');
+  await clickPad(page, 'niche-mouth');
 
   const filled = await readDebugOrThrow(page);
   const affordableGold = groveLensGold - costOf('frost-relay') - costOf('pulse-spire');
-  expect(filled.snapshot.pads['pad-north']).toBe('frost-relay');
-  expect(filled.snapshot.pads['pad-south']).toBe('pulse-spire');
-  expect(filled.snapshot.pads['pad-core']).toBeNull();
+  expect(filled.snapshot.pads['niche-bend']).toBe('frost-relay');
+  expect(filled.snapshot.pads['niche-mouth']).toBe('pulse-spire');
+  expect(filled.snapshot.pads['niche-heart']).toBeNull();
   expect(filled.snapshot.towers).toHaveLength(3);
   expect(filled.snapshot.gold).toBe(affordableGold);
   expect(filled.rendered.towers).toBe(3);
@@ -1162,10 +1248,10 @@ test('places the selected tower on a clicked build pad through the command contr
   await expect(page.getByTestId('gold-value')).toHaveText(String(affordableGold));
 
   await page.getByRole('button', { name: 'Grove Lens' }).click();
-  await clickPad(page, 'pad-core');
+  await clickPad(page, 'niche-heart');
 
   const broke = await readDebugOrThrow(page);
-  expect(broke.snapshot.pads['pad-core']).toBeNull();
+  expect(broke.snapshot.pads['niche-heart']).toBeNull();
   expect(broke.snapshot.towers).toHaveLength(3);
   expect(broke.snapshot.gold).toBe(affordableGold);
   expect(broke.rendered.towers).toBe(3);
@@ -1191,11 +1277,11 @@ test('plays a defended wave from real clicks and reports victory from the snapsh
   await enterAsNewMatch(page);
 
   await page.getByRole('button', { name: 'Pulse Spire' }).click();
-  await clickPad(page, 'pad-east');
+  await clickPad(page, 'niche-corner');
   await page.getByRole('button', { name: 'Grove Lens' }).click();
-  await clickPad(page, 'pad-north');
+  await clickPad(page, 'niche-bend');
   await page.getByRole('button', { name: 'Frost Relay' }).click();
-  await clickPad(page, 'pad-south');
+  await clickPad(page, 'niche-mouth');
 
   const armed = await readDebugOrThrow(page);
   expect(armed.snapshot.status).toBe('preparation');
@@ -1568,9 +1654,9 @@ test('restarts from the same seed and replays the recorded command log', async (
 
   const replaying = await readDebugOrThrow(page);
   expect(replaying.replaying).toBe(true);
-  expect(replaying.snapshot.pads['pad-east']).toBe('pulse-spire');
-  expect(replaying.snapshot.pads['pad-north']).toBe('grove-lens');
-  expect(replaying.snapshot.pads['pad-south']).toBe('frost-relay');
+  expect(replaying.snapshot.pads['niche-corner']).toBe('pulse-spire');
+  expect(replaying.snapshot.pads['niche-bend']).toBe('grove-lens');
+  expect(replaying.snapshot.pads['niche-mouth']).toBe('frost-relay');
   expect(replaying.eventCounts.towerPlaced).toBe(placements.length);
   expectProjectionMatchesSnapshot(replaying);
 
@@ -1625,13 +1711,13 @@ test('rejects commands injected during replay and keeps the recorded run identic
   expect(restarted.commandCount).toBe(recordedCommands);
 
   const injectedPlacement = await page.evaluate(() =>
-    window.__ECHOES_DEBUG__?.dispatch({ type: 'placeTower', padId: 'pad-core', towerId: 'pulse-spire' }),
+    window.__ECHOES_DEBUG__?.dispatch({ type: 'placeTower', padId: 'niche-heart', towerId: 'pulse-spire' }),
   );
   expect(injectedPlacement).toEqual({ accepted: false, reason: 'replay-in-progress' });
   const injectedWave = await page.evaluate(() => window.__ECHOES_DEBUG__?.dispatch({ type: 'startWave' }));
   expect(injectedWave).toEqual({ accepted: false, reason: 'replay-in-progress' });
   // The real input path goes through the same choke point and is refused the same way.
-  await clickPad(page, 'pad-core');
+  await clickPad(page, 'niche-heart');
   await expect(page.getByTestId('start-wave')).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Pulse Spire' })).toBeDisabled();
   await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-reason', 'replay-in-progress');
@@ -1642,8 +1728,8 @@ test('rejects commands injected during replay and keeps the recorded run identic
   expect(afterInjection.snapshot.tick).toBe(0);
   expect(afterInjection.snapshot.status).toBe('preparation');
   expect(afterInjection.snapshot.gold).toBe(startingGold);
-  expect(afterInjection.snapshot.pads['pad-core']).toBeNull();
-  expect(afterInjection.snapshot.pads['pad-east']).toBeNull();
+  expect(afterInjection.snapshot.pads['niche-heart']).toBeNull();
+  expect(afterInjection.snapshot.pads['niche-corner']).toBeNull();
   expect(afterInjection.snapshot.towers).toEqual([]);
   expect(afterInjection.rendered.towers).toBe(0);
   expect(afterInjection.eventCounts).toEqual(emptyEventCounts());
@@ -1663,7 +1749,7 @@ test('rejects commands injected during replay and keeps the recorded run identic
   });
 
   const midResult = await page.evaluate(() =>
-    window.__ECHOES_DEBUG__?.dispatch({ type: 'placeTower', padId: 'pad-core', towerId: 'pulse-spire' }),
+    window.__ECHOES_DEBUG__?.dispatch({ type: 'placeTower', padId: 'niche-heart', towerId: 'pulse-spire' }),
   );
   expect(midResult).toEqual({ accepted: false, reason: 'replay-in-progress' });
   const midReplay = await readDebugOrThrow(page);
@@ -1671,8 +1757,8 @@ test('rejects commands injected during replay and keeps the recorded run identic
   expect(midReplay.commandCount).toBe(recordedCommands);
   expect(midReplay.replayIndex).toBeGreaterThan(0);
   expect(midReplay.replayIndex).toBeLessThan(recordedCommands);
-  expect(midReplay.snapshot.pads['pad-core']).toBeNull();
-  expect(midReplay.snapshot.towers.some((tower) => tower.padId === 'pad-core')).toBe(false);
+  expect(midReplay.snapshot.pads['niche-heart']).toBeNull();
+  expect(midReplay.snapshot.towers.some((tower) => tower.padId === 'niche-heart')).toBe(false);
 
   await page.waitForFunction(() => window.__ECHOES_DEBUG__?.snapshot.status === 'victory', undefined, {
     timeout: 90_000,
@@ -1685,7 +1771,7 @@ test('rejects commands injected during replay and keeps the recorded run identic
   expect(second.matchReports[1]).toEqual(firstReport);
   expect(second.snapshot.status).toBe('victory');
   expect(second.snapshot.gold).toBe(victoryGold);
-  expect(second.snapshot.towers.every((tower) => tower.padId !== 'pad-core')).toBe(true);
+  expect(second.snapshot.towers.every((tower) => tower.padId !== 'niche-heart')).toBe(true);
   expect(second.replaying).toBe(false);
   expect(second.replayIndex).toBe(recordedCommands);
 });
@@ -1780,7 +1866,7 @@ test('swaps a placed placeholder for the generated GLB without touching the snap
 
   const procedural = await readDebugOrThrow(page);
   expect(procedural.assets.status).toBe('loading');
-  expect(procedural.snapshot.pads['pad-east']).toBe('pulse-spire');
+  expect(procedural.snapshot.pads['niche-corner']).toBe('pulse-spire');
   expect(procedural.towerModels).toHaveLength(placements.length);
   expect(procedural.towerModels.map((view) => view.source)).toEqual(['procedural', 'procedural', 'procedural']);
   const before = procedural.towerModels[0];
@@ -1788,7 +1874,7 @@ test('swaps a placed placeholder for the generated GLB without touching the snap
   expect(before?.modelId).toBeNull();
   expect(before?.crystalNode).toBeNull();
   expect(before?.crystalBaseY).toBeCloseTo(1.43, 5);
-  const padEast = padById.get('pad-east');
+  const padEast = padById.get('niche-corner');
   expect(procedural.towerPositions[0]?.x).toBeCloseTo(padEast?.position.x ?? 0, 5);
   expect(procedural.towerPositions[0]?.z).toBeCloseTo(padEast?.position.z ?? 0, 5);
 
@@ -1799,7 +1885,7 @@ test('swaps a placed placeholder for the generated GLB without touching the snap
   const swapped = await readDebugOrThrow(page);
   expect(swapped.assets).toEqual({ status: 'ready', models: ['pulse-spire'], error: null });
   // Same entity, same pad, same money: the swap is a view change, not a gameplay change.
-  expect(swapped.snapshot.pads['pad-east']).toBe('pulse-spire');
+  expect(swapped.snapshot.pads['niche-corner']).toBe('pulse-spire');
   expect(swapped.snapshot.gold).toBe(procedural.snapshot.gold);
   expect(swapped.snapshot.tick).toBeGreaterThanOrEqual(procedural.snapshot.tick);
   expect(swapped.rendered.towers).toBe(placements.length);
@@ -1875,7 +1961,7 @@ test('swaps a placed placeholder for the generated GLB without touching the snap
   // towers without a model in the registry are still procedural next to the loaded one.
   expect(fighting.rendered.towers).toBe(placements.length);
   expect(fighting.towerModels.map((view) => view.source)).toEqual(['model', 'procedural', 'procedural']);
-  expect(fighting.snapshot.pads['pad-east']).toBe('pulse-spire');
+  expect(fighting.snapshot.pads['niche-corner']).toBe('pulse-spire');
   expect(fighting.towerPositions[0]?.x).toBeCloseTo(padEast?.position.x ?? 0, 5);
   expect(fighting.towerPositions[0]?.z).toBeCloseTo(padEast?.position.z ?? 0, 5);
   expectProjectionMatchesSnapshot(fighting);
@@ -1894,11 +1980,11 @@ test('weights the environment probe per material and keeps the generated model a
   // weight reaches per-view material copies instead of only the loaded source scene, and that two
   // views of one model are still two sets of materials rather than one shared set.
   await page.getByRole('button', { name: 'Pulse Spire' }).click();
-  await clickPad(page, 'pad-east');
+  await clickPad(page, 'niche-corner');
   await page.getByRole('button', { name: 'Pulse Spire' }).click();
-  await clickPad(page, 'pad-south');
+  await clickPad(page, 'niche-mouth');
   await page.getByRole('button', { name: 'Grove Lens' }).click();
-  await clickPad(page, 'pad-north');
+  await clickPad(page, 'niche-bend');
   await waitForAssetsReady(page);
 
   const armed = await readDebugOrThrow(page);
@@ -1951,13 +2037,16 @@ test('weights the environment probe per material and keeps the generated model a
   expect(probe.materials.every((entry) => entry.className === 'MeshStandardMaterial')).toBe(true);
 
   const byRole = (role: string) => probe.materials.filter((entry) => entry.role === role);
-  // The ground and the routes are the surfaces the scene-wide cap was hiding: they get a small,
-  // explicit share instead of whatever the default would have given them.
-  expect(byRole('ground')).toHaveLength(1);
-  expect(byRole('ground')[0]?.envMapIntensity).toBeLessThanOrEqual(0.2);
-  expect(byRole('path')).toHaveLength(routeSegmentCount);
-  for (const segment of byRole('path')) {
-    expect(segment.envMapIntensity).toBeLessThanOrEqual(0.2);
+  // The ground, the rock and the road are the surfaces the scene-wide cap was hiding: they get a
+  // small, explicit share instead of whatever the default would have given them. How many meshes
+  // carry the role is the scene's business — the corridor is cut from several of them — so what is
+  // claimed here is that each of them declares the small weight, not how many there are.
+  expect(byRole('ground').length).toBeGreaterThan(0);
+  expect(byRole('path').length).toBeGreaterThan(0);
+  for (const surface of [...byRole('ground'), ...byRole('path')]) {
+    expect(surface.envMapIntensity).toBeLessThanOrEqual(0.2);
+    expect(surface.explicit).toBe(true);
+    expect(surface.ownsProbe).toBe(true);
   }
   expect(byRole('padBase')).toHaveLength(padCount);
   for (const pad of byRole('padBase')) {
@@ -2039,7 +2128,7 @@ test('plays the tower clip on presentation time and freezes it while paused', as
   // the clip belongs to that tower rather than to a swap that happened at an unknown moment.
   await waitForAssetsReady(page);
   await page.getByRole('button', { name: 'Pulse Spire' }).click();
-  await clickPad(page, 'pad-east');
+  await clickPad(page, 'niche-corner');
 
   const armed = await readDebugOrThrow(page);
   const clip = armed.towerModels[0]?.clip;
@@ -2279,10 +2368,10 @@ test('refuses a model whose skeleton carries more bones than the budget allows',
 
   // The match stays playable on procedural placeholders, and the refusal stays local.
   await page.getByRole('button', { name: 'Pulse Spire' }).click();
-  await clickPad(page, 'pad-east');
+  await clickPad(page, 'niche-corner');
   await page.getByTestId('start-wave').click();
   const started = await readDebugOrThrow(page);
-  expect(started.snapshot.pads['pad-east']).toBe('pulse-spire');
+  expect(started.snapshot.pads['niche-corner']).toBe('pulse-spire');
   expect(started.towerModels[0]?.source).toBe('procedural');
   expect(started.towerModels[0]?.clip).toBeNull();
   expect(started.motion.clips).toBe(0);
@@ -2317,9 +2406,9 @@ test('keeps the match playable and names the failure when the model registry is 
 
   // A tower without a model entry is normal and stays procedural, and the match keeps running.
   await page.getByRole('button', { name: 'Pulse Spire' }).click();
-  await clickPad(page, 'pad-east');
+  await clickPad(page, 'niche-corner');
   const placed = await readDebugOrThrow(page);
-  expect(placed.snapshot.pads['pad-east']).toBe('pulse-spire');
+  expect(placed.snapshot.pads['niche-corner']).toBe('pulse-spire');
   expect(placed.rendered.towers).toBe(1);
   expect(placed.towerModels[0]?.source).toBe('procedural');
   expect(placed.towerModels[0]?.crystalBaseY).toBeCloseTo(1.43, 5);
@@ -2485,10 +2574,10 @@ test('refuses a model whose content hash the manifest does not match', async ({ 
 
   // The match stays playable on procedural placeholders.
   await page.getByRole('button', { name: 'Pulse Spire' }).click();
-  await clickPad(page, 'pad-east');
+  await clickPad(page, 'niche-corner');
   await page.getByTestId('start-wave').click();
   const started = await readDebugOrThrow(page);
-  expect(started.snapshot.pads['pad-east']).toBe('pulse-spire');
+  expect(started.snapshot.pads['niche-corner']).toBe('pulse-spire');
   expect(started.towerModels[0]?.source).toBe('procedural');
   expect(started.snapshot.status).toBe('wave');
   await expectAssetRefused(page);
@@ -2554,10 +2643,10 @@ test('refuses a model whose manifest claims more triangles than the model budget
 
   // The match stays playable on procedural placeholders, and the refusal stays local.
   await page.getByRole('button', { name: 'Pulse Spire' }).click();
-  await clickPad(page, 'pad-east');
+  await clickPad(page, 'niche-corner');
   await page.getByTestId('start-wave').click();
   const started = await readDebugOrThrow(page);
-  expect(started.snapshot.pads['pad-east']).toBe('pulse-spire');
+  expect(started.snapshot.pads['niche-corner']).toBe('pulse-spire');
   expect(started.towerModels[0]?.source).toBe('procedural');
   expect(started.snapshot.status).toBe('wave');
   expect(started.eventCounts.waveStarted).toBe(1);
@@ -2930,7 +3019,7 @@ test('restores the same match from a real page reload', async ({ page }) => {
   expect(restarted.replayIndex).toBe(0);
   expect(restarted.snapshot.tick).toBe(0);
   const injected = await page.evaluate(() =>
-    window.__ECHOES_DEBUG__?.dispatch({ type: 'placeTower', padId: 'pad-core', towerId: 'pulse-spire' }),
+    window.__ECHOES_DEBUG__?.dispatch({ type: 'placeTower', padId: 'niche-heart', towerId: 'pulse-spire' }),
   );
   expect(injected).toEqual({ accepted: false, reason: 'replay-in-progress' });
   expect(pageErrors).toEqual([]);
@@ -3050,7 +3139,7 @@ test('keeps a won match won after a load and clears the slot on a new match', as
   expect(cleared.snapshot.tick).toBe(0);
   expect(cleared.snapshot.gold).toBe(startingGold);
   expect(cleared.snapshot.preparationTicksLeft).toBe(firstWavePrepTicks);
-  expect(cleared.snapshot.pads['pad-east']).toBeNull();
+  expect(cleared.snapshot.pads['niche-corner']).toBeNull();
   expect(cleared.snapshot.towers).toEqual([]);
   expect(cleared.snapshot.enemies).toEqual([]);
   expect(cleared.commandCount).toBe(0);
@@ -3087,7 +3176,7 @@ test('refuses a save that does not match the contract and leaves the slot untouc
   await waitForAssetsReady(page);
 
   const log = [
-    { tick: 0, command: { type: 'placeTower', padId: 'pad-east', towerId: 'pulse-spire' } },
+    { tick: 0, command: { type: 'placeTower', padId: 'niche-corner', towerId: 'pulse-spire' } },
     { tick: 0, command: { type: 'startWave' } },
   ];
   const savePayload = (overrides: Record<string, unknown> = {}) =>
@@ -3262,7 +3351,7 @@ test('refuses a save that does not match the contract and leaves the slot untouc
   expect(cleared.snapshot.status).toBe('preparation');
   expect(cleared.snapshot.preparationTicksLeft).toBe(firstWavePrepTicks);
   expect(cleared.snapshot.gold).toBe(startingGold);
-  expect(cleared.snapshot.pads['pad-east']).toBeNull();
+  expect(cleared.snapshot.pads['niche-corner']).toBeNull();
   expect(cleared.snapshot.towers).toEqual([]);
   expect(cleared.snapshot.enemies).toEqual([]);
   expect(cleared.snapshot.rngState).toBe(scenario.seed);
@@ -3422,7 +3511,7 @@ test('opens the entry screen on an empty slot and starts a match from it', async
   expect(started.snapshot.status).toBe('preparation');
   expect(started.snapshot.gold).toBe(startingGold);
   expect(started.snapshot.towers).toEqual([]);
-  expect(started.snapshot.pads['pad-east']).toBeNull();
+  expect(started.snapshot.pads['niche-corner']).toBeNull();
   expect(started.snapshot.rngState).toBe(scenario.seed);
   expect(started.commandCount).toBe(0);
   expect(started.replaying).toBe(false);
@@ -3737,7 +3826,7 @@ test('clears the slot only after a confirmed New match on the entry screen', asy
   expect(arrival.snapshot.status).toBe('preparation');
   expect(arrival.snapshot.preparationTicksLeft).toBe(firstWavePrepTicks);
   expect(arrival.snapshot.gold).toBe(startingGold);
-  expect(arrival.snapshot.pads['pad-east']).toBeNull();
+  expect(arrival.snapshot.pads['niche-corner']).toBeNull();
   expect(arrival.snapshot.towers).toEqual([]);
   expect(arrival.snapshot.enemies).toEqual([]);
   expect(arrival.snapshot.rngState).toBe(scenario.seed);
@@ -3986,9 +4075,9 @@ test('runs one room on the session server and gives two browser contexts the sam
     // One command, from the first context, by a real click on a real pad. Nothing is dispatched through
     // the seam, so what is being compared is what a player's click produced.
     await page.getByRole('button', { name: 'Pulse Spire' }).click();
-    await clickPad(page, 'pad-east');
+    await clickPad(page, 'niche-corner');
     await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
-    await expect(page.getByTestId('command-feedback')).toHaveText('Pulse Spire built on pad-east');
+    await expect(page.getByTestId('command-feedback')).toHaveText('Pulse Spire built on niche-corner');
 
     // Both clients wait until the room's log has reached them, and the comparison is made at the
     // highest frame both of them holds — a "wherever each of us is now" reading would only compare two
@@ -4013,7 +4102,7 @@ test('runs one room on the session server and gives two browser contexts the sam
     expect(a.tick).toBeGreaterThan(0);
     expect(a.status).toBe('preparation');
     expect(a.gold).toBe(startingGold - costOf('pulse-spire'));
-    expect(a.pads['pad-east']).toBe('pulse-spire');
+    expect(a.pads['niche-corner']).toBe('pulse-spire');
     expect(a.eventCounts.towerPlaced).toBe(1);
     expect(a.commandCount).toBe(1);
     expect(b.deliveryMs).toBeGreaterThanOrEqual(0);
@@ -4094,10 +4183,10 @@ test('gives a client that joins late the current state of the room instead of an
   await enterRoom(page, roomId);
 
   await page.getByRole('button', { name: 'Pulse Spire' }).click();
-  await clickPad(page, 'pad-east');
+  await clickPad(page, 'niche-corner');
   await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
   await page.getByRole('button', { name: 'Grove Lens' }).click();
-  await clickPad(page, 'pad-south');
+  await clickPad(page, 'niche-mouth');
   await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
   await page.getByTestId('start-wave').click();
   await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
@@ -4134,8 +4223,8 @@ test('gives a client that joins late the current state of the room instead of an
     // they are held to what a fresh match could never report. A client that joined into an empty match of
     // its own would be at tick 0, at the full 220 aether, with two empty pads and no towers.
     expect(opening.pads).toEqual(before.snapshot.pads);
-    expect(opening.pads['pad-east']).toBe('pulse-spire');
-    expect(opening.pads['pad-south']).toBe('grove-lens');
+    expect(opening.pads['niche-corner']).toBe('pulse-spire');
+    expect(opening.pads['niche-mouth']).toBe('grove-lens');
     expect(opening.gold).toBeGreaterThanOrEqual(startingGold - costOf('pulse-spire') - costOf('grove-lens'));
     expect(opening.gold).toBeLessThan(startingGold);
     expect(opening.eventCounts.towerPlaced).toBe(2);
@@ -4331,16 +4420,16 @@ test('shows the reason the room gave for a rejected command and does not apply i
   const roomId = roomName('refuse');
   await enterRoom(page, roomId);
   await page.getByRole('button', { name: 'Pulse Spire' }).click();
-  await clickPad(page, 'pad-east');
+  await clickPad(page, 'niche-corner');
   await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
-  await expect(page.getByTestId('command-feedback')).toHaveText('Pulse Spire built on pad-east');
+  await expect(page.getByTestId('command-feedback')).toHaveText('Pulse Spire built on niche-corner');
   const built = await readDebugOrThrow(page);
   expect(built.snapshot.gold).toBe(startingGold - costOf('pulse-spire'));
 
   // The same pad, the same module, from a client that has not heard anything yet. The client cannot know
   // the pad is taken — it has no rules — so the reason has to come from the room, and it has to be the
   // room's reason rather than one the page made up for itself.
-  await clickPad(page, 'pad-east');
+  await clickPad(page, 'niche-corner');
   await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'rejected');
   await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-reason', 'pad-occupied');
   await expect(page.getByTestId('command-feedback')).toHaveText('Pad already occupied');
@@ -4355,7 +4444,7 @@ test('shows the reason the room gave for a rejected command and does not apply i
   // Nothing about the match moved: the room refused, so the room's state is the same state. A client that
   // applied the command to its own core would have dropped the gold a second time.
   expect(refused.snapshot.gold).toBe(startingGold - costOf('pulse-spire'));
-  expect(refused.snapshot.pads['pad-east']).toBe('pulse-spire');
+  expect(refused.snapshot.pads['niche-corner']).toBe('pulse-spire');
   expect(refused.snapshot.towers).toHaveLength(1);
   expect(refused.eventCounts.towerPlaced).toBe(1);
   expect(refused.rendered.towers).toBe(1);
@@ -4371,14 +4460,14 @@ test('shows the reason the room gave for a rejected command and does not apply i
   // A second module, the same way round: accepted once, refused on the same pad, with the gold that is
   // left being the room's arithmetic and not the client's.
   await page.getByRole('button', { name: 'Grove Lens' }).click();
-  await clickPad(page, 'pad-north');
+  await clickPad(page, 'niche-bend');
   await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
-  await expect(page.getByTestId('command-feedback')).toHaveText('Grove Lens built on pad-north');
+  await expect(page.getByTestId('command-feedback')).toHaveText('Grove Lens built on niche-bend');
   const second = await readDebugOrThrow(page);
   expect(second.snapshot.gold).toBe(startingGold - costOf('pulse-spire') - costOf('grove-lens'));
   expect(second.session.lastCommand?.commandId).toBe(3);
 
-  await clickPad(page, 'pad-north');
+  await clickPad(page, 'niche-bend');
   await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'rejected');
   await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-reason', 'pad-occupied');
   const twice = await readDebugOrThrow(page);
@@ -4500,7 +4589,7 @@ test('keeps the room panel and the session strip readable at both widths', async
   await page.getByTestId('entry-join-room').click();
   await waitForSessionState(page, 'live');
   await page.getByRole('button', { name: 'Pulse Spire' }).click();
-  await clickPad(page, 'pad-east');
+  await clickPad(page, 'niche-corner');
   await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
   await page.getByTestId('start-wave').click();
   await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.status ?? '') === 'wave', undefined, { timeout: 20_000 });
@@ -4558,7 +4647,7 @@ test('refuses a guest both room verbs by name and changes nothing at all', async
     expect(joined?.seatToken).not.toBe(owner?.seatToken);
 
     await page.getByRole('button', { name: 'Pulse Spire' }).click();
-    await clickPad(page, 'pad-east');
+    await clickPad(page, 'niche-corner');
     await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
     // The flag and the log are two different facts arriving on two different connections: the flag is
     // written from the room's answer to the POST, the log reaches this page in a frame. The room happens to
@@ -4618,7 +4707,7 @@ test('refuses a guest both room verbs by name and changes nothing at all', async
     const [afterOwner, afterGuest] = await Promise.all([readDebugOrThrow(page), readDebugOrThrow(guest)]);
     expect(afterOwner.snapshot.gold).toBe(startingGold - costOf('pulse-spire'));
     expect(afterGuest.snapshot.gold).toBe(afterOwner.snapshot.gold);
-    expect(afterOwner.snapshot.pads['pad-east']).toBe('pulse-spire');
+    expect(afterOwner.snapshot.pads['niche-corner']).toBe('pulse-spire');
     expect(afterGuest.rendered.towers).toBe(1);
     expect(afterOwner.commandCount).toBe(1);
     expect(afterGuest.commandCount).toBe(1);
@@ -4660,10 +4749,10 @@ test('restarts the run for every client at the owner request and keeps the seat'
     // A match with something in it, so that "restarted" is a claim about a run that was replaced rather
     // than about two empty preparations looking alike.
     await page.getByRole('button', { name: 'Pulse Spire' }).click();
-    await clickPad(page, 'pad-east');
+    await clickPad(page, 'niche-corner');
     await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
     await page.getByRole('button', { name: 'Grove Lens' }).click();
-    await clickPad(page, 'pad-north');
+    await clickPad(page, 'niche-bend');
     await page.getByTestId('start-wave').click();
     await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.status ?? '') === 'wave', undefined, {
       timeout: 20_000,
@@ -4765,7 +4854,7 @@ test('closes the room for everyone, names the reason and gives the name back', a
       });
     }
     await page.getByRole('button', { name: 'Pulse Spire' }).click();
-    await clickPad(page, 'pad-east');
+    await clickPad(page, 'niche-corner');
     await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
     const playedTo = await readRoom(request, roomId);
     expect(playedTo.commands).toBe(1);
@@ -4827,7 +4916,7 @@ test('closes the room for everyone, names the reason and gives the name back', a
       await expect(fresh.getByTestId('end-room')).toBeEnabled();
       const debug = await readDebugOrThrow(fresh);
       expect(debug.snapshot.towers).toEqual([]);
-      expect(debug.snapshot.pads['pad-east']).toBeNull();
+      expect(debug.snapshot.pads['niche-corner']).toBeNull();
     } finally {
       await third.close();
     }
@@ -4851,7 +4940,7 @@ test('hands the same seat back after a dropped stream, whole, from the tick the 
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await enterRoom(page, roomId);
   await page.getByRole('button', { name: 'Pulse Spire' }).click();
-  await clickPad(page, 'pad-east');
+  await clickPad(page, 'niche-corner');
   await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
   await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.session.commandCount ?? 0) >= 1, undefined, {
     timeout: 20_000,
@@ -5074,7 +5163,7 @@ test('lets a late client build at once and says the aether is shared', async ({ 
   page.on('pageerror', (error) => pageErrors.push(`a: ${error.message}`));
   await enterRoom(page, roomId);
   await page.getByRole('button', { name: 'Pulse Spire' }).click();
-  await clickPad(page, 'pad-east');
+  await clickPad(page, 'niche-corner');
   await expect(page.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
   await page.getByTestId('start-wave').click();
   await page.waitForFunction(() => (window.__ECHOES_DEBUG__?.snapshot.status ?? '') === 'wave', undefined, {
@@ -5104,9 +5193,9 @@ test('lets a late client build at once and says the aether is shared', async ({ 
     // that hid the second player from the board would be the separate-economy decision this task
     // explicitly does not take.
     await late.getByRole('button', { name: 'Frost Relay' }).click();
-    await clickPad(late, 'pad-south');
+    await clickPad(late, 'niche-mouth');
     await expect(late.getByTestId('command-feedback')).toHaveAttribute('data-feedback', 'accepted');
-    await expect(late.getByTestId('command-feedback')).toHaveText('Frost Relay built on pad-south');
+    await expect(late.getByTestId('command-feedback')).toHaveText('Frost Relay built on niche-mouth');
     for (const target of [page, late]) {
       await target.waitForFunction(() => (window.__ECHOES_DEBUG__?.session.commandCount ?? 0) >= 3, undefined, {
         timeout: 20_000,
@@ -5136,8 +5225,8 @@ test('lets a late client build at once and says the aether is shared', async ({ 
     // holds at a single instant.
     expect(a.status).toBe('wave');
     expect(a.commandCount).toBe(3);
-    expect(a.pads['pad-east']).toBe('pulse-spire');
-    expect(a.pads['pad-south']).toBe('frost-relay');
+    expect(a.pads['niche-corner']).toBe('pulse-spire');
+    expect(a.pads['niche-mouth']).toBe('frost-relay');
     expect(a.gold).toBeLessThan(startingGold);
     // Each window has the frame applied, so the second tower is on both boards: that is a claim about the
     // projection of one frame, not a comparison of two readings of a moving room.
@@ -5155,7 +5244,7 @@ test('lets a late client build at once and says the aether is shared', async ({ 
     await late.screenshot({ path: 'test-results/session-room-shared.png', fullPage: true });
     expect(pageErrors).toEqual([]);
     console.log(
-      `shared aether ${roomId}: a guest joined at tick ${openingLog?.[0]?.tick} built on pad-south at once, ` +
+      `shared aether ${roomId}: a guest joined at tick ${openingLog?.[0]?.tick} built on niche-mouth at once, ` +
         `and both clients applied frame ${a.seq} at tick ${a.tick} with gold ${a.gold}, ` +
         `${room.commands} commands in one log and ${room.players} clients`,
     );

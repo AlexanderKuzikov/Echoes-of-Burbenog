@@ -2,8 +2,11 @@ import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { TICK_RATE, createSimulation, createTrainingScenario } from './game-core/index.ts';
 import type { Command, CommandResult, MatchSnapshot, MatchStatus, SimulationEvent } from './game-core/index.ts';
+import { trainingCorridor } from './game-core/scenario.ts';
+import type { BayDefinition } from './game-core/scenario.ts';
 import {
   CONTENT_VERSION,
   DEFAULT_SESSION_PORT,
@@ -169,6 +172,30 @@ type FrameLogEntry = {
   deliveryMs: number;
 };
 
+type MapGeometryReading = {
+  roadHalfWidth: number;
+  routeLength: number;
+  routeSegments: number;
+  bends: number;
+  bays: number;
+  chamberRadius: number;
+  wallBlocks: number;
+  openCells: number;
+  coreEndsRoute: boolean;
+  // The frustum the corridor was fitted into, in world units. A map that is silently cropped by a
+  // hardcoded view height is a map the player cannot see, and the numbers are how that gets said out
+  // loud instead of by eye.
+  frame: { left: number; right: number; top: number; bottom: number; aspect: number };
+  pads: Array<{
+    padId: string;
+    x: number;
+    z: number;
+    roadDistance: number;
+    clearOfRoad: boolean;
+    coverage: Record<string, number>;
+  }>;
+};
+
 type DebugState = {
   ready: boolean;
   renderer: string;
@@ -189,6 +216,10 @@ type DebugState = {
   readonly towerPositions: Array<{ x: number; z: number }>;
   readonly enemyPositions: Array<{ x: number; z: number }>;
   readonly padScreenPositions: Array<{ padId: string; x: number; y: number }>;
+  // The corridor as a measurement, not as a claim: road width, length and turn count, the niche and
+  // chamber inventory, and per pad the distance to the road plus how much of the road each tower
+  // range reaches. "A niche is off the road" and "niches differ" are then numbers a test can read.
+  readonly mapGeometry: MapGeometryReading;
   readonly eventCounts: Record<SimulationEvent['type'], number>;
   readonly recentEvents: SimulationEvent[];
   readonly paused: boolean;
@@ -625,21 +656,33 @@ const withProbeWeight = <T extends THREE.MeshStandardMaterial>(material: T, role
 const isProbeMaterial = (material: THREE.Material): material is THREE.MeshStandardMaterial =>
   material instanceof THREE.MeshStandardMaterial;
 
+const cameraTarget = new THREE.Vector3(0, 0, 0);
 const camera = new THREE.OrthographicCamera(-8, 8, 5, -5, 0.1, 100);
 camera.position.set(9, 10, 9);
-camera.lookAt(0, 0, 0);
+camera.lookAt(cameraTarget);
+
+// The horizontal part of the view direction, and the only thing the massif layout reads. A wall
+// standing between the viewer and the channel is what hides the road, so height is spent on the far
+// bank and withheld from the near one. This is the diorama rule, and it is a layout decision, not a
+// lighting one: the same cells are cut from the same raster either way.
+const VIEW_DIRECTION = new THREE.Vector3().subVectors(camera.position, cameraTarget).setY(0).normalize();
+const VIEW_DIR_X = VIEW_DIRECTION.x;
+const VIEW_DIR_Z = VIEW_DIRECTION.z;
 
 const hemisphereLight = new THREE.HemisphereLight(0xa9c9e8, 0x142329, 2.2);
 scene.add(hemisphereLight);
 
 const keyLight = new THREE.DirectionalLight(0xffe4bf, 3.4);
-keyLight.position.set(-5, 12, 7);
+// From the viewer's side and high: the massif rises on the far bank, and light from the far side
+// would put the whole near half of the channel in its shadow. The shadow frustum covers the whole
+// map, not the corridor, because the walls outside it are what cast across it.
+keyLight.position.set(6, 14, 8);
 keyLight.castShadow = true;
 keyLight.shadow.mapSize.set(1024, 1024);
-keyLight.shadow.camera.left = -10;
-keyLight.shadow.camera.right = 10;
-keyLight.shadow.camera.top = 10;
-keyLight.shadow.camera.bottom = -10;
+keyLight.shadow.camera.left = -14;
+keyLight.shadow.camera.right = 14;
+keyLight.shadow.camera.top = 14;
+keyLight.shadow.camera.bottom = -14;
 scene.add(keyLight);
 
 const fillLight = new THREE.PointLight(0x2ac7b5, 3.2, 12, 2);
@@ -659,9 +702,116 @@ ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
 scene.add(ground);
 
-const grid = new THREE.GridHelper(config.map.width, config.map.width, 0x3d7376, 0x24464e);
-grid.position.y = 0.012;
-scene.add(grid);
+// ---------------------------------------------------------------------------------------------
+// The corridor.
+//
+// The road is one polyline and the massif is everything the road and the niches do not occupy.
+// Both come out of a single raster, so a wall cannot land on the road and a niche cannot end up
+// walled in — one cut, one truth, and the geometry the player looks at is the geometry the map is.
+// The old plane and its grid are gone with it: on an open field every spot was worth the same, and
+// the channel is what makes a spot worth something.
+// ---------------------------------------------------------------------------------------------
+
+const ROAD_HALF_WIDTH = trainingCorridor.roadHalfWidth;
+
+type RoadSegment = { ax: number; az: number; bx: number; bz: number; length: number };
+const roadSegments: RoadSegment[] = [];
+for (const route of config.map.routes) {
+  for (let index = 1; index < route.points.length; index += 1) {
+    const start = route.points[index - 1];
+    const end = route.points[index];
+    roadSegments.push({
+      ax: start.x,
+      az: start.z,
+      bx: end.x,
+      bz: end.z,
+      length: Math.hypot(end.x - start.x, end.z - start.z),
+    });
+  }
+}
+const routeSegmentCount = roadSegments.length;
+const routeLength = roadSegments.reduce((total, segment) => total + segment.length, 0);
+
+const distanceToSegment = (px: number, pz: number, segment: RoadSegment): number => {
+  const deltaX = segment.bx - segment.ax;
+  const deltaZ = segment.bz - segment.az;
+  const lengthSquared = deltaX * deltaX + deltaZ * deltaZ;
+  const along =
+    lengthSquared <= 0
+      ? 0
+      : Math.max(0, Math.min(1, ((px - segment.ax) * deltaX + (pz - segment.az) * deltaZ) / lengthSquared));
+  return Math.hypot(px - (segment.ax + deltaX * along), pz - (segment.az + deltaZ * along));
+};
+
+const distanceToRoad = (px: number, pz: number): number => {
+  let nearest = Number.POSITIVE_INFINITY;
+  for (const segment of roadSegments) {
+    nearest = Math.min(nearest, distanceToSegment(px, pz, segment));
+  }
+  return nearest;
+};
+
+// How much road a spot sees at a given tower range. This is the currency the map is designed in, so
+// it is measured the way a tower shoots: against the ribbon, not against the niche it stands in.
+// Sampling the polyline keeps it honest for any range without a closed-form circle/segment clip.
+const COVERAGE_SAMPLE = 0.05;
+const corridorCoverage = (px: number, pz: number, range: number): number => {
+  let covered = 0;
+  for (const segment of roadSegments) {
+    const samples = Math.max(1, Math.ceil(segment.length / COVERAGE_SAMPLE));
+    const step = segment.length / samples;
+    for (let sample = 0; sample <= samples; sample += 1) {
+      const along = Math.min(segment.length, sample * step);
+      const t = segment.length <= 0 ? 0 : along / segment.length;
+      if (Math.hypot(px - (segment.ax + (segment.bx - segment.ax) * t), pz - (segment.az + (segment.bz - segment.az) * t)) <= range) {
+        covered += step;
+      }
+    }
+  }
+  return Math.round(covered * 100) / 100;
+};
+
+// The road as a closed ribbon: each leg offset sideways, the corners mitred, left side forward and
+// right side back. A box per leg would leave a notch at every turn and overlap at every other one —
+// a road that has to be read as a road cannot be built out of pieces that do not meet.
+const toShapePoint = (x: number, z: number): THREE.Vector2 => new THREE.Vector2(x, -z);
+
+const offsetRibbon = (points: readonly { x: number; z: number }[], offset: number): THREE.Vector2[] => {
+  const left: THREE.Vector2[] = [];
+  const right: THREE.Vector2[] = [];
+  for (let index = 0; index < points.length; index += 1) {
+    const point = points[index];
+    const isFirst = index === 0;
+    const isLast = index === points.length - 1;
+    const previous = points[Math.max(0, index - 1)];
+    const next = points[Math.min(points.length - 1, index + 1)];
+    const inX = point.x - previous.x;
+    const inZ = point.z - previous.z;
+    const inLength = Math.hypot(inX, inZ) || 1;
+    const outX = next.x - point.x;
+    const outZ = next.z - point.z;
+    const outLength = Math.hypot(outX, outZ) || 1;
+    const normalX = -inZ / inLength;
+    const normalZ = inX / inLength;
+    const outNormalX = -outZ / outLength;
+    const outNormalZ = outX / outLength;
+    // An end has one leg, not two, so it gets that leg's normal and nothing to mitre against: the
+    // spawn end uses the leg leaving it, the core end the leg arriving at it. Averaging a leg with a
+    // zero-length one is how a gate ends up a unit and a half past the spawn, or a NaN in the shape.
+    const miterX = isFirst ? outNormalX : isLast ? normalX : normalX + outNormalX;
+    const miterZ = isFirst ? outNormalZ : isLast ? normalZ : normalZ + outNormalZ;
+    const miterLength = Math.hypot(miterX, miterZ);
+    const reach = isFirst || isLast
+      ? offset
+      : offset / Math.max(0.4, (miterX * normalX + miterZ * normalZ) / miterLength);
+    // Clamped, because a hairpin would otherwise send the corner to infinity and a spike is not a
+    // turn. Two and a half widths is past any turn a corridor map has.
+    const clamped = Math.max(-Math.abs(offset) * 2.5, Math.min(Math.abs(offset) * 2.5, reach));
+    left.push(toShapePoint(point.x + (miterX / miterLength) * clamped, point.z + (miterZ / miterLength) * clamped));
+    right.push(toShapePoint(point.x - (miterX / miterLength) * clamped, point.z - (miterZ / miterLength) * clamped));
+  }
+  return [...left, ...right.reverse()];
+};
 
 const pathMaterial = withProbeWeight(
   new THREE.MeshStandardMaterial({
@@ -669,27 +819,253 @@ const pathMaterial = withProbeWeight(
     emissive: 0x0c2425,
     emissiveIntensity: 0.65,
     roughness: 0.82,
+    side: THREE.DoubleSide,
   }),
   'path',
 );
 const PATH_Y = 0.08;
-const routeSegmentCount = config.map.routes.reduce((total, route) => total + route.points.length - 1, 0);
-for (const [routeIndex, route] of config.map.routes.entries()) {
-  for (let index = 1; index < route.points.length; index += 1) {
-    const start = route.points[index - 1];
-    const end = route.points[index];
-    const deltaX = end.x - start.x;
-    const deltaZ = end.z - start.z;
-    const length = Math.hypot(deltaX, deltaZ);
-    const segment = new THREE.Mesh(new THREE.BoxGeometry(length, 0.08, 0.62), pathMaterial);
-    segment.position.set((start.x + end.x) / 2, PATH_Y + routeIndex * 0.004, (start.z + end.z) / 2);
-    // Three.js rotates local +X toward -Z, so the Y angle is negated.
-    segment.rotation.y = Math.atan2(-deltaZ, deltaX);
-    segment.receiveShadow = true;
-    segment.name = `route:${route.id}`;
-    scene.add(segment);
+for (const route of config.map.routes) {
+  const ribbon = new THREE.Shape(offsetRibbon(route.points, ROAD_HALF_WIDTH));
+  const road = new THREE.Mesh(new THREE.ShapeGeometry(ribbon), pathMaterial);
+  road.rotation.x = -Math.PI / 2;
+  road.position.y = PATH_Y;
+  road.receiveShadow = true;
+  road.name = `route:${route.id}`;
+  scene.add(road);
+}
+
+// The raster. Cells whose centre is within half a road of the polyline, inside a niche, or inside
+// the core chamber are open; everything else is rock. Both the road and the niche rectangles are
+// authored on the same 0.4 lattice, so "a niche one cell away from the road" and "a niche opening
+// onto it" are two states this code can actually tell apart instead of two intentions.
+const CELL_SIZE = 0.4;
+const rasterColumns = Math.round(config.map.width / CELL_SIZE);
+const rasterRows = Math.round(config.map.depth / CELL_SIZE);
+const cellCenterX = (column: number): number => -config.map.width / 2 + (column + 0.5) * CELL_SIZE;
+const cellCenterZ = (row: number): number => -config.map.depth / 2 + (row + 0.5) * CELL_SIZE;
+const cellIndex = (column: number, row: number): number => row * rasterColumns + column;
+const insideBay = (bay: BayDefinition, x: number, z: number): boolean =>
+  x >= bay.minX && x <= bay.maxX && z >= bay.minZ && z <= bay.maxZ;
+
+const openCells = new Uint8Array(rasterColumns * rasterRows);
+const corridorBounds = { minX: Number.POSITIVE_INFINITY, maxX: Number.NEGATIVE_INFINITY, minZ: Number.POSITIVE_INFINITY, maxZ: Number.NEGATIVE_INFINITY };
+const noteBounds = (x: number, z: number) => {
+  corridorBounds.minX = Math.min(corridorBounds.minX, x);
+  corridorBounds.maxX = Math.max(corridorBounds.maxX, x);
+  corridorBounds.minZ = Math.min(corridorBounds.minZ, z);
+  corridorBounds.maxZ = Math.max(corridorBounds.maxZ, z);
+};
+for (const point of config.map.routes.flatMap((route) => route.points)) {
+  noteBounds(point.x, point.z);
+}
+
+for (let row = 0; row < rasterRows; row += 1) {
+  for (let column = 0; column < rasterColumns; column += 1) {
+    const x = cellCenterX(column);
+    const z = cellCenterZ(row);
+    let open = distanceToRoad(x, z) <= ROAD_HALF_WIDTH + 1e-6;
+    if (!open && trainingCorridor.bays.some((bay) => insideBay(bay, x, z))) {
+      open = true;
+    }
+    if (!open) {
+      const chamber = trainingCorridor.coreChamber;
+      open = Math.hypot(x - chamber.x, z - chamber.z) <= chamber.radius;
+    }
+    openCells[cellIndex(column, row)] = open ? 1 : 0;
+    if (open) {
+      noteBounds(x, z);
+    }
   }
 }
+
+// Height classes, 0 lowest. The rim (one cell from anything open) stays low all round, so the edge
+// of the channel is a lip the eye can see over and a shot can fly over; behind it the far bank
+// climbs to give the corridor a wall to run against, while the near bank stays low because a tall
+// wall there is a wall in front of the road.
+const WALL_HEIGHTS = [0.34, 0.68, 1.4, 1.95] as const;
+// Distance to the open area, by breadth-first search from every open cell at once. The queue is
+// walked with a moving index and not with `pop()`: a stack gives a depth-first order, and a
+// depth-first distance field is not a distance field — the cells near the far end of the first seed
+// get the depth of the detour that reached them, which turns "how deep into the rock is this" into
+// "which seed did the walker start from".
+const openDistance = new Int32Array(rasterColumns * rasterRows).fill(-1);
+const openParent = new Int32Array(rasterColumns * rasterRows).fill(-1);
+const frontier: number[] = [];
+for (let index = 0; index < openCells.length; index += 1) {
+  if (openCells[index] === 1) {
+    openDistance[index] = 0;
+    frontier.push(index);
+  }
+}
+for (let cursor = 0; cursor < frontier.length; cursor += 1) {
+  const index = frontier[cursor];
+  const column = index % rasterColumns;
+  const row = (index - column) / rasterColumns;
+  const neighbours: Array<[number, number]> = [
+    [column - 1, row],
+    [column + 1, row],
+    [column, row - 1],
+    [column, row + 1],
+  ];
+  for (const [nextColumn, nextRow] of neighbours) {
+    if (nextColumn < 0 || nextColumn >= rasterColumns || nextRow < 0 || nextRow >= rasterRows) {
+      continue;
+    }
+    const next = cellIndex(nextColumn, nextRow);
+    if (openCells[next] === 1 || openDistance[next] >= 0) {
+      continue;
+    }
+    openDistance[next] = openDistance[index] + 1;
+    openParent[next] = index;
+    frontier.push(next);
+  }
+}
+
+const cellXOf = (index: number): number => cellCenterX(index % rasterColumns);
+const cellZOf = (index: number): number => {
+  const column = index % rasterColumns;
+  return cellCenterZ((index - column) / rasterColumns);
+};
+
+const wallHeightClass = (index: number): number => {
+  const distance = openDistance[index];
+  const parent = openParent[index];
+  if (distance <= 1 || parent < 0) {
+    return 0;
+  }
+  const awayX = cellXOf(index) - cellXOf(parent);
+  const awayZ = cellZOf(index) - cellZOf(parent);
+  if (awayX * VIEW_DIR_X + awayZ * VIEW_DIR_Z > 0) {
+    return 1;
+  }
+  return distance <= 2 ? 1 : distance <= 4 ? 2 : 3;
+};
+
+type WallRect = { minX: number; minZ: number; width: number; depth: number; heightClass: number };
+const wallRects: WallRect[] = [];
+const claimedCells = new Uint8Array(rasterColumns * rasterRows);
+for (let row = 0; row < rasterRows; row += 1) {
+  for (let column = 0; column < rasterColumns; column += 1) {
+    const index = cellIndex(column, row);
+    if (openCells[index] === 1 || claimedCells[index] === 1) {
+      continue;
+    }
+    const heightClass = wallHeightClass(index);
+    const sameCell = (checkColumn: number, checkRow: number): boolean => {
+      const check = cellIndex(checkColumn, checkRow);
+      return openCells[check] === 0 && claimedCells[check] === 0 && wallHeightClass(check) === heightClass;
+    };
+    let width = 1;
+    while (column + width < rasterColumns && sameCell(column + width, row)) {
+      width += 1;
+    }
+    let depth = 1;
+    let grow = true;
+    while (grow && row + depth < rasterRows) {
+      for (let step = 0; step < width; step += 1) {
+        if (!sameCell(column + step, row + depth)) {
+          grow = false;
+          break;
+        }
+      }
+      if (grow) {
+        depth += 1;
+      }
+    }
+    for (let stepRow = 0; stepRow < depth; stepRow += 1) {
+      for (let stepColumn = 0; stepColumn < width; stepColumn += 1) {
+        claimedCells[cellIndex(column + stepColumn, row + stepRow)] = 1;
+      }
+    }
+    wallRects.push({
+      minX: cellCenterX(column) - CELL_SIZE / 2,
+      minZ: cellCenterZ(row) - CELL_SIZE / 2,
+      width: width * CELL_SIZE,
+      depth: depth * CELL_SIZE,
+      heightClass,
+    });
+  }
+}
+
+// The rim gets a faint self-glow because it is the edge the player reads the corridor by: a lip of
+// lit rock between the road and the mass behind it. The mass behind the rim does not, or the whole
+// map would glow.
+const wallLowMaterial = withProbeWeight(
+  new THREE.MeshStandardMaterial({
+    color: 0x24454f,
+    emissive: 0x0a2126,
+    emissiveIntensity: 0.55,
+    roughness: 0.84,
+    metalness: 0.12,
+  }),
+  'ground',
+);
+const wallHighMaterial = withProbeWeight(
+  new THREE.MeshStandardMaterial({ color: 0x1a323a, roughness: 0.9, metalness: 0.08 }),
+  'ground',
+);
+
+// Every rect of a height class becomes one box, and the boxes of a material become one mesh. A
+// carved massif of a few hundred cells costs two draw calls, not three hundred.
+const buildWallGroup = (name: string, material: THREE.Material, classes: readonly number[]): number => {
+  const parts: THREE.BufferGeometry[] = [];
+  for (const rect of wallRects) {
+    if (!classes.includes(rect.heightClass)) {
+      continue;
+    }
+    const height = WALL_HEIGHTS[rect.heightClass];
+    const box = new THREE.BoxGeometry(rect.width, height, rect.depth);
+    box.translate(rect.minX + rect.width / 2, height / 2, rect.minZ + rect.depth / 2);
+    parts.push(box);
+  }
+  if (parts.length === 0) {
+    return 0;
+  }
+  const merged = mergeGeometries(parts);
+  for (const part of parts) {
+    part.dispose();
+  }
+  if (!merged) {
+    return 0;
+  }
+  const mesh = new THREE.Mesh(merged, material);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  mesh.name = name;
+  scene.add(mesh);
+  return parts.length;
+};
+
+const wallBlockCount = buildWallGroup('massif:low', wallLowMaterial, [0, 1]);
+buildWallGroup('massif:high', wallHighMaterial, [2, 3]);
+
+// Niche floors and the core chamber: the open ground a tower stands on, kept a shade apart from the
+// road so a recess reads as a recess and not as a widening the road happens to have.
+const bayFloorMaterial = withProbeWeight(
+  new THREE.MeshStandardMaterial({ color: 0x11303a, emissive: 0x082024, emissiveIntensity: 0.7, roughness: 0.88 }),
+  'ground',
+);
+const bayFloorParts: THREE.BufferGeometry[] = [];
+for (const bay of trainingCorridor.bays) {
+  const shape = new THREE.Shape([
+    toShapePoint(bay.minX, bay.minZ),
+    toShapePoint(bay.maxX, bay.minZ),
+    toShapePoint(bay.maxX, bay.maxZ),
+    toShapePoint(bay.minX, bay.maxZ),
+  ]);
+  bayFloorParts.push(new THREE.ShapeGeometry(shape));
+}
+const chamberFloor = new THREE.CircleGeometry(trainingCorridor.coreChamber.radius, 24);
+bayFloorParts.push(chamberFloor);
+const bayFloors = new THREE.Mesh(mergeGeometries(bayFloorParts) as THREE.BufferGeometry, bayFloorMaterial);
+for (const part of bayFloorParts) {
+  part.dispose();
+}
+bayFloors.rotation.x = -Math.PI / 2;
+bayFloors.position.y = 0.05;
+bayFloors.receiveShadow = true;
+bayFloors.name = 'niche-floors';
+scene.add(bayFloors);
 
 const padGeometry = new THREE.CylinderGeometry(0.62, 0.72, 0.14, 6);
 const padViews = new Map<string, PadView>();
@@ -1581,20 +1957,76 @@ for (const option of buildOptions) {
   });
 }
 
+// Framing is measured, not guessed: the corridor's own bounds (plus the rim around it and the height
+// of the tallest bank) are projected into the camera and the frustum is grown to whatever aspect the
+// canvas happens to have. A hardcoded view height was two numbers that only ever fit one window.
+const FRAME_MARGIN = 1.2;
+const NARROW_ASPECT_ZOOM_CAP = 1.9;
+const framePoint = new THREE.Vector3();
+
+const frameCorridor = (aspect: number): void => {
+  const { minX, maxX, minZ, maxZ } = corridorBounds;
+  const pad = CELL_SIZE * 2;
+  camera.position.set(9, 10, 9);
+  camera.lookAt(cameraTarget);
+  camera.updateMatrixWorld(true);
+  let left = Number.POSITIVE_INFINITY;
+  let right = Number.NEGATIVE_INFINITY;
+  let bottom = Number.POSITIVE_INFINITY;
+  let top = Number.NEGATIVE_INFINITY;
+  for (const x of [minX - pad, maxX + pad]) {
+    for (const z of [minZ - pad, maxZ + pad]) {
+      for (const y of [0, WALL_HEIGHTS[WALL_HEIGHTS.length - 1]]) {
+        const view = framePoint.set(x, y, z).applyMatrix4(camera.matrixWorldInverse);
+        left = Math.min(left, view.x);
+        right = Math.max(right, view.x);
+        bottom = Math.min(bottom, view.y);
+        top = Math.max(top, view.y);
+      }
+    }
+  }
+  const centerX = (left + right) / 2;
+  const centerY = (bottom + top) / 2;
+  let halfWidth = ((right - left) / 2) * FRAME_MARGIN;
+  let halfHeight = ((top - bottom) / 2) * FRAME_MARGIN;
+  if (halfWidth / halfHeight > aspect) {
+    halfHeight = halfWidth / aspect;
+  } else {
+    // A window narrower than the map would otherwise be answered by pulling the camera so far back
+    // that the map becomes a stamp. Past a point, cropping the frame edges beats that.
+    halfWidth = Math.min(halfWidth, halfHeight * aspect * NARROW_ASPECT_ZOOM_CAP);
+    halfHeight = halfWidth / aspect;
+  }
+  camera.left = centerX - halfWidth;
+  camera.right = centerX + halfWidth;
+  camera.top = centerY + halfHeight;
+  camera.bottom = centerY - halfHeight;
+  camera.updateProjectionMatrix();
+};
+
+let appliedViewportWidth = 0;
+let appliedViewportHeight = 0;
+
 const resize = () => {
   const width = sceneMount.clientWidth || 1;
   const height = sceneMount.clientHeight || 1;
-  const aspect = width / height;
-  const viewHeight = 9.6;
-  camera.left = (-viewHeight * aspect) / 2;
-  camera.right = (viewHeight * aspect) / 2;
-  camera.top = viewHeight / 2;
-  camera.bottom = -viewHeight / 2;
-  camera.updateProjectionMatrix();
+  if (width === appliedViewportWidth && height === appliedViewportHeight) {
+    return;
+  }
+  appliedViewportWidth = width;
+  appliedViewportHeight = height;
+  frameCorridor(width / height);
   renderer.setSize(width, height, false);
 };
 
-window.addEventListener('resize', resize);
+// The dock, the save panel and the entry overlay all change how much room the scene gets without
+// the window changing size, so a `resize` listener alone leaves the frustum fitted to a box that is
+// no longer there — the map gets cut off by chrome that grew under it. The observer is the only thing
+// that notices, and the size guard keeps its own `setSize` from waking it again.
+const mountSizeObserver = new ResizeObserver(() => {
+  resize();
+});
+mountSizeObserver.observe(sceneMount);
 resize();
 
 const padFreeColor = new THREE.Color(0x2b7073);
@@ -3609,6 +4041,44 @@ window.__ECHOES_DEBUG__ = {
     return config.map.buildPads
       .map((pad) => projectPadToCanvas(pad.id))
       .filter((point): point is { padId: string; x: number; y: number } => point !== null);
+  },
+  get mapGeometry(): MapGeometryReading {
+    return {
+      roadHalfWidth: ROAD_HALF_WIDTH,
+      routeLength: Math.round(routeLength * 100) / 100,
+      routeSegments: routeSegmentCount,
+      bends: config.map.routes.reduce((total, route) => total + Math.max(0, route.points.length - 2), 0),
+      bays: trainingCorridor.bays.length,
+      chamberRadius: trainingCorridor.coreChamber.radius,
+      wallBlocks: wallBlockCount,
+      openCells: Array.from(openCells).filter((cell) => cell === 1).length,
+      frame: {
+        left: camera.left,
+        right: camera.right,
+        top: camera.top,
+        bottom: camera.bottom,
+        aspect: (camera.right - camera.left) / (camera.top - camera.bottom),
+      },
+      coreEndsRoute: config.map.routes.some((route) => {
+        const last = route.points[route.points.length - 1];
+        return last.x === config.map.corePosition.x && last.z === config.map.corePosition.z;
+      }),
+      pads: config.map.buildPads.map((pad) => {
+        const roadDistance = Math.round(distanceToRoad(pad.position.x, pad.position.z) * 100) / 100;
+        const coverage: Record<string, number> = {};
+        for (const tower of config.towers) {
+          coverage[tower.id] = corridorCoverage(pad.position.x, pad.position.z, tower.range);
+        }
+        return {
+          padId: pad.id,
+          x: pad.position.x,
+          z: pad.position.z,
+          roadDistance,
+          clearOfRoad: roadDistance > ROAD_HALF_WIDTH + 0.5,
+          coverage,
+        };
+      }),
+    };
   },
   get eventCounts() {
     return { ...eventCounts };
