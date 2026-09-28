@@ -71,8 +71,8 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
   // Four routes over one road. The contour is walked by all four and each approach by exactly one, and
   // that difference is what is drawn: taken route by route, the same road gets built four times over,
   // and a road built twice is a road two copies of which will eventually disagree at a corner. So a
-  // segment is keyed by its two endpoints, counted across the walks, and drawn once. What the raster
-  // and the coverage measure is the same set — the road, not the four ways onto it.
+  // segment is keyed by its two endpoints, drawn once, and told apart by how many routes contain it.
+  // What the raster and the coverage measure is the same set — the road, not the four ways onto it.
   type Point = { x: number; z: number };
   const pointKey = (x: number, z: number): string => `${x},${z}`;
   const segmentKey = (from: Point, to: Point): string => {
@@ -80,11 +80,18 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
     const tail = pointKey(to.x, to.z);
     return head < tail ? `${head}>${tail}` : `${tail}>${head}`;
   };
-  const walkCount = new Map<string, number>();
+  // Routes, not passes. A circuit walks its own approach out and back, so it passes that approach twice
+  // inside the one route that owns it, and a count of passes called it shared with the ring: the ring
+  // then drew as a broken line reaching past the map's edge, and no approach drew at all. A route is one
+  // owner however many times it walks over a segment, so each route contributes a set, not a tally.
+  const routeCount = new Map<string, number>();
   for (const route of config.map.routes) {
+    const ownSegments = new Set<string>();
     for (let index = 1; index < route.points.length; index += 1) {
-      const key = segmentKey(route.points[index - 1], route.points[index]);
-      walkCount.set(key, (walkCount.get(key) ?? 0) + 1);
+      ownSegments.add(segmentKey(route.points[index - 1], route.points[index]));
+    }
+    for (const own of ownSegments) {
+      routeCount.set(own, (routeCount.get(own) ?? 0) + 1);
     }
   }
 
@@ -108,7 +115,7 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
         length: Math.hypot(end.x - start.x, end.z - start.z),
       };
       roadSegments.push(segment);
-      if ((walkCount.get(key) ?? 0) > 1) {
+      if ((routeCount.get(key) ?? 0) > 1) {
         contourSegments.push(segment);
       }
     }
@@ -152,7 +159,7 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
   for (const route of config.map.routes) {
     const points: Point[] = [route.points[0]];
     for (let index = 1; index < route.points.length; index += 1) {
-      if ((walkCount.get(segmentKey(route.points[index - 1], route.points[index])) ?? 0) !== 1) {
+      if ((routeCount.get(segmentKey(route.points[index - 1], route.points[index])) ?? 0) !== 1) {
         break;
       }
       points.push(route.points[index]);
