@@ -53,7 +53,7 @@
           <div id="scene"></div>
           <div class="viewport-vignette" aria-hidden="true"></div>
           <div class="scene-caption">
-            <span class="caption-kicker">Sector 01 · Burrow Cross</span>
+            <span class="caption-kicker">Sector 01 · Burrow Vault</span>
             <strong>Schematic combat preview</strong>
             <span>Own visual language / reference-inspired readability</span>
           </div>
@@ -68,16 +68,27 @@
           <div class="result-banner" data-testid="match-result" data-result="none" role="status" hidden>Sector secured</div>
           <div class="state-badge" data-testid="state-badge" data-state="idle" role="status" hidden>Paused</div>
           <ul class="combat-log" data-testid="event-feed" aria-label="Combat log"></ul>
+          <div class="minimap" data-testid="minimap">
+            <canvas
+              class="minimap-canvas"
+              data-testid="minimap-canvas"
+              width="220"
+              height="220"
+              role="img"
+              aria-label="Minimap of the whole vault: the road, the niches, built towers, living hostiles and the well. Click it to move the camera there."
+            ></canvas>
+            <span class="minimap-caption">Vault</span>
+          </div>
           <div class="map-legend" aria-label="Map legend">
             <span><i class="legend-mark legend-mark--path"></i>Route</span>
             <span><i class="legend-mark legend-mark--build"></i>Build pad</span>
             <span><i class="legend-mark legend-mark--threat"></i>Threat</span>
-            <span data-testid="camera-hint">Drag orbits · wheel zooms · right drag pans · R resets</span>
+            <span data-testid="camera-hint">WASD or arrows move · wheel zooms · right drag pans · click the minimap · R resets</span>
           </div>
           <div class="selection-card" data-testid="selection-card">
             <span class="selection-kicker">Selected structure</span>
             <strong data-testid="selection-card-name">Pulse Spire</strong>
-            <span data-testid="selection-card-detail">Range 2.8 · Damage 18</span>
+            <span data-testid="selection-card-detail">Range 4.05 · Damage 18</span>
           </div>
         </section>
 
@@ -109,7 +120,7 @@
           </section>
           <section class="dock-section objective-section">
             <span class="status-kicker">Current objective</span>
-            <strong>Hold the four gates</strong>
+            <strong>Hold the ring</strong>
             <span class="status-detail" data-testid="objective-detail">Awaiting start command</span>
           </section>
           <section class="dock-section wave-section">

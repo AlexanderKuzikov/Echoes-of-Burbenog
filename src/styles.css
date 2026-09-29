@@ -554,8 +554,8 @@ h1 {
 }
 
 .selection-card {
-  right: 20px;
-  top: 50%;
+  left: 22px;
+  top: 104px;
   display: grid;
   gap: 4px;
   min-width: 170px;
@@ -564,7 +564,6 @@ h1 {
   border-radius: 12px;
   background: rgba(48, 38, 28, 0.76);
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.2);
-  transform: translateY(-50%);
 }
 
 .selection-card strong {
@@ -575,6 +574,44 @@ h1 {
 .selection-card span:last-child {
   color: #c0aa8a;
   font-size: 0.68rem;
+}
+
+/* The minimap takes the whole right column under the scene status, and the selection card moves to
+   the left for it. On a 1280x720 window the board is four hundred pixels tall: a 220-pixel map plus its
+   frame and its caption is 270 of them, and the column it was going into had 113 free above the card
+   and 112 below it. It is a 2D canvas drawing the whole ninety-six unit plate at all times — that is
+   what makes it a map and not a second camera — so 220 pixels is 2.3 per world unit, which is enough
+   to aim a click and far too small to be mistaken for the board itself. */
+.minimap {
+  position: absolute;
+  z-index: 2;
+  right: 20px;
+  top: 60px;
+  display: grid;
+  gap: 6px;
+  justify-items: center;
+  padding: 10px;
+  border: 1px solid rgba(110, 226, 207, 0.34);
+  border-radius: 12px;
+  background: rgba(6, 18, 24, 0.82);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
+}
+
+.minimap-canvas {
+  display: block;
+  width: 220px;
+  height: 220px;
+  border-radius: 6px;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.minimap-caption {
+  color: #6ee2cf;
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .command-dock {
@@ -1201,10 +1238,23 @@ h1 {
   }
 
   .selection-card {
+    left: 12px;
     top: auto;
-    right: 12px;
     bottom: 62px;
-    transform: none;
+  }
+
+  /* On a narrow board the map and the card cannot both have the right edge, so the card keeps the
+     left and the map the right, and the map shrinks by a third: a click target of 145 pixels is still
+     larger than any niche on it. */
+  .minimap {
+    top: 12px;
+    right: 12px;
+    padding: 7px;
+  }
+
+  .minimap-canvas {
+    width: 145px;
+    height: 145px;
   }
 
   .combat-log {
