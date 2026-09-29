@@ -863,6 +863,25 @@ h1 {
   transform: none;
 }
 
+/* The wave row stopped being a control when waves moved onto a clock, so it is a readout with the
+   weight of one: same size and same place, no hover, no pointer, and the countdown is what it is for.
+   `data-counting="yes"` is the state the player is waiting in and the only one that brightens. */
+.wave-button--status,
+.wave-button--status:disabled {
+  border-color: rgba(143, 184, 184, 0.24);
+  background: rgba(9, 24, 31, 0.62);
+  color: #789495;
+  cursor: default;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.06em;
+}
+
+.wave-button--status[data-counting="yes"] {
+  border-color: rgba(255, 197, 107, 0.5);
+  background: rgba(48, 38, 28, 0.72);
+  color: #ffe2ae;
+}
+
 .wave-button--ghost {
   border-color: rgba(143, 184, 184, 0.24);
   background: rgba(9, 24, 31, 0.62);

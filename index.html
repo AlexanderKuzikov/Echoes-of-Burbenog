@@ -121,7 +121,7 @@
           <section class="dock-section objective-section">
             <span class="status-kicker">Current objective</span>
             <strong>Hold the ring</strong>
-            <span class="status-detail" data-testid="objective-detail">Awaiting start command</span>
+            <span class="status-detail" data-testid="objective-detail">Waves land on their own · build while the clock runs</span>
           </section>
           <section class="dock-section wave-section">
             <div class="wave-heading">
@@ -133,7 +133,17 @@
               <span class="wave-threat">Hostiles <b data-testid="enemy-count">0</b></span>
             </div>
             <div class="wave-actions">
-              <button class="wave-button" type="button" data-testid="start-wave">Start Wave</button>
+              <!-- Not a control. Waves land on a clock in the core, so this row is the readout of when
+                   the next one arrives; `main.ts` fills it and keeps it disabled. The testid stays
+                   because the dock's shape is a contract the scenarios and the seam both read. -->
+              <button
+                class="wave-button wave-button--status"
+                type="button"
+                data-testid="start-wave"
+                data-counting="no"
+                disabled
+                title="Waves start on their own clock, whatever is still walking when the next one lands"
+              >Next wave</button>
               <div class="wave-controls">
                 <button
                   class="wave-button wave-button--ghost"

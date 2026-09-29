@@ -986,6 +986,9 @@ const rejectionMessages: Record<string, string> = {
   'unknown-tower': 'Unknown module',
   'match-finished': 'Match already finished',
   'wave-already-active': 'Wave already active',
+  // The core answers the manual start with this and nothing else. Waves run on a clock now, so there
+  // is nothing for the command to do and the honest answer is the one that says so.
+  'waves-run-on-their-own': 'Waves land on their own clock · there is nothing to start',
   // The reasons a room owns rather than the core. They are named in one place on purpose: a refusal the
   // player cannot read is a refusal the player has to guess about, and the codes are the room's.
   'command-shape': 'The room did not read that as a command',
@@ -1252,6 +1255,9 @@ const formatClock = (ticks: number): string => {
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 };
 
+// `preparationTicksLeft` is the countdown to the next wave, and it is zero except inside that wave's
+// own prep window, so the clock says which of the two things the player is looking at: how long the
+// wave on the map has been running, or how long until the next one lands on top of it.
 const phaseTimerText = (state: MatchSnapshot): string => {
   if (state.status === 'preparation') {
     // The content prep window is short, so an elapsed countdown is shown as a neutral
@@ -1259,16 +1265,21 @@ const phaseTimerText = (state: MatchSnapshot): string => {
     return state.preparationTicksLeft > 0 ? `T-${formatClock(state.preparationTicksLeft)}` : 'Awaiting start';
   }
   if (state.status === 'wave') {
-    return `W+${formatClock(state.waveTick)}`;
+    return state.preparationTicksLeft > 0
+      ? `Next T-${formatClock(state.preparationTicksLeft)}`
+      : `W+${formatClock(state.waveTick)}`;
   }
   return state.status === 'victory' ? 'Cleared' : 'Breached';
 };
 
 const objectiveSummary = (state: MatchSnapshot): string => {
   if (state.status === 'preparation') {
-    return 'Awaiting start command';
+    return 'Waves land on their own · build while the clock runs';
   }
   if (state.status === 'wave') {
+    // Leaks are counted since the last wave launched, so the number is the pressure the player is
+    // under right now rather than a total for a wave that is not over and, with overlapping waves,
+    // never will be.
     return `Leaks ${state.leaksThisWave}`;
   }
   if (state.status === 'victory') {
@@ -1338,10 +1349,19 @@ const syncHud = () => {
   phaseTimer.textContent = phaseTimerText(snapshot);
   enemyCount.textContent = String(snapshot.enemies.length);
   objectiveDetail.textContent = objectiveSummary(snapshot);
-  // Start Wave is a command, so it stays available in a room — it just goes to the room instead of to a
-  // core this page owns. The four controls that act on a local `Simulation` are not commands at all, and
-  // a control that would do nothing but look available is a lie with a button on it.
-  startWaveButton.disabled = remote ? sessionState !== 'live' : snapshot.status !== 'preparation' || replaying;
+  // The manual start is gone from the rules, and this row now says when the next wave lands instead of
+  // offering a button that would be refused. It is still the one place the schedule is visible, so it
+  // is a readout and not a control: a permanently disabled button that says nothing is chrome, and one
+  // that says "Next wave in 0:12" is the thing the player is actually playing against.
+  const nextWaveIn = snapshot.preparationTicksLeft;
+  const wavesLeft = waveCount - (snapshot.waveIndex + (snapshot.status === 'wave' ? 1 : 0));
+  startWaveButton.disabled = true;
+  startWaveButton.dataset.counting = nextWaveIn > 0 ? 'yes' : 'no';
+  startWaveButton.textContent = nextWaveIn > 0
+    ? `Next wave in ${formatClock(nextWaveIn)}`
+    : wavesLeft > 0
+      ? `Wave ${snapshot.waveIndex + 1} on the field`
+      : `Last wave · ${snapshot.enemies.length} left`;
   // Restart is a room verb and a local rebuild, and the two are never both: in a room the run belongs
   // to the room, so the button asks the room to start over and every client is given the new
   // preparation. In solo it rebuilds the core this page owns, and it has nothing to rebuild until
@@ -2081,8 +2101,9 @@ const closeEntry = () => {
   entryArmed = false;
   syncEntry();
   // Focus goes back where it came from: MENU returns the player to the button that opened the entry,
-  // and the boot entry hands over to the control the next action starts from.
-  (entryFromMenu ? menuButton : startWaveButton).focus();
+  // and the boot entry hands over to the control the next action starts from — which is a build card
+  // now, because there is no wave to start and the first thing a player does is spend.
+  (entryFromMenu ? menuButton : buildOptions[0]?.button ?? menuButton).focus();
 };
 
 // Continue is the same call as the dock's Load, and nothing else. On the boot entry there is no match
@@ -2692,9 +2713,9 @@ const describeEvent = (event: SimulationEvent): string | null => {
     case 'towerPlaced':
       return `${towerName(event.towerId)} built on ${event.padId}`;
     case 'preparationEnded':
-      return 'Prep window elapsed · start the wave';
+      return `Wave ${event.waveIndex + 1} is landing`;
     case 'waveStarted':
-      return `Wave ${event.waveIndex + 1} engaged · roll ${event.roll.toFixed(2)}`;
+      return `Wave ${event.waveIndex + 1} engaged · +${event.bounty} aether`;
     case 'enemySpawned':
       return `${enemyName(event.enemyId)} inbound`;
     case 'towerFired':
@@ -2704,7 +2725,9 @@ const describeEvent = (event: SimulationEvent): string | null => {
     case 'coreDamaged':
       return `Core hit · -${event.amount} integrity`;
     case 'waveCleared':
-      return `Wave ${event.waveIndex + 1} cleared · leaks ${event.leaks} · bounty ${event.bounty}`;
+      // Not "cleared": with waves on a clock this is the tick the last enemy of that wave walked out of
+      // the mouth, and everything it sent is on the map. The bounty was paid when it launched.
+      return `Wave ${event.waveIndex + 1} fully on the field · ${event.leaks} leaks`;
     case 'victory':
       return 'Sector secured';
     case 'defeat':
@@ -3028,8 +3051,8 @@ const applyHeldCameraKeys = (deltaSeconds: number): void => {
   applyCameraRig();
 };
 
-// A pad click and Start Wave are the only two ways a player starts anything, and both go through the one
-// function that decides where the intent goes. There is no third path and no mode that builds locally.
+// A pad click is the only way a player starts anything: a wave starts on its own clock, in the core.
+// There is no second path and no mode that builds locally.
 const attemptPlacement = (padId: string) => {
   submitCommand({ type: 'placeTower', padId, towerId: selectedTowerId });
 };
@@ -3046,12 +3069,6 @@ renderer.domElement.addEventListener('click', (event) => {
     attemptPlacement(padId);
   }
 });
-
-const attemptWaveStart = () => {
-  submitCommand({ type: 'startWave' });
-};
-
-startWaveButton.addEventListener('click', attemptWaveStart);
 
 // Pause is a clock control only: commands still reach the core, but `step()` does not
 // run, so the snapshot, the projection and the rendered positions stay frozen. The clock is
