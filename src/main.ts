@@ -3,7 +3,7 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { TICK_RATE, createSimulation, createTrainingScenario } from './game-core/index.ts';
 import type { Command, CommandResult, MatchSnapshot, MatchStatus, SimulationEvent } from './game-core/index.ts';
-import { createMap, WALL_HEIGHTS } from './client/map.ts';
+import { createMap, createMinimap, WALL_HEIGHTS } from './client/map.ts';
 import { createTowers } from './client/towers.ts';
 import type { LoadedModel, TowerClipReading, TowerModelReading } from './client/towers.ts';
 import { createEnemies } from './client/enemies.ts';
@@ -191,6 +191,22 @@ type MapGeometryReading = {
   frame: { left: number; right: number; top: number; bottom: number; aspect: number };
   fit: { halfWidth: number; halfHeight: number; fitHalfHeight: number; canvasAspect: number };
   rig: { azimuth: number; elevation: number; zoom: number; targetX: number; targetZ: number };
+  // The frustum as a lens: what half of the map it holds, the two ends of the range, and how many
+  // pixels a world unit is at each of them. On the forty-unit map the creature was 13.8 pixels and
+  // no framing of it could make it twenty-five; on this one the player drives there, and these are
+  // the numbers that say so.
+  view: {
+    halfHeight: number;
+    minView: number;
+    maxView: number;
+    pixelsPerUnit: number;
+    minPixelsPerUnit: number;
+    maxPixelsPerUnit: number;
+  };
+  // Whether the minimap is on the page, how many pixels one world unit is on it, and what it is
+  // currently showing of the wave. A minimap that drew from its own copy of the match would be the
+  // one surface on the page that could be a frame behind, so the counts come from the snapshot.
+  minimap: { present: boolean; unit: number; enemies: number; towers: number };
   // What a click on each pad would do from where the camera stands right now, and what stands in the
   // way when it would not. Honest picking means some angles can hide a niche, and the point of
   // measuring it is that the answer is a number instead of a shrug.
@@ -331,6 +347,7 @@ declare global {
 }
 
 const sceneMount = document.querySelector<HTMLDivElement>('#scene');
+const minimapCanvas = document.querySelector<HTMLCanvasElement>('[data-testid="minimap-canvas"]');
 const statusLabel = document.querySelector<HTMLSpanElement>('[data-testid="scene-status"]');
 const selectionStatus = document.querySelector<HTMLElement>('[data-testid="selection-status"]');
 const commandFeedback = document.querySelector<HTMLElement>('[data-testid="command-feedback"]');
@@ -490,7 +507,14 @@ sceneMount.append(renderer.domElement);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x08131b);
-scene.fog = new THREE.Fog(0x08131b, 15, 31);
+// The fog was 15..31, tuned while the map was twenty-two units across and the stand was fixed over
+// the middle of it: everything in frame sat inside it, and it did its job. A ninety-six unit plate
+// seen from the same stand puts the far corners seventy-eight units away, and at 15..31 the map was
+// a lit strip about a quarter of the frame tall with the rest of the vault dissolved into the
+// background — the wide lens, which is the whole point of the free camera, could not show the map at
+// all. Thirty to a hundred and sixty-five keeps the depth cue where it was (the far corner carries
+// about a third of it) and lets the plate be read edge to edge.
+scene.fog = new THREE.Fog(0x08131b, 30, 165);
 
 // Image based lighting: metalness and roughness only read as metal under an environment, so
 // the PBR materials of the generated models get a prefiltered room probe. There is no scene-wide
@@ -520,8 +544,12 @@ scene.add(hemisphereLight);
 
 const keyLight = new THREE.DirectionalLight(0xffe4bf, 3.4);
 // From the viewer's side and high: the massif rises on the far bank, and light from the far side
-// would put the whole near half of the channel in its shadow. The shadow frustum covers the whole
-// map, not the corridor, because the walls outside it are what cast across it.
+// would put the whole near half of the channel in its shadow. The shadow frustum covers a
+// twenty-eight unit box, not the map, and the box is carried along with the stand — see
+// `followKeyLight`. On the old map the box was the map. On a ninety-six unit one it cannot be: at
+// 1024 pixels a box over the whole plate is ten pixels to a unit and every terrace's edge is mush,
+// while a box that follows the view is thirty-six. A directional light's direction is
+// `position - target`, so the light and its target move together and the direction never changes.
 keyLight.position.set(6, 14, 8);
 keyLight.castShadow = true;
 keyLight.shadow.mapSize.set(1024, 1024);
@@ -530,6 +558,13 @@ keyLight.shadow.camera.right = 14;
 keyLight.shadow.camera.top = 14;
 keyLight.shadow.camera.bottom = -14;
 scene.add(keyLight);
+scene.add(keyLight.target);
+
+const followKeyLight = (): void => {
+  keyLight.target.position.set(cameraRig.targetX, 0, cameraRig.targetZ);
+  keyLight.position.set(cameraRig.targetX + 6, 14, cameraRig.targetZ + 8);
+  keyLight.target.updateMatrixWorld();
+};
 
 const fillLight = new THREE.PointLight(0x2ac7b5, 3.2, 12, 2);
 fillLight.position.set(4, 3, -4);
@@ -551,6 +586,11 @@ scene.add(ground);
 // The corridor, the massif, the niche floors, the core chamber and the pads. Four domains
 // share this file, so the map is the one that owns the ground a match is fought on.
 const mapPresentation = createMap(scene, config);
+// The minimap reads the road the board drew and the pads the core declared, and nothing else: a
+// second description of the map in the page is a second one to fall out of step with the first.
+const minimap = minimapCanvas
+  ? createMinimap(minimapCanvas, config, mapPresentation.roadPolylines)
+  : null;
 
 // The tower views, the models they borrow from the registry, and the clip each one plays.
 const modelStore = new Map<string, LoadedModel>();
@@ -992,40 +1032,85 @@ for (const option of buildOptions) {
   });
 }
 
-// The camera is a stand, not a camera in the photographic sense: an orthographic frustum fitted to
-// the corridor from a direction the player controls. Distance is fixed, because the fog, the near and
-// far planes and every shadow were tuned against it; what moves is where the stand is (azimuth,
-// elevation), what it looks at (the target) and how much of the map the frustum covers (zoom).
+// The camera is a stand the player flies over the map, not an orbit around it. Distance is fixed,
+// because the fog, the near and far planes and every shadow were tuned against it; what moves is
+// where the stand looks (the target) and how much of the map the frustum covers (the zoom). There is
+// no orbit any more: a ninety-six unit map does not fit in a canvas by turning to face it, and the
+// orbit was the reason a drag on the map moved the picture and a click on it did not.
 const CAMERA_RADIUS = 16.16;
-const CAMERA_AZIMUTH_STEP = 0.0072;
-const CAMERA_ELEVATION_STEP = 0.005;
-const CAMERA_MIN_ELEVATION = 0.42;
-const CAMERA_MAX_ELEVATION = 1.16;
-const CAMERA_MIN_ZOOM = 0.5;
-const CAMERA_MAX_ZOOM = 3.2;
-const CAMERA_PAN_LIMIT_X = config.map.width / 2 - 1.5;
-const CAMERA_PAN_LIMIT_Z = config.map.depth / 2 - 1.5;
-const CAMERA_FRAME_BIAS = 0.1;
+const CAMERA_ELEVATION = Math.asin(10 / CAMERA_RADIUS);
+// How much of the map the frustum holds, in world units of its own half-height at zoom 1. Sixteen is
+// the middle of the well and the four throats, which is the part of this map a player reads a wave
+// on; the two ends are the ends the task asks for — 1.2 is a tower filling the screen, 42 is the whole
+// ninety-six units plus a margin. The first is what lifts a 0.8-unit husk off its thirteen pixels,
+// and it is a lens the player drives, not a limit the map is built to.
+const CAMERA_HOME_VIEW = 16;
+const CAMERA_MIN_VIEW = 1.2;
+// A ceiling on the wide end, not its value: the value is measured from the plate and the canvas in
+// `measureWholeMapView` below, because a ninety-six unit map on a three-to-one canvas is limited by
+// its depth and on a square one by its width, and forty-two — the number that would have fitted the
+// old map — fits neither. Sixty is here so a very tall canvas cannot ask for a lens that shows the
+// plate and half the void around it.
+const CAMERA_MAX_VIEW = 60;
+const CAMERA_MIN_ZOOM = CAMERA_MIN_VIEW / CAMERA_HOME_VIEW;
 // A drag that ends here was a click, and a click is a placement. Below it, the gesture was a swipe
 // across the map and placing a tower by accident is worse than not placing one.
 const CAMERA_CLICK_SLOP_PX = 4;
+// Held keys pan in world units per second as a fraction of what the frame currently shows, so a held
+// key crosses the same part of the map in the same time whether the player is looking at the whole
+// vault or at one enemy, and the two speeds can never drift apart.
+const CAMERA_KEY_PAN_PER_VIEW = 0.55;
+// The frame is nudged down so the well's own centre does not open the match with the thing being
+// defended under the sector caption; the space it moves into is rock with nothing in it.
+const CAMERA_FRAME_BIAS = 0.1;
+// The margin the corridor measurement is scaled by. The fit has no control left in it — the frustum
+// follows the target — so this only shapes the reading the seam publishes, and it is kept as a number
+// because that reading is what says whether the road is on screen.
+const FRAME_MARGIN = 1.05;
+const CAMERA_KEYS = {
+  KeyW: [0, -1], ArrowUp: [0, -1],
+  KeyS: [0, 1], ArrowDown: [0, 1],
+  KeyA: [-1, 0], ArrowLeft: [-1, 0],
+  KeyD: [1, 0], ArrowRight: [1, 0],
+} as const;
 
 const cameraRig = {
-  // Zero is a symmetry axis of this map: the ring and its four feeds repeat every 90 degrees, so the
-  // match opens on the same view four times out of four. The frame is fitted from the view the match
-  // opens on, and between two axes the four L-shaped feeds point straight at the camera, which
-  // stretches the road's depth 1.41 times for a view the player gets once in four turns. On the axes
-  // the frame still holds the whole road; at the diagonals it gives up the outer 3.3 units of the two
-  // far feed ends, and the wheel puts them back — the road is whole again from zoom 1.82, and the
-  // wheel goes to 3.2.
+  // Zero is a symmetry axis of this map: the ring and its four throats repeat every ninety degrees,
+  // so the match opens on the same view four times out of four. The elevation is the one the fog and
+  // the shadows were tuned at, and it is the only angle there is — the view is a map read from above
+  // and slightly to the side, not a diorama on a turntable.
   azimuth: 0,
-  elevation: Math.asin(10 / CAMERA_RADIUS),
+  elevation: CAMERA_ELEVATION,
   zoom: 1,
   targetX: 0,
   targetZ: 0,
 };
 
 const defaultCameraRig = { ...cameraRig };
+
+// How far out the wheel can pull, measured from the plate and the canvas rather than guessed. The
+// stand is tilted, so the map's depth is foreshortened by the sine of the elevation and its width is
+// not: a ninety-six unit square in a three-to-one canvas is limited by its depth, and in a square
+// canvas by its width. Whichever binds, with a tenth of margin, and the ceiling above.
+const wholeMapView = (aspect: number): number => {
+  const byDepth = (config.map.depth / 2) * Math.sin(cameraRig.elevation);
+  const byWidth = config.map.width / 2 / Math.max(0.2, aspect);
+  return Math.min(CAMERA_MAX_VIEW, Math.max(byDepth, byWidth) * 1.1);
+};
+
+let cameraMaxView = CAMERA_MAX_VIEW;
+const cameraMaxZoom = (): number => cameraMaxView / CAMERA_HOME_VIEW;
+
+// What the frustum holds right now, in its own half-height. Everything about the view is derived from
+// this and from the target, which is the fix for the pan that never panned: the frustum used to be
+// fitted to the corridor every frame, so the target was written, looked at, and then overridden.
+const viewHalfHeight = (): number =>
+  Math.min(cameraMaxView, Math.max(CAMERA_MIN_VIEW, CAMERA_HOME_VIEW * cameraRig.zoom));
+
+// Screen-up is not world -z while the stand is tilted, so the target is projected into the camera's
+// own basis rather than assumed to be the middle of the frame. That projection is also what lets the
+// frustum follow a target anywhere on the map without the tilt smearing it.
+const framePoint = new THREE.Vector3();
 
 const placeCamera = (): void => {
   const horizontal = Math.cos(cameraRig.elevation) * CAMERA_RADIUS;
@@ -1038,23 +1123,32 @@ const placeCamera = (): void => {
   camera.updateMatrixWorld(true);
 };
 
+// The target is kept on the map, and the limit is the edge of what the frame can see rather than a
+// fixed margin: at the home zoom the stand may not walk off the plate, and zoomed all the way out the
+// whole plate is in frame, so the limit collapses to the middle and the stand sits still. A clamp that
+// did not move with the zoom let the player push the map off the screen on a wide lens and could not
+// bring it back without a zoom change first.
+const clampTarget = (): void => {
+  placeCamera();
+  const aspect = (renderer.domElement.clientWidth || 1) / (renderer.domElement.clientHeight || 1);
+  const halfHeight = viewHalfHeight();
+  const halfWidth = halfHeight * aspect;
+  // World z is foreshortened by the tilt, so a unit of screen height is more than a unit of ground.
+  const groundReachZ = halfHeight / Math.max(0.2, Math.cos(cameraRig.elevation));
+  const limitX = Math.max(0, config.map.width / 2 - halfWidth);
+  const limitZ = Math.max(0, config.map.depth / 2 - groundReachZ);
+  cameraRig.targetX = Math.min(limitX, Math.max(-limitX, cameraRig.targetX));
+  cameraRig.targetZ = Math.min(limitZ, Math.max(-limitZ, cameraRig.targetZ));
+};
+
 const resetCamera = (): void => {
   Object.assign(cameraRig, defaultCameraRig);
   applyCameraRig();
 };
 
-// How much vertical world the frustum holds at zoom 1, measured from the corridor rather than
-// guessed. `max(height, width / aspect)` is the only frustum that both contains the bounds and has
-// the canvas's aspect: anything else either distorts the map or crops it. A hardcoded view height was
-// two numbers that only ever fit one window.
-//
-// 1.1 is not a round number: it is the smallest margin that still keeps all twelve niches inside the
-// frame across the eighty measured camera positions, and 1.05 loses one of them on four of them. A
-// niche that leaves the frame is a build spot the player cannot click, and that costs more than the
-// strip of rock a tenth of the margin buys.
-const FRAME_MARGIN = 1.1;
-const framePoint = new THREE.Vector3();
-
+// How much of the road the frame would hold, and where its middle is. It is a measurement and not a
+// control any more — the frustum follows the target now — so it is here for the seam and for the
+// honest answer to "is the road on screen", and it is the only surviving use of the sample points.
 const measureCorridor = (): { centerX: number; centerY: number; halfWidth: number; halfHeight: number } => {
   let left = Number.POSITIVE_INFINITY;
   let right = Number.NEGATIVE_INFINITY;
@@ -1077,39 +1171,23 @@ const measureCorridor = (): { centerX: number; centerY: number; halfWidth: numbe
   };
 };
 
-// The scale is measured once per viewport, from the view the match opens on, and then held. A camera
-// that also zooms while it turns is two controls arguing: turn far enough and the map silently
-// shrinks, so the player loses their bearings and never asked for it. Turning moves the frustum
-// across the map, the wheel changes the scale on purpose, and the two never touch each other. Turning
-// far enough that the corridor no longer fits is the player's cue to reach for the wheel.
-let fitHalfHeight = 5.4;
-
-const measureHomeFit = (aspect: number): number => {
-  const azimuth = cameraRig.azimuth;
-  const elevation = cameraRig.elevation;
-  cameraRig.azimuth = defaultCameraRig.azimuth;
-  cameraRig.elevation = defaultCameraRig.elevation;
-  placeCamera();
-  const { halfWidth, halfHeight } = measureCorridor();
-  cameraRig.azimuth = azimuth;
-  cameraRig.elevation = elevation;
-  placeCamera();
-  return Math.max(halfHeight, halfWidth / aspect);
-};
+// The margin that measurement is scaled by is `FRAME_MARGIN`, declared with the rest of the camera
+// numbers above.
 
 const applyCameraRig = (): void => {
+  clampTarget();
   placeCamera();
   const aspect = (renderer.domElement.clientWidth || 1) / (renderer.domElement.clientHeight || 1);
-  const { centerX, centerY } = measureCorridor();
-  const halfHeight = fitHalfHeight * cameraRig.zoom;
+  const halfHeight = viewHalfHeight();
   const halfWidth = halfHeight * aspect;
-  // Biased down a little: the channel's own centre puts the core chamber under the sector caption in
-  // the top corner, and the thing being defended should not open the match hidden behind a label. The
+  // Biased down a little: the well's own centre puts the core chamber under the sector caption in the
+  // top corner, and the thing being defended should not open the match hidden behind a label. The
   // space it moves into is the rock below the road, which is the one part of the frame with nothing
-  // in it.
-  const centreY = centerY - halfHeight * CAMERA_FRAME_BIAS;
-  camera.left = centerX - halfWidth;
-  camera.right = centerX + halfWidth;
+  // in it. On a map this size the bias is a per-cent of the frame, not a band of rock to give up.
+  const centre = framePoint.set(cameraRig.targetX, 0, cameraRig.targetZ).applyMatrix4(camera.matrixWorldInverse);
+  const centreY = centre.y - halfHeight * CAMERA_FRAME_BIAS;
+  camera.left = centre.x - halfWidth;
+  camera.right = centre.x + halfWidth;
   camera.top = centreY + halfHeight;
   camera.bottom = centreY - halfHeight;
   camera.updateProjectionMatrix();
@@ -1126,7 +1204,10 @@ const resize = () => {
   }
   appliedViewportWidth = width;
   appliedViewportHeight = height;
-  fitHalfHeight = measureHomeFit(width / height);
+  cameraMaxView = wholeMapView(width / height);
+  // The rig's own zoom is re-clamped rather than reset: a window that grew should not throw away
+  // where the player was looking, but a view that no longer fits the plate has to come back in.
+  cameraRig.zoom = Math.min(cameraMaxZoom(), Math.max(CAMERA_MIN_ZOOM, cameraRig.zoom));
   applyCameraRig();
   renderer.setSize(width, height, false);
 };
@@ -2765,16 +2846,16 @@ const flashPadError = (padId: string) => {
 
 // Camera gestures, and the one rule that keeps them from eating placements: a pointer that travels
 // further than the slop was a drag, so the placement only fires for a press that stayed put. Left
-// drag turns the map, right drag slides it, the wheel zooms, and R puts the view back. Every one of
-// them ends up in `cameraRig` and one function applies it — there is no second copy of the view.
-type CameraGesture = 'orbit' | 'pan' | null;
+// drag does nothing at all now — the view is not on a turntable, and the one thing a left press is for
+// is placing a tower. Right drag slides the stand, the wheel changes the lens, held keys walk it, and
+// R puts it back. Every one of them ends up in `cameraRig` and one function applies it — there is no
+// second copy of the view.
+type CameraGesture = 'pan' | null;
 
 let cameraGesture: CameraGesture = null;
 let cameraGestureMoved = false;
 let gestureStartX = 0;
 let gestureStartY = 0;
-let gestureAzimuth = 0;
-let gestureElevation = 0;
 let gestureTargetX = 0;
 let gestureTargetZ = 0;
 
@@ -2784,27 +2865,15 @@ const applyCameraGesture = (event: PointerEvent): void => {
   if (Math.hypot(deltaX, deltaY) > CAMERA_CLICK_SLOP_PX) {
     cameraGestureMoved = true;
   }
-  if (cameraGesture === 'orbit') {
-    cameraRig.azimuth = gestureAzimuth - deltaX * CAMERA_AZIMUTH_STEP;
-    cameraRig.elevation = Math.min(
-      CAMERA_MAX_ELEVATION,
-      Math.max(CAMERA_MIN_ELEVATION, gestureElevation + deltaY * CAMERA_ELEVATION_STEP),
-    );
-  } else if (cameraGesture === 'pan') {
+  if (cameraGesture === 'pan') {
     // Pan is in the ground plane, so the pointer's pixels have to become world units through the
     // camera's own basis: a fixed number per pixel would move the map twice as fast at one zoom as at
     // another, and in the wrong direction at some azimuths.
     const unitsPerPixel = (camera.right - camera.left) / Math.max(1, renderer.domElement.clientWidth);
     const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
     const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
-    cameraRig.targetX = Math.min(
-      CAMERA_PAN_LIMIT_X,
-      Math.max(-CAMERA_PAN_LIMIT_X, gestureTargetX - (right.x * deltaX - up.x * deltaY) * unitsPerPixel),
-    );
-    cameraRig.targetZ = Math.min(
-      CAMERA_PAN_LIMIT_Z,
-      Math.max(-CAMERA_PAN_LIMIT_Z, gestureTargetZ - (right.z * deltaX - up.z * deltaY) * unitsPerPixel),
-    );
+    cameraRig.targetX = gestureTargetX - (right.x * deltaX - up.x * deltaY) * unitsPerPixel;
+    cameraRig.targetZ = gestureTargetZ - (right.z * deltaX - up.z * deltaY) * unitsPerPixel;
   }
   if (cameraGestureMoved) {
     applyCameraRig();
@@ -2815,14 +2884,18 @@ renderer.domElement.addEventListener('pointerdown', (event) => {
   if (event.button !== 0 && event.button !== 2) {
     return;
   }
-  cameraGesture = event.button === 0 ? 'orbit' : 'pan';
+  // A left press is reserved for placement and its movement is ignored on purpose. Treating it as a
+  // gesture is what made a build placement and a camera move the same press, and on a map this size
+  // the player is going to drag a long way to look at something.
+  cameraGesture = event.button === 0 ? null : 'pan';
   cameraGestureMoved = false;
   gestureStartX = event.clientX;
   gestureStartY = event.clientY;
-  gestureAzimuth = cameraRig.azimuth;
-  gestureElevation = cameraRig.elevation;
   gestureTargetX = cameraRig.targetX;
   gestureTargetZ = cameraRig.targetZ;
+  if (cameraGesture === null) {
+    return;
+  }
   try {
     renderer.domElement.setPointerCapture(event.pointerId);
   } catch {
@@ -2862,24 +2935,98 @@ renderer.domElement.addEventListener(
     event.preventDefault();
     // Scaled by the delta, not by its sign: a trackpad and a notched wheel report different amounts
     // per notch, and both should feel like the same zoom per notch. Capped per event so one violent
-    // flick cannot jump the whole range.
-    const step = Math.max(-0.35, Math.min(0.35, event.deltaY * 0.0015));
-    cameraRig.zoom = Math.min(CAMERA_MAX_ZOOM, Math.max(CAMERA_MIN_ZOOM, cameraRig.zoom + step));
+    // flick cannot jump the whole range — and the range is the whole point here, from a tower filling
+    // the screen to the entire vault, so a cap of a third of a unit of view per flick is the only
+    // thing standing between a player and a full crossing in two notches.
+    const step = Math.max(-0.12, Math.min(0.12, event.deltaY * 0.0006));
+    cameraRig.zoom = Math.min(cameraMaxZoom(), Math.max(CAMERA_MIN_ZOOM, cameraRig.zoom * Math.exp(step)));
     applyCameraRig();
   },
   { passive: false },
 );
 
+// Held keys walk the stand. The state is a set of pressed codes and nothing else: a key's own
+// up/down pair has to be visible here or a key held while the pointer left the canvas would keep
+// walking forever, and the target is written from here into the same rig the drag writes into.
+const heldCameraKeys = new Set<string>();
+const isTextEntry = (target: EventTarget | null): boolean => {
+  const element = target as HTMLElement | null;
+  return Boolean(
+    element && (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA' || element.isContentEditable),
+  );
+};
+
 window.addEventListener('keydown', (event) => {
-  if (event.key !== 'r' && event.key !== 'R' && event.key !== 'к' && event.key !== 'К') {
+  if (isTextEntry(event.target)) {
     return;
   }
-  const target = event.target as HTMLElement | null;
-  if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+  if (event.key === 'r' || event.key === 'R' || event.key === 'к' || event.key === 'К') {
+    resetCamera();
     return;
   }
-  resetCamera();
+  if (event.code in CAMERA_KEYS) {
+    heldCameraKeys.add(event.code);
+    // The page scrolls under four arrow keys otherwise, which on a map this size means the stand
+    // walks and the document moves with it.
+    event.preventDefault();
+  }
 });
+
+window.addEventListener('keyup', (event) => {
+  heldCameraKeys.delete(event.code);
+});
+
+// A lost focus is a released key. Anything that took the window — a dialog, another tab, a minimap
+// drag that escaped the canvas — leaves the set holding a code nobody will ever press again, and the
+// stand walks off the map with the match paused.
+window.addEventListener('blur', () => {
+  heldCameraKeys.clear();
+});
+
+// A click on the minimap is a camera command and nothing else: it does not place, it does not select
+// and it does not reach the core. It is handled on the canvas rather than through the pad picker on
+// purpose — a click that both moved the view and built a tower would make the minimap a build menu.
+minimapCanvas?.addEventListener('pointerdown', (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  if (!minimap) {
+    return;
+  }
+  const point = minimap.worldAt(event.clientX, event.clientY);
+  if (!point) {
+    return;
+  }
+  cameraRig.targetX = point.x;
+  cameraRig.targetZ = point.z;
+  applyCameraRig();
+});
+
+const applyHeldCameraKeys = (deltaSeconds: number): void => {
+  if (heldCameraKeys.size === 0 || deltaSeconds <= 0) {
+    return;
+  }
+  let alongX = 0;
+  let alongZ = 0;
+  for (const code of heldCameraKeys) {
+    const direction = CAMERA_KEYS[code as keyof typeof CAMERA_KEYS];
+    if (!direction) {
+      continue;
+    }
+    alongX += direction[0];
+    alongZ += direction[1];
+  }
+  if (alongX === 0 && alongZ === 0) {
+    return;
+  }
+  const length = Math.hypot(alongX, alongZ) || 1;
+  // Ground units, not screen units: the view is tilted, so a unit of world z is more than a unit of
+  // screen height and a key that moved at the screen's rate would outrun the same key on x.
+  const groundReachZ = viewHalfHeight() / Math.max(0.2, Math.cos(cameraRig.elevation));
+  const perSecond = viewHalfHeight() * CAMERA_KEY_PAN_PER_VIEW;
+  cameraRig.targetX += (alongX / length) * perSecond * deltaSeconds;
+  cameraRig.targetZ += (alongZ / length) * groundReachZ * CAMERA_KEY_PAN_PER_VIEW * deltaSeconds;
+  applyCameraRig();
+};
 
 // A pad click and Start Wave are the only two ways a player starts anything, and both go through the one
 // function that decides where the intent goes. There is no third path and no mode that builds locally.
@@ -3118,11 +3265,31 @@ window.__ECHOES_DEBUG__ = {
       },
       fit: {
         ...measureCorridor(),
-        fitHalfHeight,
+        fitHalfHeight: viewHalfHeight(),
         canvasAspect:
           (renderer.domElement.clientWidth || 1) / (renderer.domElement.clientHeight || 1),
       },
       rig: { ...cameraRig },
+      // The camera as a lens rather than as a multiplier, because the range is now the feature: the
+      // 13.8-pixel husk the map used to be stuck at is a function of what the frustum holds, and the
+      // only honest way to say the player can drive past it is to publish both ends in pixels.
+      view: {
+        halfHeight: viewHalfHeight(),
+        minView: CAMERA_MIN_VIEW,
+        maxView: cameraMaxView,
+        pixelsPerUnit:
+          (renderer.domElement.clientHeight || 1) / (2 * viewHalfHeight()),
+        minPixelsPerUnit: (renderer.domElement.clientHeight || 1) / (2 * cameraMaxView),
+        maxPixelsPerUnit: (renderer.domElement.clientHeight || 1) / (2 * CAMERA_MIN_VIEW),
+      },
+      minimap: {
+        present: minimap !== null,
+        // A click is proven by moving the rig, so the reading that matters is the target before and
+        // after — the seam cannot see the click, the test can.
+        unit: minimap ? Math.round(minimap.scale() * 1000) / 1000 : 0,
+        enemies: snapshot.enemies.length,
+        towers: snapshot.towers.length,
+      },
       picks: config.map.buildPads.map((pad) => {
         const point = projectPadToCanvas(pad.id);
         const rect = renderer.domElement.getBoundingClientRect();
@@ -3337,6 +3504,11 @@ const renderFrame = (timestamp: number) => {
   // Reduced motion freezes ambient movement and transient effects; the projected
   // positions, health and materials stay readable because they come from the snapshot.
   const ambientDelta = reducedMotion ? 0 : frameDelta;
+  // The held keys move the stand, not the match: this runs whether the clock is stopped or not, so a
+  // player can look around a paused board, and it is kept out of the reduced-motion gate because a
+  // camera the player is driving is not ambient motion.
+  applyHeldCameraKeys(frameDelta);
+  followKeyLight();
   // The frame in the order it was drawn before the split: the map, the towers, the enemies, then the
   // bursts and the shot traces that belong to nobody in particular. The core is drawn with the map now
   // rather than after the traces, and it shares no state with anything around it.
@@ -3352,6 +3524,17 @@ const renderFrame = (timestamp: number) => {
     pendingRebuild = null;
   }
   renderer.render(scene, camera);
+  if (minimap) {
+    // Drawn from the same snapshot the scene was just projected from, in the same frame, after the
+    // camera has already been placed — so the frame rectangle on it is this frame's view and not the
+    // one the last wheel notch left behind.
+    minimap.draw(snapshot, {
+      halfWidth: (camera.right - camera.left) / 2,
+      halfHeight: (camera.top - camera.bottom) / 2,
+      targetX: cameraRig.targetX,
+      targetZ: cameraRig.targetZ,
+    });
+  }
   sampleSceneBudget();
   requestAnimationFrame(renderFrame);
 };
