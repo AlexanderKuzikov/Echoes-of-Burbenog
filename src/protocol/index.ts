@@ -16,7 +16,14 @@ export const PROTOCOL_VERSION = 1;
 
 // The content the room runs and the client renders. It is declared here and nowhere else, so the save
 // slot, the room handshake and this contract cannot drift apart on a number nobody compares.
-export const CONTENT_VERSION = 1;
+//
+// The number counts contract breaks, not edits. It stood at 1 through a map change, a ring change, a
+// map rebuilt from 40x40 to 96x96 and two waves reworked, and every one of those left a saved run
+// that replayed as if it were the new content: the slot's commands are a list of pad ids and tower
+// ids, so on the new board they are legal, they are simply not the same game. Bumped to 2 for all of
+// them at once rather than counted out one at a time — an old slot is refused and names the version
+// it holds, and which change it predates is a question for the changelog, not for this number.
+export const CONTENT_VERSION = 2;
 
 // The map is versioned apart from the content it is packed in, because a map is the thing a client
 // projects: two builds can share every tower and enemy and still lay the pads out differently.
