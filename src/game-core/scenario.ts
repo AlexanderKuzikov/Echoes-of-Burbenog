@@ -38,8 +38,14 @@ const trainingTowers: TowerDefinition[] = [
     name: 'Grove Lens',
     cost: 70,
     range: 3.6,
-    damage: 10,
-    attackIntervalTicks: 12,
+    // The only tower that shoots at the air, and it has to be able to kill a Mote in the lap it walks.
+    // Measured on the previous schedule: a Mote crosses Grove's 7.2 unit chord in eight ticks, so at
+    // 10 damage every 12 it collected ten of its thirty hit points per tower it passed, and no board
+    // of them killed one before the wave was four laps old — the only answer to air was a tax. Fourteen
+    // every eight gives a Mote between one and two shots per crossing, which is twenty-eight of its
+    // thirty against a single lens, and a mote dies on the first lap or not at all.
+    damage: 14,
+    attackIntervalTicks: 8,
     targets: ['ground', 'air'],
     slowFactor: 0.65,
     slowDurationTicks: 12,
@@ -57,19 +63,6 @@ const trainingTowers: TowerDefinition[] = [
     slowDurationTicks: 16,
   },
 ];
-
-// The lap grew from 104 to 360, and at the old 0.78 units a second a husk needed seven and a half
-// minutes to walk it — which is not a wave, it is a queue. Speeds are multiplied by eighteen so the
-// slowest thing on the map crosses it in twenty-five and a half seconds and the fastest in thirteen
-// and a half.
-//
-// This is one constant in this file and it is the only honest place to put it: the numbers it scales
-// live in `contact.ts`, which is frozen for this task. It also happens to be safe on its own, because
-// spawn spacing in that file is `speed * interval / 20` — scaling speed widens the gap between two
-// enemies from 0.5 units to 9.0 rather than closing it, and a wave spread over 360 units of road
-// should not be packed. The next task owns the economy and the waves and should move the numbers
-// themselves; leaving this line in place after that is the only thing to check.
-const ENEMY_ROUTE_SPEED_SCALE = 18;
 
 // ---------------------------------------------------------------------------------------------
 // burrow-vault: a square road along the perimeter of a ninety-six unit map, a throat down each axis
@@ -274,9 +267,20 @@ export function createTrainingScenario(): MatchConfig {
     routes: trainingRoutes,
     buildPads: trainingPads,
   };
+  // The wallet, and the only numbers in the match that are not about a specific enemy or a specific
+  // wave. Kill rewards live with the roster in `contact.ts` and the wave schedule lives there too; what
+  // is here is what a player starts with, what every wave pays them whether or not they killed
+  // anything, and what the core is worth.
+  //
+  // `startingGold` is a board, not a nudge: 400 buys eight Pulse Spires, and a player who cannot
+  // answer the first wave never gets to the economy at all. `waveBounty` is the guaranteed income and
+  // the reason the economy is not a spiral — twelve waves of it is 600, and a player who kills nothing
+  // still walks away with a board of eighteen towers. Kill rewards are on top of that floor and worth
+  // about forty per cent more than it across a full sweep, so shooting well is worth having and
+  // shooting badly is a poorer match rather than a different one.
   const rules: MatchRules = {
-    startingGold: 220,
-    waveBounty: 35,
+    startingGold: 400,
+    waveBounty: 90,
     repairAmount: 2,
   };
 
@@ -284,10 +288,10 @@ export function createTrainingScenario(): MatchConfig {
     seed: 1337,
     map,
     towers: trainingTowers,
-    enemies: trainingEnemies.map((enemy) => ({
-      ...enemy,
-      speed: Math.round(enemy.speed * ENEMY_ROUTE_SPEED_SCALE * 100) / 100,
-    })),
+    // Speeds are the content's own. The lap is 360 units, so these are laps of 13.8 to 40 seconds: a
+    // wave crosses the map in half a minute, and what decides whether it arrives is where the board
+    // is, not how long the walk takes.
+    enemies: trainingEnemies.map((enemy) => ({ ...enemy, tags: [...enemy.tags] })),
     waves: trainingWaves,
     rules,
   };
