@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { trainingCorridor } from '../game-core/scenario.ts';
 import type { BayDefinition } from '../game-core/scenario.ts';
-import type { MatchConfig, MatchSnapshot } from '../game-core/index.ts';
+import type { MatchConfig, MatchSnapshot, Vec2 } from '../game-core/index.ts';
 import { withProbeWeight } from './shared.ts';
 
 // ---------------------------------------------------------------------------------------------
@@ -47,6 +47,11 @@ export type MapPresentation = {
   openCells: Uint8Array;
   bayCount: number;
   chamberRadius: number;
+  // The road as it is actually drawn, world units, one polyline per ribbon. The minimap reads this
+  // and nothing else about the map: a second description of the road in the page is a second one to
+  // fall out of step with the first, and the minimap is exactly the surface that would show it.
+  roadPolylines: Array<Array<[number, number]>>;
+  corridorLength: number;
   corridorSamplePoints: Array<[number, number]>;
   distanceToRoad: (x: number, z: number) => number;
   corridorCoverage: (x: number, z: number, range: number) => number;
@@ -68,11 +73,11 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
   const insideBay = (bay: BayDefinition, x: number, z: number): boolean =>
     x >= bay.minX && x <= bay.maxX && z >= bay.minZ && z <= bay.maxZ;
 
-  // Four routes over one road. The contour is walked by all four and each approach by exactly one, and
+  // Four routes over one road. The contour is walked by all four and each throat by exactly one, and
   // that difference is what is drawn: taken route by route, the same road gets built four times over,
   // and a road built twice is a road two copies of which will eventually disagree at a corner. So a
-  // segment is keyed by its two endpoints, drawn once, and told apart by how many routes contain it.
-  // What the raster and the coverage measure is the same set — the road, not the four ways onto it.
+  // piece of road is keyed by its two endpoints, drawn once, and told apart by how many routes contain
+  // it. What the raster and the coverage measure is the same set — the road, not the four ways onto it.
   type Point = { x: number; z: number };
   const pointKey = (x: number, z: number): string => `${x},${z}`;
   const segmentKey = (from: Point, to: Point): string => {
@@ -80,61 +85,138 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
     const tail = pointKey(to.x, to.z);
     return head < tail ? `${head}>${tail}` : `${tail}>${head}`;
   };
-  // Routes, not passes. A circuit walks its own approach out and back, so it passes that approach twice
-  // inside the one route that owns it, and a count of passes called it shared with the ring: the ring
-  // then drew as a broken line reaching past the map's edge, and no approach drew at all. A route is one
-  // owner however many times it walks over a segment, so each route contributes a set, not a tally.
-  const routeCount = new Map<string, number>();
-  for (const route of config.map.routes) {
-    const ownSegments = new Set<string>();
-    for (let index = 1; index < route.points.length; index += 1) {
-      ownSegments.add(segmentKey(route.points[index - 1], route.points[index]));
-    }
-    for (const own of ownSegments) {
-      routeCount.set(own, (routeCount.get(own) ?? 0) + 1);
-    }
-  }
 
-  const roadSegments: RoadSegment[] = [];
-  const contourSegments: RoadSegment[] = [];
-  const counted = new Set<string>();
-  for (const route of config.map.routes) {
+  // Deduplicating by the two ends of a route's own segment is not enough on this map, and the map
+  // above was built to prove it. Every route leaves its corner, walks three whole sides and turns in
+  // at the midpoint of the fourth, so route one owns the west side whole *and* its own two half
+  // pieces of the same west side, and the union of the four route lists is not a set of segments at
+  // all — it is four overlapping descriptions of one square. Keyed by endpoints that yields twelve
+  // entries, 720 units of "road", and coverage that counts the west side twice and the south side
+  // once. That is the same error this file already had once, in the other direction, and the second
+  // half of it was harder to see because the numbers were plausible.
+  //
+  // So the road is cut at every point where another route's endpoint lands on it, and the pieces are
+  // keyed instead of the routes' own segments. Twelve authored segments become eight ring pieces and
+  // four throats, the ring comes to 360 and the whole road to 540, and every piece carries the set of
+  // routes that walk it — which is what the drawing and the picker need and is also the honest answer
+  // to "how many routes contain this piece of road".
+  type RoadPiece = { ax: number; az: number; bx: number; bz: number; length: number; owners: Set<number> };
+  const COLLINEAR_EPSILON = 1e-6;
+
+  const authoredSegments: Array<{ ax: number; az: number; bx: number; bz: number; length: number; route: number }> = [];
+  config.map.routes.forEach((route, routeIndex) => {
     for (let index = 1; index < route.points.length; index += 1) {
       const start = route.points[index - 1];
       const end = route.points[index];
-      const key = segmentKey(start, end);
-      if (counted.has(key)) {
-        continue;
-      }
-      counted.add(key);
-      const segment: RoadSegment = {
+      authoredSegments.push({
         ax: start.x,
         az: start.z,
         bx: end.x,
         bz: end.z,
         length: Math.hypot(end.x - start.x, end.z - start.z),
-      };
-      roadSegments.push(segment);
-      if ((routeCount.get(key) ?? 0) > 1) {
-        contourSegments.push(segment);
+        route: routeIndex,
+      });
+    }
+  });
+
+  // The pieces one authored segment contributes to, so that a route can still be asked whether the
+  // leg it is standing on belongs to anybody else: the owners of a whole leg is the union over its
+  // pieces, and a leg nobody shares is a leg this route alone walks.
+  const legOwners = new Map<string, Set<number>>();
+  const pieceByKey = new Map<string, RoadPiece>();
+  for (const leg of authoredSegments) {
+    const deltaX = leg.bx - leg.ax;
+    const deltaZ = leg.bz - leg.az;
+    const spanSquared = deltaX * deltaX + deltaZ * deltaZ;
+    const along = (x: number, z: number): number | null => {
+      if (spanSquared <= COLLINEAR_EPSILON) {
+        return null;
+      }
+      const t = ((x - leg.ax) * deltaX + (z - leg.az) * deltaZ) / spanSquared;
+      const px = leg.ax + deltaX * t;
+      const pz = leg.az + deltaZ * t;
+      return Math.hypot(x - px, z - pz) <= COLLINEAR_EPSILON && t > COLLINEAR_EPSILON && t < 1 - COLLINEAR_EPSILON
+        ? t
+        : null;
+    };
+    const cuts = new Set<number>([0, 1]);
+    for (const other of authoredSegments) {
+      for (const [x, z] of [[other.ax, other.az], [other.bx, other.bz]] as const) {
+        const t = along(x, z);
+        if (t !== null) {
+          cuts.add(t);
+        }
+      }
+    }
+    const ordered = [...cuts].sort((left, right) => left - right);
+    for (let index = 1; index < ordered.length; index += 1) {
+      const from = ordered[index - 1];
+      const to = ordered[index];
+      if (to - from <= COLLINEAR_EPSILON) {
+        continue;
+      }
+      const start = { x: leg.ax + deltaX * from, z: leg.az + deltaZ * from };
+      const end = { x: leg.ax + deltaX * to, z: leg.az + deltaZ * to };
+      const key = segmentKey(start, end);
+      const existing = pieceByKey.get(key);
+      if (existing) {
+        existing.owners.add(leg.route);
+      } else {
+        pieceByKey.set(key, {
+          ax: start.x,
+          az: start.z,
+          bx: end.x,
+          bz: end.z,
+          length: Math.hypot(deltaX, deltaZ) * (to - from),
+          owners: new Set([leg.route]),
+        });
+      }
+      const owners = legOwners.get(key);
+      if (owners) {
+        owners.add(leg.route);
+      } else {
+        legOwners.set(key, new Set([leg.route]));
       }
     }
   }
+
+  const roadSegments: RoadSegment[] = [...pieceByKey.values()].map((piece) => ({
+    ax: piece.ax,
+    az: piece.az,
+    bx: piece.bx,
+    bz: piece.bz,
+    length: piece.length,
+  }));
+  // A piece more than one route walks is the contour; a piece exactly one walks is that route's
+  // approach. Routes, not passes: a circuit walks its own throat out and back, so it passes that
+  // throat twice inside the one route that owns it, and a count of passes called it shared with the
+  // ring — the throat then drew as a broken line reaching past the map's edge, and no throat drew at
+  // all. A route is one owner however many times it walks over a piece.
+  const pieceOwners = new Map<string, number>();
+  for (const [key, piece] of pieceByKey) {
+    pieceOwners.set(key, piece.owners.size);
+  }
   const routeSegmentCount = roadSegments.length;
   const routeLength = roadSegments.reduce((total, segment) => total + segment.length, 0);
+  const contourLength = roadSegments
+    .filter((segment) => (pieceOwners.get(segmentKey({ x: segment.ax, z: segment.az }, { x: segment.bx, z: segment.bz })) ?? 0) > 1)
+    .reduce((total, segment) => total + segment.length, 0);
 
   // The contour arrives as a graph, not as a list: the four routes hand it over starting at four
   // different corners, so the loop is recovered by following endpoints instead of by trusting one
-  // route's order. An approach is already in travel order and is simply cut where the shared part
-  // starts. Both halves come out of the route lists and nothing else, so the picture cannot say a
-  // road the core does not have.
+  // route's order. A throat is already in travel order and is simply cut where the shared part starts.
+  // Both halves come out of the road pieces and nothing else, so the picture cannot say a road the
+  // core does not have.
   const roadDraws: Array<{ name: string; points: Point[] }> = [];
-  if (contourSegments.length > 1) {
-    const contourPoints: Point[] = [{ x: contourSegments[0].ax, z: contourSegments[0].az }];
+  const contourPieces = roadSegments.filter(
+    (segment) => (pieceOwners.get(segmentKey({ x: segment.ax, z: segment.az }, { x: segment.bx, z: segment.bz })) ?? 0) > 1,
+  );
+  if (contourPieces.length > 1) {
+    const contourPoints: Point[] = [{ x: contourPieces[0].ax, z: contourPieces[0].az }];
     const walked = new Set<number>();
     let current = contourPoints[0];
     for (;;) {
-      const next = contourSegments.findIndex((segment, index) => {
+      const next = contourPieces.findIndex((segment, index) => {
         if (walked.has(index)) {
           return false;
         }
@@ -144,7 +226,7 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
       if (next < 0) {
         break;
       }
-      const segment = contourSegments[next];
+      const segment = contourPieces[next];
       walked.add(next);
       current = segment.ax === current.x && segment.az === current.z
         ? { x: segment.bx, z: segment.bz }
@@ -154,20 +236,23 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
         break;
       }
     }
-    roadDraws.push({ name: 'contour:burrow-cross', points: contourPoints });
+    roadDraws.push({ name: 'contour:burrow-vault', points: contourPoints });
   }
-  for (const route of config.map.routes) {
+  config.map.routes.forEach((route, routeIndex) => {
     const points: Point[] = [route.points[0]];
     for (let index = 1; index < route.points.length; index += 1) {
-      if ((routeCount.get(segmentKey(route.points[index - 1], route.points[index])) ?? 0) !== 1) {
+      const start = route.points[index - 1];
+      const end = route.points[index];
+      const owners = legOwners.get(segmentKey(start, end));
+      if (!owners || owners.size !== 1 || !owners.has(routeIndex)) {
         break;
       }
-      points.push(route.points[index]);
+      points.push(end);
     }
     if (points.length > 1) {
       roadDraws.push({ name: `route:${route.id}`, points });
     }
-  }
+  });
 
   const distanceToSegment = (px: number, pz: number, segment: RoadSegment): number => {
     const deltaX = segment.bx - segment.ax;
@@ -982,7 +1067,8 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
     openCells,
     bayCount: trainingCorridor.bays.length,
     chamberRadius: trainingCorridor.coreChamber.radius,
-    corridorSamplePoints,
+    roadPolylines: roadDraws.map((walk) => walk.points.map((point) => [point.x, point.z] as [number, number])),
+    corridorLength: Math.round(contourLength * 100) / 100,    corridorSamplePoints,
     distanceToRoad,
     corridorCoverage,
     pickTargets: [...padPickTargets, ...wallPickTargets],
@@ -1048,5 +1134,187 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
     setReducedMotion: (reduced: boolean) => {
       reducedMotion = reduced;
     },
+  };
+};
+
+// ---------------------------------------------------------------------------------------------
+// The minimap: the whole plate, every frame, from the snapshot the scene is already drawing.
+//
+// It is a 2D canvas and not a second Three.js view, and that is the decision. A second camera would
+// have to be fitted, kept in step with the first and would cost a second full render of a map that
+// is already fifty-seven thousand cells; this draws about ninety strokes and reads the same snapshot
+// the frame it sits inside is reading. It holds no state of its own: every mark on it is either a
+// fact about the map, which comes from `config` and from the road polylines above, or a fact about
+// this instant, which comes out of the snapshot handed in. A minimap with its own copy of the wave is
+// a minimap that is wrong a frame after the board is right.
+//
+// The one thing it adds that the board does not have is the frame rectangle — where the camera is
+// looking, at what scale. Without it a click moves the view somewhere the player cannot see, and on a
+// map this size that is the difference between a map and a teleport.
+// ---------------------------------------------------------------------------------------------
+
+export type MinimapPresentation = {
+  // Redraws from the snapshot. `view` is the camera's own rectangle in world units, or null before
+  // the first frame has placed the camera.
+  draw: (next: MatchSnapshot, view: MinimapView | null) => void;
+  // A click in window coordinates to a point on the map, or null for a click off the canvas. The
+  // canvas is the same surface the player sees, so the mapping is the box and not the backing store.
+  worldAt: (clientX: number, clientY: number) => Vec2 | null;
+  readonly scale: () => number;
+};
+
+export type MinimapView = { halfWidth: number; halfHeight: number; targetX: number; targetZ: number };
+
+const MINIMAP_PLATE = '#0b2029';
+const MINIMAP_ROAD = '#2f9d92';
+const MINIMAP_ROAD_CORE = '#7cf0dc';
+const MINIMAP_PAD = '#3f8f96';
+const MINIMAP_PAD_TAKEN = '#26424a';
+const MINIMAP_TOWER = '#ffd27f';
+const MINIMAP_ENEMY = '#ff8f6b';
+const MINIMAP_CORE = '#7ce7d2';
+const MINIMAP_FRAME = 'rgba(233, 245, 242, 0.7)';
+
+export const createMinimap = (
+  canvas: HTMLCanvasElement,
+  config: MatchConfig,
+  roadPolylines: ReadonlyArray<ReadonlyArray<readonly [number, number]>>,
+): MinimapPresentation => {
+  const context = canvas.getContext('2d');
+  const half = Math.max(config.map.width, config.map.depth) / 2;
+  let backing = 0;
+  let plate = 0;
+
+  // The backing store follows the box the browser laid out, at the device's own density. A fixed
+  // attribute size would be sharp on a desktop and soft on the same panel at a narrower breakpoint,
+  // and the click mapping would be off by the ratio between them.
+  const syncSurface = (): boolean => {
+    if (!context) {
+      return false;
+    }
+    const box = canvas.getBoundingClientRect();
+    const width = Math.max(1, Math.round(box.width));
+    const height = Math.max(1, Math.round(box.height));
+    const density = Math.min(3, Math.max(1, window.devicePixelRatio || 1));
+    const wanted = Math.round(width * density);
+    if (wanted === backing && width === plate) {
+      return true;
+    }
+    backing = wanted;
+    plate = width;
+    canvas.width = wanted;
+    canvas.height = Math.max(1, Math.round(height * density));
+    return true;
+  };
+
+  const unit = (): number => (plate > 0 ? plate / (half * 2) : 0);
+  const toX = (x: number): number => (x + half) * unit();
+  const toY = (z: number): number => (z + half) * unit();
+
+  const polyline = (points: ReadonlyArray<readonly [number, number]>): void => {
+    if (points.length === 0) {
+      return;
+    }
+    context!.beginPath();
+    context!.moveTo(toX(points[0][0]), toY(points[0][1]));
+    for (let index = 1; index < points.length; index += 1) {
+      context!.lineTo(toX(points[index][0]), toY(points[index][1]));
+    }
+    context!.stroke();
+  };
+
+  const dot = (x: number, z: number, radius: number, fill: string): void => {
+    context!.beginPath();
+    context!.arc(toX(x), toY(z), radius, 0, Math.PI * 2);
+    context!.fillStyle = fill;
+    context!.fill();
+  };
+
+  return {
+    draw: (next: MatchSnapshot, view: MinimapView | null): void => {
+      if (!syncSurface() || !context) {
+        return;
+      }
+      const size = unit();
+      context.setTransform(backing / plate, 0, 0, backing / plate, 0, 0);
+      context.clearRect(0, 0, plate, plate);
+      context.fillStyle = MINIMAP_PLATE;
+      context.fillRect(0, 0, plate, plate);
+
+      // The road is drawn twice: a wide dark pass for the channel and a narrow lit pass down its
+      // middle, which is the same read the board gives — a lit line in a dark trench — at two pixels
+      // wide. One pass at one width reads as a hairline, and a hairline on a map is a wire.
+      context.lineCap = 'round';
+      context.lineJoin = 'round';
+      for (const [width, color] of [[Math.max(3, size * 1.6), MINIMAP_ROAD], [Math.max(1, size * 0.5), MINIMAP_ROAD_CORE]] as const) {
+        context.strokeStyle = color;
+        context.lineWidth = width;
+        for (const points of roadPolylines) {
+          polyline(points);
+        }
+      }
+
+      // Niches first, then the towers on them: a taken pad is the same mark in a spent colour and
+      // the tower is drawn over it, so a glance tells apart "there is a spot here" from "there is a
+      // gun here" without either being the only thing on the plate. The radii have floors under
+      // them: at 2.3 pixels to a world unit a two-unit niche is four and a half pixels, and a mark
+      // that has to be hunted for is not a mark.
+      const padRadius = Math.max(1.3, size * 0.62);
+      for (const pad of config.map.buildPads) {
+        const occupant = next.pads[pad.id];
+        dot(pad.position.x, pad.position.z, padRadius, occupant ? MINIMAP_PAD_TAKEN : MINIMAP_PAD);
+      }
+
+      const chamber = trainingCorridor.coreChamber;
+      context.beginPath();
+      context.arc(toX(chamber.x), toY(chamber.z), Math.max(1.5, chamber.radius * unit()), 0, Math.PI * 2);
+      context.strokeStyle = MINIMAP_CORE;
+      context.lineWidth = Math.max(1, size * 0.35);
+      context.stroke();
+
+      for (const tower of next.towers) {
+        const pad = config.map.buildPads.find((entry) => entry.id === tower.padId);
+        if (pad) {
+          dot(pad.position.x, pad.position.z, Math.max(1.8, size * 0.95), MINIMAP_TOWER);
+        }
+      }
+
+      // Hostiles last and in the only warm colour on the plate, because they are the one thing on it
+      // that is moving toward something the player owns. They are also the smallest thing drawn: at
+      // 2.3 pixels to a unit an eight-tenths husk is under two, and the wave — the one fact the
+      // panel exists to carry — has to be the first thing a glance finds.
+      const enemyRadius = Math.max(1.6, size * 0.8);
+      for (const enemy of next.enemies) {
+        dot(enemy.x, enemy.z, enemyRadius, MINIMAP_ENEMY);
+      }
+
+      if (view) {
+        // The frame is a rectangle in world units drawn in the map's own axes rather than the
+        // camera's, so it stays a rectangle on a tilted stand. It is a footprint, not a projection,
+        // and the two agree well enough at this scale to be read at a glance.
+        const top = view.targetZ - view.halfHeight;
+        const bottom = view.targetZ + view.halfHeight;
+        const left = view.targetX - view.halfWidth;
+        const right = view.targetX + view.halfWidth;
+        context.strokeStyle = MINIMAP_FRAME;
+        context.lineWidth = 1;
+        context.strokeRect(toX(left), toY(top), (right - left) * unit(), (bottom - top) * unit());
+      }
+    },
+    worldAt: (clientX: number, clientY: number): Vec2 | null => {
+      const box = canvas.getBoundingClientRect();
+      if (box.width <= 0 || box.height <= 0) {
+        return null;
+      }
+      if (clientX < box.left || clientX > box.left + box.width || clientY < box.top || clientY > box.top + box.height) {
+        return null;
+      }
+      const scale = unit() > 0 ? unit() : box.width / (half * 2);
+      return {
+        x: (clientX - box.left) / scale - half,
+        z: (clientY - box.top) / scale - half,
+      };
+    },
+    scale: unit,
   };
 };
