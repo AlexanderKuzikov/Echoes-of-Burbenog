@@ -513,8 +513,8 @@ scene.background = new THREE.Color(0x08131b);
 // a lit strip about a quarter of the frame tall with the rest of the vault dissolved into the
 // background — the wide lens, which is the whole point of the free camera, could not show the map at
 // all. Thirty to a hundred and sixty-five keeps the depth cue where it was (the far corner carries
-// about a third of it) and lets the plate be read edge to edge.
-scene.fog = new THREE.Fog(0x08131b, 30, 165);
+// about a third of it) and lets the plate be read edge to edge. The band itself is set further down,
+// where the stand's reach is declared: it is a depth from the camera, and the camera moved.
 
 // Image based lighting: metalness and roughness only read as metal under an environment, so
 // the PBR materials of the generated models get a prefiltered room probe. There is no scene-wide
@@ -1035,13 +1035,16 @@ for (const option of buildOptions) {
   });
 }
 
-// The camera is a stand the player flies over the map, not an orbit around it. Distance is fixed,
-// because the fog, the near and far planes and every shadow were tuned against it; what moves is
-// where the stand looks (the target) and how much of the map the frustum covers (the zoom). There is
-// no orbit any more: a ninety-six unit map does not fit in a canvas by turning to face it, and the
+// The camera is a stand the player flies over the map, not an orbit around it. What moves is where
+// the stand looks (the target) and how much of the map the frustum covers (the zoom). There is no
+// orbit any more: a ninety-six unit map does not fit in a canvas by turning to face it, and the
 // orbit was the reason a drag on the map moved the picture and a click on it did not.
-const CAMERA_RADIUS = 16.16;
-const CAMERA_ELEVATION = Math.asin(10 / CAMERA_RADIUS);
+//
+// The angle is the one the fog, the shadows and the whole read of the map were tuned at, and it is
+// stated as the angle instead of being derived from the reach below. That is not a nicety: an
+// orthographic camera moved along its own view axis draws exactly the same frame, so the reach can
+// grow to whatever the clip planes need without moving a pixel of the picture.
+const CAMERA_ELEVATION = Math.asin(10 / 16.16);
 // How much of the map the frustum holds, in world units of its own half-height at zoom 1. Sixteen is
 // the middle of the well and the four throats, which is the part of this map a player reads a wave
 // on; the two ends are the ends the task asks for — 1.2 is a tower filling the screen, 42 is the whole
@@ -1056,6 +1059,32 @@ const CAMERA_MIN_VIEW = 1.2;
 // plate and half the void around it.
 const CAMERA_MAX_VIEW = 60;
 const CAMERA_MIN_ZOOM = CAMERA_MIN_VIEW / CAMERA_HOME_VIEW;
+// How far the stand reaches, and why it is not the sixteen-sixteen it was on the forty-unit map.
+//
+// The camera plane — the plane through the camera, square to the view — crosses the ground
+// `reach / cos(elevation)` in front of the target, and every part of the plate past that line is
+// *behind* the camera. The renderer clips it at the near plane and the picker cannot reach it at
+// all: three's orthographic `setFromCamera` starts the pick ray in the camera plane, and since r186
+// it takes neither `near` nor `far` from the camera, so nothing widens it back out. The stand
+// reaches that far because the target may walk to the edge of the plate (the limit `clampTarget`
+// applies, at its widest, which is the narrowest lens), and the plate's own half depth has to be in
+// front of the camera on top of that. At sixteen-sixteen the reach covered twenty units of a
+// ninety-six unit plate: the fourteen niches on the near bank were drawn nowhere, clickable nowhere,
+// and marked on the minimap all the same — a third of the board, six of those the only ground on
+// the map that covers air.
+const CAMERA_TARGET_REACH = Math.max(0, config.map.depth / 2 - CAMERA_MIN_VIEW / Math.cos(CAMERA_ELEVATION));
+const CAMERA_RADIUS = (config.map.depth / 2 + CAMERA_TARGET_REACH) * Math.cos(CAMERA_ELEVATION) + 1;
+// The frustum's own depth, from that same reach. Nothing on the plate is nearer to the camera than
+// the camera is, and the far plane has to hold the far corner of the plate from this far back.
+const CAMERA_NEAR = 0.1;
+const CAMERA_FAR = CAMERA_RADIUS + config.map.depth;
+// The band the map is coloured against, stated from the target rather than from the camera. It was
+// read off the map with the stand sixteen-sixteen out, and the stand has since moved back far enough
+// to keep the plate in front of the camera plane; stated this way that move repaints nothing, and
+// left absolute it would put the whole vault at the far end of the band.
+scene.fog = new THREE.Fog(0x08131b, CAMERA_RADIUS + (30 - 16.16), CAMERA_RADIUS + (165 - 16.16));
+camera.near = CAMERA_NEAR;
+camera.far = CAMERA_FAR;
 // A drag that ends here was a click, and a click is a placement. Below it, the gesture was a swipe
 // across the map and placing a tower by accident is worse than not placing one.
 const CAMERA_CLICK_SLOP_PX = 4;
