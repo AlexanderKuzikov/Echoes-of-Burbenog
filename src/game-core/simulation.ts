@@ -45,7 +45,7 @@ type NormalizedConfig = {
   routes: Map<string, NormalizedRoute>;
   towers: Map<string, TowerDefinition>;
   enemies: Map<string, EnemyDefinition>;
-  waves: WaveDefinition[];
+  waves: NormalizedWave[];
   rules: MatchRules;
 };
 
@@ -60,6 +60,12 @@ type EnemyState = {
   entityId: number;
   enemyId: string;
   routeId: string;
+  /**
+   * The wave that spawned it. A leak is charged to the wave that owns the enemy, not to whichever
+   * wave happens to be on the map, so two overlapping waves keep two honest leak counts and the
+   * second one is not credited with the first one's debt.
+   */
+  waveIndex: number;
   distance: number;
   x: number;
   z: number;
@@ -81,15 +87,28 @@ type ActiveGroup = {
 type ActiveWave = {
   index: number;
   groups: ActiveGroup[];
+  /** What this wave paid when it launched, so `waveCleared` can report it instead of guessing. */
+  bounty: number;
+  /** Leaks since this wave launched, counted on the wave that owns the enemy that walked in. */
+  leaks: number;
 };
+
+/** A wave with the one number the schedule needs made explicit: when its whole force is on the map. */
+type NormalizedWave = WaveDefinition & { waveIntervalTicks: number };
 
 type InternalState = {
   status: MatchStatus;
   tick: number;
+  /** The wave that is on the map, zero based. Stays where it was when the next one launches. */
   waveIndex: number;
+  /** The wave the schedule will launch next, zero based. Equals `waves.length` once all are out. */
+  nextWaveIndex: number;
+  /** Absolute tick the next wave launches on, whatever is still walking when it gets there. */
+  nextWaveTick: number;
   gold: number;
   coreHealth: number;
   maxCoreHealth: number;
+  /** Ticks until the next wave lands, capped at that wave's prep window. Zero once all are out. */
   preparationTicksLeft: number;
   waveTick: number;
   rngState: number;
@@ -150,6 +169,17 @@ const distanceSquared = (a: Vec2, b: Vec2): number => {
   const deltaX = a.x - b.x;
   const deltaZ = a.z - b.z;
   return deltaX * deltaX + deltaZ * deltaZ;
+};
+
+// The tick the last enemy of a wave is spawned on, and with it how long a wave stays "arriving".
+// Two waves overlap exactly when the second one launches before the first has finished arriving, so
+// this number is the one the schedule has to be read against.
+const spawnWindowTicks = (groups: readonly SpawnGroup[]): number => {
+  let last = 0;
+  for (const group of groups) {
+    last = Math.max(last, group.startTick + Math.max(0, group.count - 1) * Math.max(1, group.intervalTicks));
+  }
+  return last;
 };
 
 const normalizeRoute = (route: RouteDefinition): NormalizedRoute => {
@@ -260,7 +290,12 @@ const normalizeConfig = (config: MatchConfig): NormalizedConfig => {
       }
       return { ...group };
     });
-    return { ...wave, groups };
+    // A wave without an interval of its own still has one: the next wave follows as soon as this one's
+    // whole force is on the map and its prep window has passed. Every wave is on a schedule, there is
+    // simply no gap written into this one.
+    const interval = wave.waveIntervalTicks ?? spawnWindowTicks(groups) + wave.prepTicks;
+    requirePositiveInteger(interval, `Wave ${wave.id} interval ticks`);
+    return { ...wave, groups, waveIntervalTicks: interval };
   });
 
   return {
@@ -299,7 +334,13 @@ const pointAtDistance = (route: NormalizedRoute, distance: number): Vec2 => {
 export class Simulation {
   private readonly config: NormalizedConfig;
   private readonly state: InternalState;
-  private activeWave: ActiveWave | null = null;
+  /**
+   * Every wave that has launched and has not finished arriving. It is a list and not a single slot
+   * because two waves are meant to be on the map at once: a wave that is still walking when the next
+   * one lands is exactly the pressure the schedule is for, and a single slot would either drop the
+   * overlap or refuse the launch.
+   */
+  private activeWaves: ActiveWave[] = [];
   private events: SimulationEvent[] = [];
   private nextEntityId = 1;
 
@@ -313,6 +354,10 @@ export class Simulation {
       status: 'preparation',
       tick: 0,
       waveIndex: 0,
+      nextWaveIndex: 0,
+      // The opening window is the first wave's own prep: the match is preparation, and the first wave
+      // lands when that window runs out whether or not anybody pressed anything.
+      nextWaveTick: this.config.waves[0].prepTicks,
       gold: this.config.rules.startingGold,
       coreHealth: this.config.map.coreHealth,
       maxCoreHealth: this.config.map.coreHealth,
@@ -340,8 +385,11 @@ export class Simulation {
     }
 
     this.state.tick += 1;
+    this.countDownToTheNextWave();
+    if (this.state.nextWaveIndex < this.config.waves.length && this.state.tick >= this.state.nextWaveTick) {
+      this.launchWave();
+    }
     if (this.state.status === 'preparation') {
-      this.stepPreparation();
       return;
     }
 
@@ -356,9 +404,8 @@ export class Simulation {
     if (this.isDefeated()) {
       return;
     }
-    if (this.activeWave && this.activeWave.groups.every((group) => group.spawned >= group.group.count) && this.state.enemies.length === 0) {
-      this.completeWave();
-    }
+    this.closeArrivedWaves();
+    this.checkVictory();
   }
 
   public advance(ticks: number): void {
@@ -415,14 +462,95 @@ export class Simulation {
     return this.state.status === 'defeat';
   }
 
-  private stepPreparation(): void {
-    if (this.state.preparationTicksLeft === 0) {
+  /**
+   * The countdown the player reads as "the next wave lands in this long". It is measured from the
+   * schedule and not from the state of the map, so nothing that is still walking can shorten it, and
+   * it stops at the next wave's own prep window rather than running the whole gap — a gap the player
+   * was not promised and would read as a stall.
+   */
+  private countDownToTheNextWave(): void {
+    const next = this.config.waves[this.state.nextWaveIndex];
+    if (!next) {
+      this.state.preparationTicksLeft = 0;
       return;
     }
-    this.state.preparationTicksLeft -= 1;
-    if (this.state.preparationTicksLeft === 0) {
-      this.events.push({ type: 'preparationEnded', waveIndex: this.state.waveIndex });
+    const untilLaunch = this.state.nextWaveTick - this.state.tick;
+    const left = untilLaunch <= 0 ? 0 : Math.min(untilLaunch, next.prepTicks);
+    if (left === 0 && this.state.preparationTicksLeft > 0) {
+      this.events.push({ type: 'preparationEnded', waveIndex: this.state.nextWaveIndex });
     }
+    this.state.preparationTicksLeft = left;
+  }
+
+  /**
+   * The wave schedule is a clock and not a consequence of the field: the next wave launches on its
+   * tick with whatever is still walking. `waveIndex` names the wave on the map and `nextWaveIndex` is
+   * the cursor, because the player reads the first and the schedule needs the second.
+   */
+  private launchWave(): void {
+    const wave = this.config.waves[this.state.nextWaveIndex];
+    if (!wave) {
+      return;
+    }
+    const roll = nextRandom(this.state.rngState);
+    this.state.rngState = roll.state;
+    this.state.lastWaveRoll = roll.value;
+    this.state.status = 'wave';
+    this.state.waveIndex = this.state.nextWaveIndex;
+    this.state.nextWaveIndex += 1;
+    this.state.nextWaveTick = this.state.tick + wave.waveIntervalTicks;
+    this.state.waveTick = 0;
+    this.state.leaksThisWave = 0;
+    this.state.preparationTicksLeft = 0;
+    this.activeWaves.push({
+      index: this.state.waveIndex,
+      groups: wave.groups.map((group) => ({ group, spawned: 0 })),
+      bounty: this.config.rules.waveBounty,
+      leaks: 0,
+    });
+    // Paid on launch, not on a clean sweep. A wave that overlaps the next one is never "cleared", so
+    // a payment gated on clearing is a payment the player who is already losing waits longest for —
+    // which is the spiral this replaces. The bounty is the floor; kill rewards are what a player earns
+    // on top of it, and only a player who is ahead collects them.
+    this.state.gold += this.config.rules.waveBounty;
+    this.events.push({
+      type: 'waveStarted',
+      waveIndex: this.state.waveIndex,
+      roll: roll.value,
+      bounty: this.config.rules.waveBounty,
+    });
+  }
+
+  /** Everything still in its spawn window. A wave with none left has fully arrived on the map. */
+  private closeArrivedWaves(): void {
+    const arrived = this.activeWaves.filter((active) => active.groups.every((group) => group.spawned >= group.group.count));
+    if (arrived.length === 0) {
+      return;
+    }
+    this.activeWaves = this.activeWaves.filter((active) => !arrived.includes(active));
+    const repair = this.config.rules.repairAmount;
+    this.state.coreHealth = Math.min(this.state.maxCoreHealth, this.state.coreHealth + repair);
+    for (const active of arrived) {
+      this.events.push({
+        type: 'waveCleared',
+        waveIndex: active.index,
+        bounty: active.bounty,
+        leaks: active.leaks,
+      });
+    }
+  }
+
+  /** The match is won when the last wave has arrived and nothing of it is left walking. */
+  private checkVictory(): void {
+    if (this.state.nextWaveIndex < this.config.waves.length) {
+      return;
+    }
+    if (this.activeWaves.length > 0 || this.state.enemies.length > 0) {
+      return;
+    }
+    this.state.status = 'victory';
+    this.activeWaves = [];
+    this.events.push({ type: 'victory', waveIndex: this.state.waveIndex });
   }
 
   private placeTower(padId: string, towerId: string): CommandResult {
@@ -452,51 +580,37 @@ export class Simulation {
     return { accepted: true };
   }
 
+  /**
+   * The manual start is gone from the rules, and the command says so rather than quietly doing
+   * nothing. It stays in `Command` because the session protocol and the room dispatch it, and both
+   * are outside this file's reach; what a normal match does with it is refuse it by name, so an old
+   * save replaying itself, a room, or a script that still sends it all get the same answer.
+   */
   private startWave(): CommandResult {
-    if (this.state.status !== 'preparation') {
-      return { accepted: false, reason: 'wave-already-active' };
+    if (this.state.status === 'victory' || this.state.status === 'defeat') {
+      return { accepted: false, reason: 'match-finished' };
     }
-    if (this.state.waveIndex >= this.config.waves.length) {
-      this.state.status = 'victory';
-      this.events.push({ type: 'victory', waveIndex: this.state.waveIndex });
-      return { accepted: true };
-    }
-
-    const wave = this.config.waves[this.state.waveIndex];
-    const roll = nextRandom(this.state.rngState);
-    this.state.rngState = roll.state;
-    this.state.lastWaveRoll = roll.value;
-    this.state.status = 'wave';
-    this.state.preparationTicksLeft = 0;
-    this.state.waveTick = 0;
-    this.state.leaksThisWave = 0;
-    this.activeWave = {
-      index: this.state.waveIndex,
-      groups: wave.groups.map((group) => ({ group, spawned: 0 })),
-    };
-    this.events.push({ type: 'waveStarted', waveIndex: this.state.waveIndex, roll: roll.value });
-    return { accepted: true };
+    return { accepted: false, reason: 'waves-run-on-their-own' };
   }
 
   private spawnDueEnemies(): void {
-    if (!this.activeWave) {
-      return;
-    }
-    for (const activeGroup of this.activeWave.groups) {
-      const { group } = activeGroup;
-      const interval = Math.max(1, group.intervalTicks);
-      while (activeGroup.spawned < group.count) {
-        const spawnTick = group.startTick + activeGroup.spawned * interval;
-        if (spawnTick > this.state.waveTick) {
-          break;
+    for (const activeWave of this.activeWaves) {
+      for (const activeGroup of activeWave.groups) {
+        const { group } = activeGroup;
+        const interval = Math.max(1, group.intervalTicks);
+        while (activeGroup.spawned < group.count) {
+          const spawnTick = group.startTick + activeGroup.spawned * interval;
+          if (spawnTick > this.state.waveTick) {
+            break;
+          }
+          this.spawnEnemy(group, activeWave.index);
+          activeGroup.spawned += 1;
         }
-        this.spawnEnemy(group);
-        activeGroup.spawned += 1;
       }
     }
   }
 
-  private spawnEnemy(group: SpawnGroup): void {
+  private spawnEnemy(group: SpawnGroup, waveIndex: number): void {
     const definition = this.config.enemies.get(group.enemyId);
     const route = this.config.routes.get(group.routeId);
     if (!definition || !route) {
@@ -509,6 +623,7 @@ export class Simulation {
       entityId,
       enemyId: definition.id,
       routeId: route.id,
+      waveIndex,
       distance: 0,
       x: start.x,
       z: start.z,
@@ -537,7 +652,7 @@ export class Simulation {
       }
       const nextDistance = enemy.distance + enemy.speed * slowFactor * TICK_SECONDS;
       if (nextDistance >= route.totalLength) {
-        this.damageCore(enemy.coreDamage);
+        this.damageCore(enemy.coreDamage, enemy.waveIndex);
         if (this.isDefeated()) {
           this.state.enemies = [];
           return;
@@ -567,14 +682,19 @@ export class Simulation {
     this.state.enemies = survivors;
   }
 
-  private damageCore(amount: number): void {
+  private damageCore(amount: number, waveIndex: number): void {
     const applied = Math.min(amount, this.state.coreHealth);
     this.state.coreHealth = Math.max(0, this.state.coreHealth - amount);
     this.state.leaksThisWave += 1;
+    for (const active of this.activeWaves) {
+      if (active.index === waveIndex) {
+        active.leaks += 1;
+      }
+    }
     this.events.push({ type: 'coreDamaged', amount: applied, coreHealth: this.state.coreHealth });
     if (this.state.coreHealth === 0) {
       this.state.status = 'defeat';
-      this.activeWave = null;
+      this.activeWaves = [];
       this.events.push({ type: 'defeat', waveIndex: this.state.waveIndex });
     }
   }
@@ -663,31 +783,6 @@ export class Simulation {
       this.events.push({ type: 'enemyKilled', entityId: enemy.entityId, reward: enemy.reward });
     }
     this.state.enemies = survivors;
-  }
-
-  private completeWave(): void {
-    if (!this.activeWave) {
-      return;
-    }
-    const completedIndex = this.activeWave.index;
-    const bounty = this.state.leaksThisWave === 0 ? this.config.rules.waveBounty : 0;
-    const repair = this.state.leaksThisWave === 0 ? this.config.rules.repairAmount : 0;
-    this.state.gold += bounty;
-    this.state.coreHealth = Math.min(this.state.maxCoreHealth, this.state.coreHealth + repair);
-    this.events.push({ type: 'waveCleared', waveIndex: completedIndex, bounty, leaks: this.state.leaksThisWave });
-    this.activeWave = null;
-
-    if (completedIndex + 1 >= this.config.waves.length) {
-      this.state.status = 'victory';
-      this.events.push({ type: 'victory', waveIndex: completedIndex });
-      return;
-    }
-
-    this.state.waveIndex = completedIndex + 1;
-    this.state.status = 'preparation';
-    this.state.waveTick = 0;
-    this.state.leaksThisWave = 0;
-    this.state.preparationTicksLeft = this.config.waves[this.state.waveIndex].prepTicks;
   }
 }
 
