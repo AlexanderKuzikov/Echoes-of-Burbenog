@@ -185,8 +185,15 @@ h1 {
   font-weight: 650;
 }
 
+/* The board and the rail are two surfaces of one box. The board is a grid cell, so the chrome drawn on
+   it measures its corners from the board and not from the window, and the rail beside it is a column
+   that can hold a panel that would otherwise stand on the board. The row's height is still the scene's:
+   the rail is shorter than the board at every width this ships at, and where it is not (the narrow
+   layout below) it stacks under the board rather than beside it. */
 .viewport-shell {
   position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   min-height: 0;
   overflow: hidden;
   border: 1px solid rgba(119, 176, 177, 0.28);
@@ -195,20 +202,32 @@ h1 {
   box-shadow: 0 22px 60px rgba(0, 0, 0, 0.26), inset 0 0 0 1px rgba(255, 255, 255, 0.025);
 }
 
-#scene,
+#scene {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
 #scene canvas {
   position: absolute;
   inset: 0;
+  display: block;
   width: 100%;
   height: 100%;
 }
 
-#scene canvas {
-  display: block;
+.viewport-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 14px 14px 0;
+  border-left: 1px solid rgba(119, 176, 177, 0.16);
 }
 
 .viewport-vignette {
   position: absolute;
+  z-index: 1;
   inset: 0;
   pointer-events: none;
   background: radial-gradient(circle at 52% 45%, transparent 35%, rgba(2, 9, 14, 0.38) 100%);
@@ -373,10 +392,25 @@ h1 {
   border-left-color: #74e0b4;
 }
 
-.scene-caption,
+/* The caption and the game line are one row with two ends. They were two independent corners of the
+   board, and the line is as long as the reason it carries — a refusal names a digest — so a corner each
+   is a race the line wins on a narrow board. A flex row divides what is there: the caption takes what it
+   needs, the line takes the rest and wraps, and neither can reach the other. */
+.scene-top {
+  position: absolute;
+  z-index: 2;
+  top: 20px;
+  right: 20px;
+  left: 22px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  pointer-events: none;
+}
+
 .selection-card,
 .map-legend,
-.wave-chip,
 .scene-report,
 .scene-diagnostics {
   position: absolute;
@@ -384,9 +418,11 @@ h1 {
   pointer-events: none;
 }
 
+/* The left end of the top row, and a static item in it: an absolutely positioned caption would take no
+   space in the row and the game line would land on top of it, which is the collision this row was made
+   to end. */
 .scene-caption {
-  top: 20px;
-  left: 22px;
+  flex: 0 0 auto;
   display: grid;
   gap: 3px;
   padding: 12px 15px;
@@ -415,19 +451,33 @@ h1 {
 }
 
 .wave-chip {
-  top: 20px;
-  right: 20px;
+  /* The right end of the row above, and the only thing in it that gives way: `min-width: 0` is what lets
+     a flex item shrink below its content, and without it a long line would push the caption off the
+     board instead of wrapping inside its own pill. Two lines is the whole of it — the pill is the short
+     form of a reason by design and the block under the caption carries that reason whole, so a third
+     line here is text the player has already been given — and two lines is what keeps the pill clear of
+     the selection card at every board height. */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-height: 71px;
   gap: 8px;
   padding: 9px 12px;
+  overflow: hidden;
   border: 1px solid rgba(110, 226, 207, 0.32);
   border-radius: 999px;
   background: rgba(7, 20, 27, 0.7);
   color: #c7e7df;
   font-size: 0.6rem;
   font-weight: 700;
+  text-align: right;
+}
+
+.wave-chip > span {
+  overflow-wrap: anywhere;
 }
 
 .pulse-dot {
+  flex: 0 0 auto;
   width: 7px;
   height: 7px;
   border-radius: 50%;
@@ -469,21 +519,25 @@ h1 {
   overflow-wrap: anywhere;
 }
 
-/* Created by `main.ts` only when the `dev` query flag is present, so it needs no hidden state. */
+/* Created by `main.ts` only when the `dev` query flag is present, so it needs no hidden state. It is a
+   row of its own under the dock: a `?dev` block is not the game, and the board it used to sit on has no
+   room left for it now that a long game line can wrap to three lines beside the rail. Its numbers are
+   the same, and nothing here is ever on screen without the flag. */
 .scene-diagnostics {
-  top: 62px;
-  right: 20px;
+  flex: 1 0 100%;
   display: grid;
-  gap: 3px;
-  max-width: min(330px, 42%);
-  padding: 10px 12px;
-  border: 1px solid rgba(143, 184, 184, 0.2);
-  border-radius: 10px;
-  background: rgba(6, 18, 24, 0.84);
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  align-items: baseline;
+  gap: 14px;
+  padding: 7px 12px;
+  border: 1px dashed rgba(143, 184, 184, 0.24);
+  border-radius: 9px;
+  background: rgba(9, 24, 31, 0.5);
   color: #9bb4b2;
   font-size: 0.55rem;
   font-weight: 650;
-  line-height: 1.45;
+  line-height: 1.4;
 }
 
 .scene-diagnostics p {
@@ -553,8 +607,11 @@ h1 {
   }
 }
 
+/* The right column under the scene status, which is where this card was before the minimap took the
+   column over and pushed it to the left. It is a small readout of the selection, not a control, and it
+   is the one piece of chrome whose position the board does not have to make room for twice. */
 .selection-card {
-  left: 22px;
+  right: 20px;
   top: 104px;
   display: grid;
   gap: 4px;
@@ -576,17 +633,13 @@ h1 {
   font-size: 0.68rem;
 }
 
-/* The minimap takes the whole right column under the scene status, and the selection card moves to
-   the left for it. On a 1280x720 window the board is four hundred pixels tall: a 220-pixel map plus its
-   frame and its caption is 270 of them, and the column it was going into had 113 free above the card
-   and 112 below it. It is a 2D canvas drawing the whole ninety-six unit plate at all times — that is
-   what makes it a map and not a second camera — so 220 pixels is 2.3 per world unit, which is enough
-   to aim a click and far too small to be mistaken for the board itself. */
+/* The minimap stands in the rail beside the board, so it covers nothing a player has to click. It was
+   a 242-pixel panel in the top right corner of the scene, and it was standing on five of the
+   forty-four niches — one of them among the four with the best coverage on the map, which is the worst
+   place on this board to be standing on. It is a 2D canvas drawing the whole ninety-six unit plate at
+   all times — that is what makes it a map and not a second camera — so 220 pixels is 2.29 per world
+   unit, which is enough to aim a click and far too small to be mistaken for the board itself. */
 .minimap {
-  position: absolute;
-  z-index: 2;
-  right: 20px;
-  top: 60px;
   display: grid;
   gap: 6px;
   justify-items: center;
@@ -615,6 +668,9 @@ h1 {
 }
 
 .command-dock {
+  /* Always allowed to wrap: a `?dev` diagnostics row takes a row of its own under the panels, and a
+     block that could not have one would have to sit on the board instead. */
+  flex-wrap: wrap;
   gap: 12px;
   min-height: 112px;
   padding: 12px;
@@ -767,6 +823,11 @@ h1 {
 
 .wave-section {
   flex: 0.95;
+  /* The phase, the clock, the countdown and four controls in two columns have a width below which they
+     start wrapping, and a wrapped row makes this the tallest thing in the dock — which is the board's
+     height. The floor is stated here rather than let the flex row find it: the panels beside it are
+     read-only lines that ellipsise or wrap without complaint, this one is a set of controls. */
+  min-width: 196px;
   display: grid;
   align-content: center;
   gap: 6px;
@@ -901,6 +962,62 @@ h1 {
   display: grid;
   align-content: center;
   gap: 6px;
+}
+
+/* The speed is a clock control and it sits in the dock with the other clock controls, but it is its
+   own section rather than another row of the wave panel: four multipliers side by side inside that
+   panel would either squeeze Pause and Restart or make the panel the tallest thing in the dock, and
+   the dock's height is the board's height. It asks for no width it does not use — the four buttons are
+   a fourth of the section, and the section is a fourth of what the dock can spare at 1280 — and it is
+   shorter than the wave panel, so the dock does not grow by a pixel. */
+.speed-section {
+  /* A stated width, not a content one: the row of four buttons and the line under it have two
+     different natural widths, and letting the section take the larger of them spent fifty pixels of
+     the row on a sentence that wraps to two lines in half of that. */
+  flex: 0 0 148px;
+  display: grid;
+  align-content: center;
+  gap: 6px;
+}
+
+.speed-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(min-content, 1fr));
+  gap: 4px;
+}
+
+.speed-button {
+  min-width: min-content;
+  padding: 6px 5px;
+  border: 1px solid rgba(143, 184, 184, 0.24);
+  border-radius: 7px;
+  background: rgba(9, 24, 31, 0.62);
+  color: #bcd6d2;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+/* The pressed one is the one that is running, and it wears the same amber the paused clock wears, so
+   "the clock is not what it was" is one colour across the whole dock rather than two. */
+.speed-button[aria-pressed="true"] {
+  border-color: rgba(255, 197, 107, 0.55);
+  background: rgba(48, 38, 28, 0.72);
+  color: #ffe2ae;
+}
+
+.speed-button:hover:not(:disabled),
+.speed-button:focus-visible {
+  border-color: #6ee2cf;
+  outline: none;
+}
+
+.speed-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* The kicker and the slot state stack instead of sharing a row: the state carries a tick and a
@@ -1199,8 +1316,45 @@ h1 {
   .game-shell {
     min-height: 760px;
     height: auto;
-    grid-template-rows: auto 560px auto;
+    grid-template-rows: auto auto auto;
     padding: 12px;
+  }
+
+  /* A window narrower than the board wants is a portrait one, and a portrait board wants its width.
+     The rail therefore goes under the picture instead of beside it, and the picture keeps the five
+     hundred and sixty pixels of height it had — a rail at the side of a portrait board would take a
+     third of its width away, and the page below already scrolls at this width, so there is nothing to
+     save by squeezing the board. The shell's viewport row follows the content here for that reason. */
+  .viewport-shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 560px auto;
+    align-content: start;
+  }
+
+  .viewport-rail {
+    flex-direction: row;
+    justify-content: center;
+    padding: 0 0 12px;
+    border-left: 0;
+    border-top: 1px solid rgba(119, 176, 177, 0.16);
+  }
+
+  /* A portrait board has no room for a caption and a game line side by side: the caption is three
+     hundred and fifty-four pixels of it and the board is five hundred. They stack, the line gets the
+     whole width instead of the hundred and twenty pixels left over, and the refusal block moves down
+     under the pair it belongs to. */
+  .scene-top {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .wave-chip {
+    align-self: flex-start;
+  }
+
+  .scene-report {
+    top: 186px;
   }
 
   .topbar {
@@ -1219,6 +1373,13 @@ h1 {
 
   .build-section {
     flex-basis: 100%;
+  }
+
+  /* The four multipliers take a row of their own once the dock is stacking anyway: at this width the
+     panels beside them are down to ninety pixels each, and four buttons across ninety pixels is a
+     control nobody can hit. */
+  .speed-section {
+    flex: 1 1 100%;
   }
 
   .status-section,
@@ -1257,17 +1418,20 @@ h1 {
   }
 
   .selection-card {
+    right: auto;
     left: 12px;
     top: auto;
     bottom: 62px;
   }
 
-  /* On a narrow board the map and the card cannot both have the right edge, so the card keeps the
-     left and the map the right, and the map shrinks by a third: a click target of 145 pixels is still
-     larger than any niche on it. */
+  /* The rail is a row under the board here, so the map only has to fit the window: a hundred and
+     forty-five pixels is still one and a half pixels to a world unit, and a click target of that size
+     is larger than any niche on it. */
+  .viewport-rail {
+    padding: 0 0 10px;
+  }
+
   .minimap {
-    top: 12px;
-    right: 12px;
     padding: 7px;
   }
 

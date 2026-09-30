@@ -50,46 +50,65 @@
         </header>
 
         <section class="viewport-shell" aria-label="Tactical viewport" data-testid="viewport" data-phase="preparation" data-paused="false" data-replay="idle" data-assets="loading">
-          <div id="scene"></div>
-          <div class="viewport-vignette" aria-hidden="true"></div>
-          <div class="scene-caption">
-            <span class="caption-kicker">Sector 01 · Burrow Vault</span>
-            <strong>Schematic combat preview</strong>
-            <span>Own visual language / reference-inspired readability</span>
+          <div id="scene">
+            <!-- Everything drawn on the picture lives inside the picture's own box, and the picture's own
+                 box is the grid cell the lens is fitted to. The rail beside it is a different surface, so
+                 `right: 20px` means twenty pixels from the edge of the board and not from the edge of the
+                 window — which is what a caption, a chip and a card mean by it. The vignette paints over
+                 the canvas through its own z-index, because the canvas is appended after this markup. -->
+            <div class="viewport-vignette" aria-hidden="true"></div>
+            <!-- The caption and the game line share one row, so neither can grow into the other. They were
+                 two independent corners of the board, and the line is as long as the reason it carries: with
+                 a rail beside the board there are two hundred and fifty-seven pixels less to put it in, and
+                 a long refusal walked its pill left over the sector name. A row divides what is there. -->
+            <div class="scene-top">
+              <div class="scene-caption">
+                <span class="caption-kicker">Sector 01 · Burrow Vault</span>
+                <strong>Schematic combat preview</strong>
+                <span>Own visual language / reference-inspired readability</span>
+              </div>
+              <div class="wave-chip">
+                <span class="pulse-dot"></span>
+                <span data-testid="scene-status">Scene online</span>
+              </div>
+            </div>
+            <div class="scene-report" data-testid="scene-report" role="status" hidden>
+              <span class="scene-report-kicker">Asset refusal</span>
+              <p class="scene-report-reason" data-testid="scene-report-reason" data-reason=""></p>
+            </div>
+            <div class="result-banner" data-testid="match-result" data-result="none" role="status" hidden>Sector secured</div>
+            <div class="state-badge" data-testid="state-badge" data-state="idle" role="status" hidden>Paused</div>
+            <ul class="combat-log" data-testid="event-feed" aria-label="Combat log"></ul>
+            <div class="map-legend" aria-label="Map legend">
+              <span><i class="legend-mark legend-mark--path"></i>Route</span>
+              <span><i class="legend-mark legend-mark--build"></i>Build pad</span>
+              <span><i class="legend-mark legend-mark--threat"></i>Threat</span>
+              <span data-testid="camera-hint">Left drag turns · wheel zooms · right drag pans · WASD walks · R resets</span>
+            </div>
+            <div class="selection-card" data-testid="selection-card">
+              <span class="selection-kicker">Selected structure</span>
+              <strong data-testid="selection-card-name">Pulse Spire</strong>
+              <span data-testid="selection-card-detail">Range 4.05 · Damage 18</span>
+            </div>
           </div>
-          <div class="wave-chip">
-            <span class="pulse-dot"></span>
-            <span data-testid="scene-status">Scene online</span>
-          </div>
-          <div class="scene-report" data-testid="scene-report" role="status" hidden>
-            <span class="scene-report-kicker">Asset refusal</span>
-            <p class="scene-report-reason" data-testid="scene-report-reason" data-reason=""></p>
-          </div>
-          <div class="result-banner" data-testid="match-result" data-result="none" role="status" hidden>Sector secured</div>
-          <div class="state-badge" data-testid="state-badge" data-state="idle" role="status" hidden>Paused</div>
-          <ul class="combat-log" data-testid="event-feed" aria-label="Combat log"></ul>
-          <div class="minimap" data-testid="minimap">
-            <canvas
-              class="minimap-canvas"
-              data-testid="minimap-canvas"
-              width="220"
-              height="220"
-              role="img"
-              aria-label="Minimap of the whole vault: the road, the niches, built towers, living hostiles and the well. Click it to move the camera there."
-            ></canvas>
-            <span class="minimap-caption">Vault</span>
-          </div>
-          <div class="map-legend" aria-label="Map legend">
-            <span><i class="legend-mark legend-mark--path"></i>Route</span>
-            <span><i class="legend-mark legend-mark--build"></i>Build pad</span>
-            <span><i class="legend-mark legend-mark--threat"></i>Threat</span>
-            <span data-testid="camera-hint">WASD or arrows move · wheel zooms · right drag pans · click the minimap · R resets</span>
-          </div>
-          <div class="selection-card" data-testid="selection-card">
-            <span class="selection-kicker">Selected structure</span>
-            <strong data-testid="selection-card-name">Pulse Spire</strong>
-            <span data-testid="selection-card-detail">Range 4.05 · Damage 18</span>
-          </div>
+          <aside class="viewport-rail" aria-label="Vault map and legend">
+            <!-- The minimap is here and not over the board. A 242-pixel panel in the corner of the scene
+                 was standing on five of the forty-four niches, one of them among the four with the best
+                 coverage on the map, and a niche the player cannot click is a niche the player cannot
+                 play. It is the whole plate at all times — that is what makes it a map and not a second
+                 camera — and it lost nothing but the 242 pixels it was taking from the board. -->
+            <div class="minimap" data-testid="minimap">
+              <canvas
+                class="minimap-canvas"
+                data-testid="minimap-canvas"
+                width="220"
+                height="220"
+                role="img"
+                aria-label="Minimap of the whole vault: the road, the niches, built towers, living hostiles and the well. Click it to move the camera there."
+              ></canvas>
+              <span class="minimap-caption">Vault</span>
+            </div>
+          </aside>
         </section>
 
         <footer class="command-dock">
@@ -177,6 +196,18 @@
                 >Menu</button>
               </div>
             </div>
+          </section>
+          <section class="dock-section speed-section">
+            <span class="status-kicker">Match speed</span>
+            <div class="speed-row" role="group" aria-label="Game speed">
+              <button class="speed-button" type="button" data-testid="speed-0.5" data-speed="0.5" aria-pressed="false" title="Half speed: the same match, half as many ticks a second">0.5×</button>
+              <button class="speed-button" type="button" data-testid="speed-1" data-speed="1" aria-pressed="true" title="The match's own clock: twenty ticks a second">1×</button>
+              <button class="speed-button" type="button" data-testid="speed-2" data-speed="2" aria-pressed="false" title="Twice the ticks a second, the same rules">2×</button>
+              <button class="speed-button" type="button" data-testid="speed-4" data-speed="4" aria-pressed="false" title="Four times the ticks a second, the same rules">4×</button>
+            </div>
+            <!-- Said on the surface rather than in a report: a speed that only turned the rules up would be
+                 a different game, and a player who cannot tell which one they are looking at cannot use it. -->
+            <span class="status-detail" data-testid="speed-detail">Same ticks, faster clock</span>
           </section>
           <section class="dock-section save-section">
             <div class="save-heading">

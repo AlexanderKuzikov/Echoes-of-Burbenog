@@ -274,6 +274,11 @@ type DebugState = {
   // a test cannot ask for a frame the product would never produce.
   readonly frameDelta: number | null;
   forceFrameDelta: (seconds: number | null) => void;
+  // The multiplier the player has the clock on, and the steps the control offers. The core's own
+  // `tickRate` is above and is not affected by either: this is how many ticks a frame may spend, not
+  // how long a tick is.
+  readonly speed: number;
+  readonly speedSteps: number[];
   // Every recorded command with the tick it was issued on and the tick it was applied on.
   readonly commandPlan: CommandLogEntry[];
   // Clock readings taken inside the page at the moment something happened there, so a test measures
@@ -467,7 +472,12 @@ const createDevDiagnostics = (): DevDiagnostics => {
     element.append(row);
     rows[key] = row;
   }
-  viewportShell.append(element);
+  // Into the dock, not onto the board. It is a `?dev` block, it is not the game, and the board it used
+  // to sit on has no room left for it: with the rail beside the picture the status line can wrap to
+  // three lines, and a block that cannot be placed without standing on something does not belong on
+  // the board. The dock already carries readouts, and under `?dev` it is the only surface that is
+  // allowed to grow.
+  document.querySelector('.command-dock')?.append(element);
   return { rows };
 };
 
@@ -1035,16 +1045,64 @@ for (const option of buildOptions) {
   });
 }
 
-// The camera is a stand the player flies over the map, not an orbit around it. What moves is where
-// the stand looks (the target) and how much of the map the frustum covers (the zoom). There is no
-// orbit any more: a ninety-six unit map does not fit in a canvas by turning to face it, and the
-// orbit was the reason a drag on the map moved the picture and a click on it did not.
+// The speed is a clock the player drives, not a rule of the match. `TICK_RATE` in the core is what it
+// is and the core is frozen: a tick is the same length of match time whatever the multiplier says, and
+// the multiplier only decides how many of those ticks one frame is allowed to spend. That is the whole
+// difference between one times and four, and it is why the two produce the same match to the tick —
+// the same commands land on the same ticks, the same enemies die on the same ticks, the same terminal
+// report comes out. A speed that changed the length of a tick would be a different game wearing the
+// same seed, and nothing on the surface would be able to say so.
+const SPEED_STEPS = [0.5, 1, 2, 4];
+const speedButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('.speed-button'));
+let gameSpeed = 1;
+
+const syncSpeed = (): void => {
+  for (const button of speedButtons) {
+    const running = Number(button.dataset.speed) === gameSpeed;
+    button.setAttribute('aria-pressed', running ? 'true' : 'false');
+  }
+};
+
+for (const button of speedButtons) {
+  button.addEventListener('click', () => {
+    const wanted = Number(button.dataset.speed);
+    if (!Number.isFinite(wanted) || wanted === gameSpeed) {
+      return;
+    }
+    gameSpeed = wanted;
+    syncSpeed();
+  });
+}
+
+// The camera is a stand the player flies over the map and walks around. What moves is where the stand
+// looks (the target), how much of the map the frustum covers (the zoom) and which way it is turned (the
+// azimuth and the pitch). A left drag is the orbit again, and the map it turned away from — "a
+// ninety-six unit map does not fit in a canvas by turning to face it" — was never true: the map does
+// not fit at any azimuth, which is what the free zoom and the minimap are for, and turning to face it
+// is the one thing a player expects from a game with a 3D board.
 //
-// The angle is the one the fog, the shadows and the whole read of the map were tuned at, and it is
-// stated as the angle instead of being derived from the reach below. That is not a nicety: an
-// orthographic camera moved along its own view axis draws exactly the same frame, so the reach can
-// grow to whatever the clip planes need without moving a pixel of the picture.
+// The angle is the one the fog, the shadows and the whole read of the map were tuned at, and it is the
+// middle of the band the pitch may leave. It is not derived from the reach below, and that is not a
+// nicety: an orthographic camera moved along its own view axis draws exactly the same frame, so the
+// reach can grow to whatever the clip planes need without moving a pixel of the picture.
 const CAMERA_ELEVATION = Math.asin(10 / 16.16);
+// How far the pitch may leave that angle, and why it is a band and not a free angle. Both ends are
+// measured, not chosen: at thirty degrees the massif stands in front of three niches and they stop
+// being clickable — thirty-three is the first whole degree above that, and it is a floor for the same
+// reason the minimap left the board, a niche a player cannot click is a niche the player cannot play.
+// The ceiling is a near-plan read of a ninety-six unit plate, where the depth stops carrying any shape
+// and the terraces read as a texture; nothing is covered there. The table of both ends at four
+// azimuths is in the report of `0036`.
+const CAMERA_ELEVATION_MIN = (33 * Math.PI) / 180;
+const CAMERA_ELEVATION_MAX = (58 * Math.PI) / 180;
+// How far a drag turns the stand. Half a degree a pixel is a quarter turn in a swipe across a third of
+// the board and a full turn in about one and a half screens, which is the whole range a player asked
+// for: a ninety-six unit map with four throats has nothing to hide from any one of them, so there is no
+// reason to make the turn slower than a wrist. The pitch is a quarter of that, because a pitch is a
+// trim and a turn is a look.
+const CAMERA_ORBIT_DEGREES_PER_PIXEL = 0.5;
+const CAMERA_PITCH_DEGREES_PER_PIXEL = 0.12;
+const DEGREES = Math.PI / 180;
 // How much of the map the frustum holds, in world units of its own half-height at zoom 1. Sixteen is
 // the middle of the well and the four throats, which is the part of this map a player reads a wave
 // on; the two ends are the ends the task asks for — 1.2 is a tower filling the screen, 42 is the whole
@@ -1072,19 +1130,56 @@ const CAMERA_MIN_ZOOM = CAMERA_MIN_VIEW / CAMERA_HOME_VIEW;
 // ninety-six unit plate: the fourteen niches on the near bank were drawn nowhere, clickable nowhere,
 // and marked on the minimap all the same — a third of the board, six of those the only ground on
 // the map that covers air.
-const CAMERA_TARGET_REACH = Math.max(0, config.map.depth / 2 - CAMERA_MIN_VIEW / Math.cos(CAMERA_ELEVATION));
-const CAMERA_RADIUS = (config.map.depth / 2 + CAMERA_TARGET_REACH) * Math.cos(CAMERA_ELEVATION) + 1;
+//
+// It is a function of the pitch because the pitch moves the plane. The frame reaches
+// `halfHeight / cos(elevation)` in front of the target and the target clamp keeps that inside the
+// plate's half depth, so a pitch anywhere in the band above needs a little more of the plate in
+// front of the camera than a flat one does, and the numbers below hold at every angle in it.
+const cameraTargetReach = (elevation: number): number =>
+  Math.max(0, config.map.depth / 2 - CAMERA_MIN_VIEW / Math.cos(elevation));
+// The stand's own distance from the target, which is the reach folded back along the view. It moves
+// with the pitch, and everything stated in view space moves with it: the far plane and the fog band.
+const cameraRadiusAt = (elevation: number): number =>
+  (config.map.depth / 2 + cameraTargetReach(elevation)) * Math.cos(elevation) + 1;
+let cameraRadius = cameraRadiusAt(CAMERA_ELEVATION);
 // The frustum's own depth, from that same reach. Nothing on the plate is nearer to the camera than
 // the camera is, and the far plane has to hold the far corner of the plate from this far back.
 const CAMERA_NEAR = 0.1;
-const CAMERA_FAR = CAMERA_RADIUS + config.map.depth;
-// The band the map is coloured against, stated from the target rather than from the camera. It was
+// The band the map is coloured against, stated from the stand rather than from the world origin. It was
 // read off the map with the stand sixteen-sixteen out, and the stand has since moved back far enough
-// to keep the plate in front of the camera plane; stated this way that move repaints nothing, and
-// left absolute it would put the whole vault at the far end of the band.
-scene.fog = new THREE.Fog(0x08131b, CAMERA_RADIUS + (30 - 16.16), CAMERA_RADIUS + (165 - 16.16));
+// to keep the plate in front of the camera plane; stated as offsets from the stand's own distance, that
+// move repaints nothing, and a pitch moves the band with the stand instead of sliding the vault out of
+// it.
+const FOG_NEAR_OFFSET = 30 - 16.16;
+const FOG_FAR_OFFSET = 165 - 16.16;
+const sceneFog = new THREE.Fog(
+  0x08131b,
+  cameraRadius + FOG_NEAR_OFFSET,
+  cameraRadius + FOG_FAR_OFFSET,
+);
+scene.fog = sceneFog;
 camera.near = CAMERA_NEAR;
-camera.far = CAMERA_FAR;
+camera.far = cameraRadius + config.map.depth;
+
+// The stand is moved back along its own axis when the pitch changes, which is the only thing about a
+// pitch that a pixel of the picture can see: an orthographic camera on the same view axis draws the
+// same frame. Everything that is stated in view space — the far plane, the fog band, how much of the
+// plate the widest lens can hold — follows it here, and everything stated in the world does not move
+// at all. The lens the player is *on* is deliberately not touched: a pitch that also changed the zoom
+// would be a camera that breathes under the hand, and the one thing a turn must not do is move the
+// frame on its own. The new ceiling is simply there to be wheeled out to.
+const syncCameraReach = (elevation: number): void => {
+  const radius = cameraRadiusAt(elevation);
+  if (radius === cameraRadius) {
+    return;
+  }
+  cameraRadius = radius;
+  camera.far = radius + config.map.depth;
+  sceneFog.near = radius + FOG_NEAR_OFFSET;
+  sceneFog.far = radius + FOG_FAR_OFFSET;
+  const aspect = (renderer.domElement.clientWidth || 1) / (renderer.domElement.clientHeight || 1);
+  cameraMaxView = wholeMapView(aspect);
+};
 // A drag that ends here was a click, and a click is a placement. Below it, the gesture was a swipe
 // across the map and placing a tower by accident is worse than not placing one.
 const CAMERA_CLICK_SLOP_PX = 4;
@@ -1145,10 +1240,10 @@ const viewHalfHeight = (): number =>
 const framePoint = new THREE.Vector3();
 
 const placeCamera = (): void => {
-  const horizontal = Math.cos(cameraRig.elevation) * CAMERA_RADIUS;
+  const horizontal = Math.cos(cameraRig.elevation) * cameraRadius;
   camera.position.set(
     cameraRig.targetX + horizontal * Math.sin(cameraRig.azimuth),
-    Math.sin(cameraRig.elevation) * CAMERA_RADIUS,
+    Math.sin(cameraRig.elevation) * cameraRadius,
     cameraRig.targetZ + horizontal * Math.cos(cameraRig.azimuth),
   );
   camera.lookAt(cameraTarget.set(cameraRig.targetX, 0, cameraRig.targetZ));
@@ -1207,6 +1302,9 @@ const measureCorridor = (): { centerX: number; centerY: number; halfWidth: numbe
 // numbers above.
 
 const applyCameraRig = (): void => {
+  // The reach follows the pitch before anything is placed, because where the stand is decides how much
+  // of the plate is in front of the camera at all, and the frustum below is measured from the stand.
+  syncCameraReach(cameraRig.elevation);
   clampTarget();
   placeCamera();
   const aspect = (renderer.domElement.clientWidth || 1) / (renderer.domElement.clientHeight || 1);
@@ -2897,12 +2995,13 @@ const flashPadError = (padId: string) => {
 };
 
 // Camera gestures, and the one rule that keeps them from eating placements: a pointer that travels
-// further than the slop was a drag, so the placement only fires for a press that stayed put. Left
-// drag does nothing at all now — the view is not on a turntable, and the one thing a left press is for
-// is placing a tower. Right drag slides the stand, the wheel changes the lens, held keys walk it, and
-// R puts it back. Every one of them ends up in `cameraRig` and one function applies it — there is no
+// further than the slop was a drag, so the placement only fires for a press that stayed put. Left drag
+// is the orbit again — the turn and the pitch, the two things a player reaches for before anything else
+// — and it does not take the click away, because a click is a press that stayed put and a drag is a
+// press that did not. Right drag slides the stand, the wheel changes the lens, held keys walk it, and R
+// puts it back. Every one of them ends up in `cameraRig` and one function applies it — there is no
 // second copy of the view.
-type CameraGesture = 'pan' | null;
+type CameraGesture = 'orbit' | 'pan' | null;
 
 let cameraGesture: CameraGesture = null;
 let cameraGestureMoved = false;
@@ -2910,12 +3009,30 @@ let gestureStartX = 0;
 let gestureStartY = 0;
 let gestureTargetX = 0;
 let gestureTargetZ = 0;
+let gestureAzimuth = 0;
+let gestureElevation = CAMERA_ELEVATION;
 
 const applyCameraGesture = (event: PointerEvent): void => {
   const deltaX = event.clientX - gestureStartX;
   const deltaY = event.clientY - gestureStartY;
   if (Math.hypot(deltaX, deltaY) > CAMERA_CLICK_SLOP_PX) {
     cameraGestureMoved = true;
+  }
+  if (cameraGesture === 'orbit') {
+    // Written from the press, not accumulated per move event: a gesture is one turn from where it
+    // began, so a pointer that comes back to where it started has turned the stand nowhere, and a
+    // browser that coalesces or drops a move cannot leave the view a quarter turn off from the
+    // player's hand. The pitch is clamped into the band the reach and the fog are stated for, and the
+    // azimuth is not clamped at all: this map has nothing to hide from any side of it, and a turn that
+    // stops at a wall is a turn the player has to fight.
+    cameraRig.azimuth = gestureAzimuth + deltaX * CAMERA_ORBIT_DEGREES_PER_PIXEL * DEGREES;
+    cameraRig.elevation = Math.min(
+      CAMERA_ELEVATION_MAX,
+      Math.max(
+        CAMERA_ELEVATION_MIN,
+        gestureElevation - deltaY * CAMERA_PITCH_DEGREES_PER_PIXEL * DEGREES,
+      ),
+    );
   }
   if (cameraGesture === 'pan') {
     // Pan is in the ground plane, so the pointer's pixels have to become world units through the
@@ -2936,23 +3053,24 @@ renderer.domElement.addEventListener('pointerdown', (event) => {
   if (event.button !== 0 && event.button !== 2) {
     return;
   }
-  // A left press is reserved for placement and its movement is ignored on purpose. Treating it as a
-  // gesture is what made a build placement and a camera move the same press, and on a map this size
-  // the player is going to drag a long way to look at something.
-  cameraGesture = event.button === 0 ? null : 'pan';
+  // Both buttons start a gesture, and the slop above is what separates them from a placement: a left
+  // press that stays put builds, a left press that travels turns the stand, and nothing in between.
+  cameraGesture = event.button === 0 ? 'orbit' : 'pan';
   cameraGestureMoved = false;
   gestureStartX = event.clientX;
   gestureStartY = event.clientY;
   gestureTargetX = cameraRig.targetX;
   gestureTargetZ = cameraRig.targetZ;
-  if (cameraGesture === null) {
-    return;
-  }
+  gestureAzimuth = cameraRig.azimuth;
+  gestureElevation = cameraRig.elevation;
   try {
+    // Capture keeps a drag alive when the pointer leaves the canvas, which a full turn across a
+    // ninety-six unit board will do. A pointer id that was never really down has nothing to capture,
+    // and that is not a reason to drop the gesture.
     renderer.domElement.setPointerCapture(event.pointerId);
   } catch {
-    // Capture keeps a drag alive when the pointer leaves the canvas. A pointer id that was never
-    // really down has nothing to capture, and that is not a reason to drop the gesture.
+    // A pointer id that was never really down has nothing to capture, and that is not a reason to
+    // drop the gesture.
   }
 });
 
@@ -3131,6 +3249,9 @@ reducedMotionQuery.addEventListener('change', (event) => {
 });
 
 syncSelection();
+// The speed control is painted by the same function that repaints it on a press, so the state the page
+// opens with is the state the product says it is in and not a value left in the markup.
+syncSpeed();
 setFeedback('idle', 'Left click a build pad to place');
 applySnapshot(snapshot);
 // The page opens on the entry screen rather than in a preparation: the slot is looked at, never
@@ -3150,6 +3271,10 @@ if (sessionSeatToken === null) {
 // verbs, and what stands in their way there is the seat, which `syncRoomControlHints` names.
 if (mode === 'remote') {
   pauseToggle.title = 'The room owns the clock in a room; there is nothing here to pause';
+  for (const button of speedButtons) {
+    button.disabled = true;
+    button.title = 'The room owns the clock in a room; there is nothing here to speed up';
+  }
   saveButton.title = 'A room match is not written into this browser';
   loadButton.title = 'A room match is not read from this browser';
   newMatchButton.title = 'Leave the room from the entry to play a match of your own';
@@ -3398,6 +3523,13 @@ window.__ECHOES_DEBUG__ = {
   get frameDelta() {
     return forcedFrameDelta;
   },
+  // The clock the player is driving, next to the tick rate it is not changing. Both readings are here
+  // because the claim "the multiplier does not touch the simulation" is only checkable if a test can
+  // see which multiplier was in force and what the core's own rate still is.
+  get speed() {
+    return gameSpeed;
+  },
+  speedSteps: [...SPEED_STEPS],
   forceFrameDelta(seconds: number | null) {
     forcedFrameDelta = seconds === null ? null : Math.max(0, seconds);
   },
@@ -3513,7 +3645,13 @@ const renderFrame = (timestamp: number) => {
   // running on its own. Everything below this line — the ambient motion, the animations, the render —
   // runs in both modes, because a client that stops drawing is a broken client and not an honest one.
   if (mode === 'solo' && !paused && !entryOpen) {
-    accumulator += frameDelta;
+    // The speed multiplies the time one frame is charged and nothing else. The tick is still
+    // `STEP_SECONDS` of match time, the loop below still spends whole ticks only, and the surplus that
+    // does not fit a frame stays in the accumulator for the next one — so four times the clock is four
+    // times the ticks a second and not one tick four times as long. The clamp above is still the
+    // product's: a stall longer than `MAX_FRAME_SECONDS` is dropped rather than fast-forwarded, and at
+    // four times it drops four times as much, which is the same statement about a faster clock.
+    accumulator += frameDelta * gameSpeed;
     // A frame may spend whole ticks only up to the tick of the next recorded command. Without this
     // ceiling a frame that steps five ticks walks straight over that tick, and `applyReplayPlan`
     // then applies the command on the tick the frame happened to end on — the log is right and the
