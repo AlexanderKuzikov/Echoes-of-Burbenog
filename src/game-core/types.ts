@@ -129,6 +129,31 @@ export type TowerSnapshot = {
   padId: string;
   towerId: string;
   cooldownTicks: number;
+  /**
+   * Kills this tower has been credited with. It is the whole of what a tower remembers between one
+   * kill and the next: growth is read off this number and off nothing else, so there is no second
+   * copy of "how big is this tower" anywhere in the state.
+   */
+  kills: number;
+  /**
+   * Growth level, 1 to 10. Derived from `kills` by the curve in `scenario.ts` and not stored: a
+   * stored level would be a second truth that could disagree with the counter it came from, and the
+   * presentation reads this so the view and the damage come from one function.
+   */
+  level: number;
+};
+
+/**
+ * One tower's claim on one kill, as the split worked it out. `damage` is what the tower put into that
+ * body and `share` is the fraction of the body's total damage that earns, so a reader can check the
+ * split against the damage instead of taking it on trust. `kills` is the whole kills this tower was
+ * credited with for the kill.
+ */
+export type GrowthCredit = {
+  towerEntityId: number;
+  damage: number;
+  share: number;
+  kills: number;
 };
 
 export type EnemySnapshot = {
@@ -171,7 +196,14 @@ export type SimulationEvent =
   | { type: 'waveStarted'; waveIndex: number; roll: number; bounty: number }
   | { type: 'enemySpawned'; entityId: number; enemyId: string; routeId: string }
   | { type: 'towerFired'; entityId: number; targetId: number; damage: number }
-  | { type: 'enemyKilled'; entityId: number; reward: number }
+  // `growth` is who the kill was credited to and on what evidence, and `rounded` is what the whole
+  // kill counter could not represent. A kill is one point split by damage share, a share below one
+  // point is rounded away, and the fraction that falls between the shares is handed to the largest of
+  // them — so `rounded` is the part of the ideal split that did not survive that choice, reported
+  // rather than swallowed. A point that quietly evaporates is a point the player cannot see the game
+  // take, and a claim on a kill that cannot be checked against the damage is a claim the game asks to
+  // be believed.
+  | { type: 'enemyKilled'; entityId: number; reward: number; growth: GrowthCredit[]; rounded: number }
   | { type: 'coreDamaged'; amount: number; coreHealth: number }
   // Fires when a wave's whole force is on the map, which is the only "this wave is over" an
   // overlapping schedule has. `bounty` is what that wave paid when it launched, reported here so the

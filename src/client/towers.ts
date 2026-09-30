@@ -19,6 +19,11 @@ export type TowerModelReading = {
   source: 'procedural' | 'model';
   modelId: string | null;
   meshCount: number;
+  // The growth level the seat is standing at, and the two numbers that put it there. Published so a
+  // level can be read off the scene rather than off the snapshot the scene was built from — a view
+  // that says level 4 while its seat is scaled for level 3 is a defect nothing else would catch.
+  growthLevel: number;
+  seatScale: { x: number; y: number; z: number };
   crystalNode: string | null;
   crystalBaseY: number;
   crystalY: number;
@@ -65,6 +70,9 @@ export type TowerView = {
   crystalBaseY: number;
   source: 'procedural' | 'model';
   modelId: string | null;
+  // The growth level the seat is currently standing at, kept beside the seat so a view swapped in
+  // place can be given the level its predecessor was at instead of snapping back to level 1.
+  growthLevel: number;
   clip: TowerClip | null;
   firedUntil: number;
   aimAngle: number;
@@ -127,6 +135,33 @@ const towerSeatHeight = 0.14;
 // to the loaded model exactly as it is to the procedural placeholder, because the two-phase swap
 // puts the artifact into this same seat and a difference here would be a jump in the picture.
 const towerHeightCompensation = 1.2;
+
+// What a growth level looks like from the outside: how much broader, and how much taller, a tower
+// stands than it did at level 1. Ten numbers each, level 1 first, and level 1 is 1.00 in both — so the
+// picture a match opens on is byte for byte the one `0028` was accepted for, and a tower only starts
+// to move once it has actually killed something.
+//
+// Two numbers and no colour, and that is a decision rather than a shortage. `0028` moved these three
+// towers apart on silhouette and proportion after a difference of colour had already failed once, and
+// at the 11.19 pixels a unit that a match is actually played at, a hue is not a distance anything
+// survives. A levelled tower has to be told from an unlevelled one across the board, so it is told by
+// standing differently.
+//
+// Height is given more of the growth than width, and the reason is what the two would mean. A tower
+// that only got wider would read as a different tower type — a fatter spire, a broader gate — and
+// the player's first reading of a board is which of the three it is looking at. A tower that got
+// taller reads as the same tower carrying more of itself, which is what growing is. The last level
+// is 1.23 wide and 1.56 tall, and on a 37-pixel tower that is about 58 pixels: enough that the two
+// ends of the table cannot be confused, and not so much that a late board of grown towers closes
+// over the road it is supposed to be covering.
+const towerGrowthWidth = [1, 1.024, 1.049, 1.074, 1.1, 1.126, 1.152, 1.178, 1.203, 1.228] as const;
+const towerGrowthHeight = [1, 1.057, 1.116, 1.176, 1.238, 1.3, 1.363, 1.428, 1.493, 1.56] as const;
+
+// The level a snapshot gave, read off a table that is never asked for a level it does not have. A
+// level out of range falls back to the ends rather than to `undefined`: a tower with an unreadable
+// level has to stand at one size or the other, and level 1 is the one that costs nothing.
+const growthWidthAt = (level: number): number => towerGrowthWidth[level - 1] ?? towerGrowthWidth[0];
+const growthHeightAt = (level: number): number => towerGrowthHeight[level - 1] ?? towerGrowthHeight[0];
 
 // One clip per view, started at a slot-derived offset instead of at a random moment. The offset
 // comes from the order the towers were built in, which the replay reproduces, so two spires never
@@ -627,11 +662,24 @@ export const createTowers = (
   // skinned mesh keeps its bind inverse in step with its own world matrix, so the seat's scale and
   // lean reach a model exactly once and land on a procedural tower exactly once, which is what makes
   // the swap in place invisible.
-  const createTowerView = (entityId: number, towerId: string, slot: number, presentationTime: number): TowerView => {
+  const seatScale = (look: TowerLook, level: number): THREE.Vector3 =>
+    new THREE.Vector3(
+      look.scale * growthWidthAt(level),
+      look.scale * towerHeightCompensation * look.rise * growthHeightAt(level),
+      look.scale * growthWidthAt(level),
+    );
+
+  const createTowerView = (
+    entityId: number,
+    towerId: string,
+    slot: number,
+    presentationTime: number,
+    level: number,
+  ): TowerView => {
     const look = lookOf(towerId);
     const seat = new THREE.Group();
     seat.name = 'seat';
-    seat.scale.set(look.scale, look.scale * towerHeightCompensation * look.rise, look.scale);
+    seat.scale.copy(seatScale(look, level));
     const model = modelStore.get(towerId);
     const owned: THREE.Material[] = [];
     let crystal: THREE.Mesh;
@@ -668,6 +716,7 @@ export const createTowers = (
       crystalBaseY: crystal.position.y,
       source: model === undefined ? 'procedural' : 'model',
       modelId: model?.entry.id ?? null,
+      growthLevel: level,
       clip,
       firedUntil: 0,
       aimAngle: 0,
@@ -717,10 +766,23 @@ export const createTowers = (
           if (!pad) {
             continue;
           }
-          view = createTowerView(tower.entityId, tower.towerId, towerViews.size, presentationTime);
+          view = createTowerView(tower.entityId, tower.towerId, towerViews.size, presentationTime, tower.level);
           view.group.position.set(pad.position.x, towerSeatHeight, pad.position.z);
           scene.add(view.group);
           towerViews.set(tower.entityId, view);
+          continue;
+        }
+        // The level is read here, off the snapshot, and not in `animate`: a tower's size is a fact
+        // about the match and not about where in the frame the picture happened to be drawn, so a
+        // replay of the same run puts the same pixels on the same tick. The step is instant and not
+        // eased, because the pop *is* the news — a tower that quietly swelled over two seconds would
+        // leave the player unsure which of the two he was looking at had changed.
+        if (tower.level !== view.growthLevel) {
+          const seat = viewSeats.get(tower.entityId);
+          if (seat !== undefined) {
+            seat.scale.copy(seatScale(lookOf(view.towerId), tower.level));
+          }
+          view.growthLevel = tower.level;
         }
       }
       for (const [entityId, view] of towerViews) {
@@ -809,7 +871,10 @@ export const createTowers = (
         // The slot is the order the towers were built in, so a tower that is upgraded in place keeps
         // the clip phase it would have had if the model had arrived on time.
         const slot = [...towerViews.keys()].indexOf(entityId);
-        const next = createTowerView(entityId, view.towerId, slot, presentationTime);
+        // The level comes across with the position: a tower swapped in place must not drop back to
+        // level 1 for the frame or two the registry took to answer, or a late model would reset a
+        // grown tower and the two runs of one match would not look the same.
+        const next = createTowerView(entityId, view.towerId, slot, presentationTime, view.growthLevel);
         next.group.position.copy(view.group.position);
         next.group.rotation.y = view.group.rotation.y;
         next.firedUntil = view.firedUntil;
@@ -844,21 +909,30 @@ export const createTowers = (
     viewCount: () => towerViews.size,
     positions: () => Array.from(towerViews.values(), (view) => ({ x: view.group.position.x, z: view.group.position.z })),
     modelReadings: () =>
-      Array.from(towerViews, ([entityId, view]): TowerModelReading => ({
-        entityId,
-        towerId: view.towerId,
-        source: view.source,
-        modelId: view.modelId,
-        meshCount: countMeshes(view.group),
-        // The procedural placeholder has no name on its emissive mesh, so this is also the
-        // cheapest way to see which node of the model the client ended up animating.
-        crystalNode: view.crystal.name || null,
-        crystalBaseY: view.crystalBaseY,
-        crystalY: view.crystal.position.y,
-        crystalScale: view.crystal.scale.x,
-        crystalEmissive: view.crystalMaterial.emissiveIntensity,
-        clip: view.clip === null ? null : readTowerClip(view.clip),
-      })),
+      Array.from(towerViews, ([entityId, view]): TowerModelReading => {
+        const seat = viewSeats.get(entityId);
+        return {
+          entityId,
+          towerId: view.towerId,
+          source: view.source,
+          modelId: view.modelId,
+          meshCount: countMeshes(view.group),
+          growthLevel: view.growthLevel,
+          seatScale: {
+            x: seat?.scale.x ?? 0,
+            y: seat?.scale.y ?? 0,
+            z: seat?.scale.z ?? 0,
+          },
+          // The procedural placeholder has no name on its emissive mesh, so this is also the
+          // cheapest way to see which node of the model the client ended up animating.
+          crystalNode: view.crystal.name || null,
+          crystalBaseY: view.crystalBaseY,
+          crystalY: view.crystal.position.y,
+          crystalScale: view.crystal.scale.x,
+          crystalEmissive: view.crystalMaterial.emissiveIntensity,
+          clip: view.clip === null ? null : readTowerClip(view.clip),
+        };
+      }),
     poseReadings: () =>
       Array.from(towerViews, ([entityId, view]) => ({
         entityId,

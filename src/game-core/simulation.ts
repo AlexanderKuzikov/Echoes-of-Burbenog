@@ -1,4 +1,9 @@
 import { nextRandom, normalizeSeed } from './rng.ts';
+import {
+  towerDamageMultiplier,
+  towerGrowthLevel,
+  towerGrowthPointsPerKill,
+} from './scenario.ts';
 import type {
   BuildPadDefinition,
   Command,
@@ -6,6 +11,7 @@ import type {
   EnemyDefinition,
   EnemySnapshot,
   EnemyTag,
+  GrowthCredit,
   MatchConfig,
   MatchRules,
   MatchSnapshot,
@@ -54,6 +60,12 @@ type TowerState = {
   padId: string;
   towerId: string;
   cooldownTicks: number;
+  /**
+   * Kills credited to this tower, and the only thing it remembers between one kill and the next. It
+   * is read by the growth curve on every shot, so a tower's damage is a function of what it has been
+   * part of killing and of nothing else — no stored level, no second copy of the same answer.
+   */
+  kills: number;
 };
 
 type EnemyState = {
@@ -77,6 +89,16 @@ type EnemyState = {
   tags: EnemyTag[];
   slowTicks: number;
   slowFactor: number;
+  /**
+   * Who put damage into this body, and how much, keyed by tower entity id. It lives on the enemy
+   * rather than on the towers because the share is only known when the enemy dies, and a tower that
+   * was never in range of a body must not appear in its split — a tower that did not hit a thing gets
+   * nothing for it, which is the whole reason a crowd is a decision rather than a free win.
+   *
+   * Damage is recorded as dealt, after the growth multiplier, so the split is proportional to what
+   * actually happened and not to what a level-1 tower would have done.
+   */
+  damageByTower: Map<number, number>;
 };
 
 type ActiveGroup = {
@@ -418,7 +440,13 @@ export class Simulation {
   }
 
   public getSnapshot(): MatchSnapshot {
-    const towers: TowerSnapshot[] = this.state.towers.map((tower) => ({ ...tower }));
+    const towers: TowerSnapshot[] = this.state.towers.map((tower) => ({
+      ...tower,
+      // Counted here rather than stored, so the level a client draws and the level the damage was
+      // read at are the same function of the same number. The spread puts the level back on the
+      // snapshot, and a snapshot that carried a level nobody could recompute would be a second truth.
+      level: towerGrowthLevel(tower.kills),
+    }));
     const enemies: EnemySnapshot[] = this.state.enemies.map((enemy) => ({
       entityId: enemy.entityId,
       enemyId: enemy.enemyId,
@@ -575,7 +603,7 @@ export class Simulation {
     this.nextEntityId += 1;
     this.state.gold -= definition.cost;
     this.state.pads[padId] = towerId;
-    this.state.towers.push({ entityId, padId, towerId, cooldownTicks: 0 });
+    this.state.towers.push({ entityId, padId, towerId, cooldownTicks: 0, kills: 0 });
     this.events.push({ type: 'towerPlaced', padId, towerId, gold: this.state.gold });
     return { accepted: true };
   }
@@ -635,6 +663,7 @@ export class Simulation {
       tags: [...definition.tags],
       slowTicks: 0,
       slowFactor: 1,
+      damageByTower: new Map(),
     });
     this.events.push({ type: 'enemySpawned', entityId, enemyId: definition.id, routeId: route.id });
   }
@@ -751,6 +780,12 @@ export class Simulation {
   }
 
   private applyAttack(tower: TowerState, definition: TowerDefinition, target: EnemyState): void {
+    // The multiplier is read once, off the tower's own kill count, and applied once — to the damage
+    // this shot does. Not to `definition.damage`, which is a base number every other reader of a
+    // tower means by the tower's damage, and not inside the loop, because a splash walks the same
+    // number over several bodies and a shot that multiplied itself once per body would make the
+    // growth curve and the splash radius the same lever.
+    const damage = definition.damage * towerDamageMultiplier(tower.kills);
     const splashRadius = definition.splashRadius ?? 0;
     const affected = splashRadius > 0
       ? this.state.enemies.filter((enemy) => enemy.health > 0 && this.matchesTags(definition, enemy) && distanceSquared(target, enemy) <= splashRadius * splashRadius)
@@ -759,7 +794,14 @@ export class Simulation {
       if (enemy.health <= 0) {
         continue;
       }
-      enemy.health -= definition.damage;
+      // Read before the subtraction, so the cap is against the health that was actually there.
+      const stoodBefore = enemy.health;
+      enemy.health -= damage;
+      // Credited as damage dealt and not as damage swung, so a tower cannot buy a share of a kill it
+      // did not finish. A body with two hit points left gives two points of credit however big the
+      // shot that took it was, and the multiplier still applied to the whole shot before the cap.
+      const dealt = Math.min(damage, stoodBefore);
+      enemy.damageByTower.set(tower.entityId, (enemy.damageByTower.get(tower.entityId) ?? 0) + dealt);
       if (definition.slowFactor !== undefined && definition.slowDurationTicks !== undefined) {
         if (enemy.slowTicks <= 0 || definition.slowFactor < enemy.slowFactor) {
           enemy.slowFactor = definition.slowFactor;
@@ -769,7 +811,65 @@ export class Simulation {
         }
       }
     }
-    this.events.push({ type: 'towerFired', entityId: tower.entityId, targetId: target.entityId, damage: definition.damage });
+    this.events.push({ type: 'towerFired', entityId: tower.entityId, targetId: target.entityId, damage });
+  }
+
+  /**
+   * The one place a kill is divided. A kill is `towerGrowthPointsPerKill` points; a tower gets the
+   * share of that equal to the share of the body's damage it put in, floored to whole kills, and the
+   * fraction no whole kill can carry goes to the largest share.
+   *
+   * The floor is what the game reads — a counter of whole kills — and the remainder is the part of
+   * the ideal split that a whole kill cannot hold. It is not thrown away and it is not spread: the
+   * largest share takes it, which is the one place the floor can be wrong and it is reported on the
+   * event as `rounded` so the loss is a number somebody can see rather than a rule that quietly ate
+   * a point. Dropping it instead would be worse than losing it visibly: with one point per kill and
+   * two towers on the same body, a body split 70/30 floors to 0 and 0, and a shared kill would pay
+   * nobody at all — the mechanic would work only where there is nothing to share with.
+   *
+   * A tower that is not in the map has no entry in the ledger and cannot appear here, so the rule
+   * "one that never hit it gets nothing" is a consequence of the bookkeeping rather than a check that
+   * could be forgotten. A body that walked into the core never reaches this function at all.
+   */
+  private creditGrowth(enemy: EnemyState): { growth: GrowthCredit[]; rounded: number } {
+    const points = towerGrowthPointsPerKill;
+    let totalDamage = 0;
+    for (const damage of enemy.damageByTower.values()) {
+      totalDamage += damage;
+    }
+    if (totalDamage <= 0) {
+      return { growth: [], rounded: points };
+    }
+    // Largest share first, and equal shares broken by the lower entity id: the order the remainder is
+    // handed out in has to be the same on every run of the same commands, or two replays of one match
+    // would leave two different towers one kill apart.
+    const ordered = [...enemy.damageByTower.entries()]
+      .filter(([, damage]) => damage > 0)
+      .sort((left, right) => right[1] - left[1] || left[0] - right[0]);
+    const growth: GrowthCredit[] = [];
+    let credited = 0;
+    for (const [towerEntityId, damage] of ordered) {
+      const share = (damage / totalDamage) * points;
+      const kills = Math.floor(share);
+      credited += kills;
+      this.towerById(towerEntityId).kills += kills;
+      growth.push({ towerEntityId, damage, share, kills });
+    }
+    const rounded = points - credited;
+    if (rounded > 0) {
+      const leader = growth[0] as GrowthCredit;
+      leader.kills += rounded;
+      this.towerById(leader.towerEntityId).kills += rounded;
+    }
+    return { growth, rounded };
+  }
+
+  private towerById(entityId: number): TowerState {
+    const tower = this.state.towers.find((candidate) => candidate.entityId === entityId);
+    if (!tower) {
+      throw new Error(`Tower ${entityId} was credited a kill it is no longer on the board for`);
+    }
+    return tower;
   }
 
   private removeDefeatedEnemies(): void {
@@ -780,7 +880,8 @@ export class Simulation {
         continue;
       }
       this.state.gold += enemy.reward;
-      this.events.push({ type: 'enemyKilled', entityId: enemy.entityId, reward: enemy.reward });
+      const { growth, rounded } = this.creditGrowth(enemy);
+      this.events.push({ type: 'enemyKilled', entityId: enemy.entityId, reward: enemy.reward, growth, rounded });
     }
     this.state.enemies = survivors;
   }

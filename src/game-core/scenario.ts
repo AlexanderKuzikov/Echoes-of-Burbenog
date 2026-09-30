@@ -65,6 +65,109 @@ const trainingTowers: TowerDefinition[] = [
 ];
 
 // ---------------------------------------------------------------------------------------------
+// Growth. A tower gets stronger for the kills it was part of, and nothing else about it changes.
+//
+// The whole mechanic is a curve and a counter, and both live here because every number that decides
+// a match lives here. `simulation.ts` asks two questions — what level is this tower and what does its
+// shot do — and holds no number of its own, so the curve cannot grow a second copy in the place that
+// applies it.
+//
+// Four properties the curve has, each of them load-bearing:
+//
+//   * **Monotone.** More kills never costs damage. Nothing about a tower gets worse for being useful.
+//   * **Continuous.** The damage multiplier is a piecewise-linear reading of the table, not a step at
+//     the level boundary: a tower crossing from level 4 to 5 does not jump its damage, it stops
+//     slowing down. A step would make the moment a tower levels a felt spike, and spikes are what a
+//     player tunes around.
+//   * **Diminishing.** Each kill adds less than the one before, and the table says so in its own
+//     increments: 0.45 at the first step down to 0.16 at the last. Per kill *inside* a step the rate
+//     falls further still, from 0.090 to 0.0047, because each step covers more kills than the last.
+//   * **A plateau, not a ramp.** Level 10 is 3.57 and it is reached at 166 kills, and everything after
+//     that is flat. A curve with no ceiling turns a long match into a runaway: ten minutes in, a
+//     tower is several times what it was and the late waves stop being waves. The ceiling is what
+//     makes placement a decision instead of a race — and it is why a tower put where the crowd walks
+//     into it, which is credited for a share of a lot of kills, arrives at the ceiling well before one
+//     standing at the edge of its reach does.
+//
+// Only damage grows. Reach, rate of fire, slow and splash radius are untouched, and that is a
+// deliberate refusal: reach is the currency the map is designed in — the best niche is worth ten times
+// the worst — and a reach that grows with kills would quietly reprice every one of those niches, in a
+// direction that rewards the towers already standing on the good ones. If growing reach is wanted it
+// is its own decision with its own numbers, and the cost named on this page.
+export const TOWER_GROWTH_MAX_LEVEL = 10;
+
+/**
+ * Kills at which each level begins, index 0 being level 1. The gaps are 5, 7, 10, 14, 18, 22, 26, 30
+ * and 34 kills: each level takes more kills than the one before, which is the plateau seen from the
+ * other side. A kill is not always a whole point — one shared between towers is one point split — so a
+ * tower in a busy place counts them slower than a tower that works alone, and the numbers below are
+ * placed against what a full board actually collects rather than against the wave count.
+ */
+export const TOWER_GROWTH_KILL_STEPS: readonly number[] = [0, 5, 12, 22, 36, 54, 76, 102, 132, 166];
+
+/** Damage multiplier of each of the ten levels, index 0 being level 1 and a tower nobody has helped. */
+export const TOWER_GROWTH_DAMAGE_MULTIPLIERS: readonly number[] = [
+  1, 1.45, 1.85, 2.2, 2.51, 2.78, 3.02, 3.23, 3.41, 3.57,
+];
+
+// One kill, one point, divided between the towers that hit it. Not a number that can be tuned away:
+// the counter is whole kills because a player reads a kill count, and a counter that read "0.7 of a
+// kill" would be a different thing to look at and a worse one.
+const towerGrowthPointsPerKill = 1;
+
+// The table is ten entries because the ceiling is ten, and both are checked here rather than at the
+// point of use: a curve that grew a fourth row would be read as a level the game does not have.
+if (TOWER_GROWTH_KILL_STEPS.length !== TOWER_GROWTH_MAX_LEVEL) {
+  throw new Error(`Tower growth declares ${TOWER_GROWTH_KILL_STEPS.length} kill steps for ${TOWER_GROWTH_MAX_LEVEL} levels`);
+}
+if (TOWER_GROWTH_DAMAGE_MULTIPLIERS.length !== TOWER_GROWTH_MAX_LEVEL) {
+  throw new Error(`Tower growth declares ${TOWER_GROWTH_DAMAGE_MULTIPLIERS.length} multipliers for ${TOWER_GROWTH_MAX_LEVEL} levels`);
+}
+
+/**
+ * The growth level of a tower with this many kills. Counted, not searched: a tower at 5 kills is level
+ * 2 and at 4 it is level 1, so the boundary belongs to the table and to nobody's rounding.
+ */
+export const towerGrowthLevel = (kills: number): number => {
+  const total = Number.isFinite(kills) && kills > 0 ? kills : 0;
+  let level = 1;
+  for (let index = 0; index < TOWER_GROWTH_KILL_STEPS.length; index += 1) {
+    if (total >= (TOWER_GROWTH_KILL_STEPS[index] as number)) {
+      level = index + 1;
+    }
+  }
+  return level;
+};
+
+/**
+ * The damage multiplier of a tower with this many kills: the table read between the two levels it sits
+ * between, and the ceiling once it is past the last one. Linear between the steps so the function is
+ * continuous, and the two numbers that make it so are the only reason the levels and the curve are
+ * kept apart — a level is what a tower is called, the multiplier is what its next shot does, and they
+ * are two readings of one number rather than two numbers.
+ */
+export const towerDamageMultiplier = (kills: number): number => {
+  const total = Number.isFinite(kills) && kills > 0 ? kills : 0;
+  const lastIndex = TOWER_GROWTH_KILL_STEPS.length - 1;
+  const ceiling = TOWER_GROWTH_KILL_STEPS[lastIndex] as number;
+  if (total >= ceiling) {
+    return TOWER_GROWTH_DAMAGE_MULTIPLIERS[lastIndex] as number;
+  }
+  for (let index = 0; index < lastIndex; index += 1) {
+    const from = TOWER_GROWTH_KILL_STEPS[index] as number;
+    const to = TOWER_GROWTH_KILL_STEPS[index + 1] as number;
+    if (total < to) {
+      const ratio = (total - from) / (to - from);
+      const low = TOWER_GROWTH_DAMAGE_MULTIPLIERS[index] as number;
+      return low + (TOWER_GROWTH_DAMAGE_MULTIPLIERS[index + 1] as number - low) * ratio;
+    }
+  }
+  return TOWER_GROWTH_DAMAGE_MULTIPLIERS[0] as number;
+};
+
+export { towerGrowthPointsPerKill };
+
+// ---------------------------------------------------------------------------------------------
 // burrow-vault: a square road along the perimeter of a ninety-six unit map, a throat down each axis
 // to a well in the middle, and forty-four niches that are not copies of each other.
 //
