@@ -63,12 +63,17 @@ export type TowerClip = {
 export type TowerView = {
   towerId: string;
   group: THREE.Group;
-  // The lit part of a tower and the only node the client animates on a model: the mesh whose material
-  // carries the glow and whose scale answers a shot.
+  // The lit part of the tower: the mesh whose material carries the glow and whose scale answers a shot.
+  // `accentNode` is what the idle moves, and for a loaded artifact the two are deliberately different
+  // objects. An exporter names the node that holds the gem and leaves that node at the model's origin,
+  // so a gem three units up is carried by a node standing on the ground: bobbing the node would lift
+  // the gem by the wrong amount, and swelling it would throw the gem into the air. A pivot is put at
+  // the gem and the mesh is hung on it, which makes the two paths one path.
   crystal: THREE.Mesh;
+  accentNode: THREE.Object3D;
   crystalMaterial: THREE.MeshStandardMaterial;
-  // The idle bob is measured from wherever the emissive node starts, so a loaded model and
-  // the procedural placeholder cannot drift apart on a hardcoded height.
+  // The idle bob is measured from wherever the accent starts, so a loaded model and the procedural
+  // placeholder cannot drift apart on a hardcoded height.
   crystalBaseY: number;
   source: 'procedural' | 'model';
   modelId: string | null;
@@ -209,6 +214,13 @@ type TowerLook = {
   bob: number;
   roll: number;
   breath: number;
+  // What a loaded artifact is multiplied by, per role. A file arrives with its colour baked into its
+  // vertices and with no materials in it at all, so the material the client raises on top is the only
+  // place our palette can act: with `vertexColors` the colour on screen is `material.color x COLOR_0`,
+  // which makes the whole of a role's palette one number. `0` is not "leave it alone", it is black, so
+  // a role the file got right and we want as it is carries 1.
+  modelTone: number;
+  modelAccentTone: number;
   build: (seat: THREE.Object3D, look: TowerLook) => THREE.Mesh;
 };
 
@@ -508,6 +520,13 @@ const towerLooks: Record<string, TowerLook> = {
     bob: 0.07,
     roll: 0.05,
     breath: 0,
+    // The artifact is the brightest thing on the board as it arrives — its body averages 0.57 on the
+    // red channel and half its vertices are above 0.8 — and it is lit with the full probe, so without
+    // a number here it stands in front of the map instead of on it. 0.42 puts the body back into the
+    // band the procedural drum was painted in, and the gem keeps 0.8 because an accent is supposed to
+    // be the brightest thing on its own tower.
+    modelTone: 0.55,
+    modelAccentTone: 0.8,
     build: spireBody,
   },
   'grove-lens': {
@@ -533,6 +552,10 @@ const towerLooks: Record<string, TowerLook> = {
     bob: 0.02,
     roll: 0,
     breath: 0.35,
+    // Same argument as the spire's, and a slightly lower number: this file's body is lighter than the
+    // spire's on two of its three channels, and its legs were the palest thing in the first frame.
+    modelTone: 0.5,
+    modelAccentTone: 0.8,
     build: lensBody,
   },
   'frost-relay': {
@@ -563,6 +586,12 @@ const towerLooks: Record<string, TowerLook> = {
     bob: 0.04,
     roll: 0.09,
     breath: 0.28,
+    // The relay's struts are the whitest thing in the accepted set and they were the first thing to
+    // leave the board in the first frame, so it takes the strongest pull of the three. Its base ring is
+    // the one warm note the export gave us and it is worth keeping at 0.7 rather than dimming with the
+    // frame — that ring is what tells the tower apart from the stone it stands on.
+    modelTone: 0.45,
+    modelAccentTone: 0.8,
     build: relayBody,
   },
 };
@@ -583,6 +612,8 @@ const unknownTowerLook: TowerLook = {
   bob: 0.07,
   roll: 0.05,
   breath: 0,
+  modelTone: 1,
+  modelAccentTone: 1,
   build: spireBody,
 };
 const lookOf = (towerId: string): TowerLook => towerLooks[towerId] ?? unknownTowerLook;
@@ -596,6 +627,39 @@ const shotFlash = (firedUntil: number, elapsed: number): number => {
   }
   const remaining = (firedUntil - elapsed) / towerFireFlashSeconds;
   return remaining > towerFlashHoldShare ? 1 : remaining / towerFlashHoldShare;
+};
+
+// The colour a mesh was exported in, read off its own vertices. This is how the accent learns to glow
+// without a colour of our own: a file that carries no material gets one here, and the only honest
+// question is what the file already looks like, so the answer is measured rather than declared. A mesh
+// with no vertex colours at all has no colour to be, and gets the white one.
+const meanVertexColor = (mesh: THREE.Mesh): THREE.Color => {
+  const color = new THREE.Color(1, 1, 1);
+  const attribute = mesh.geometry.getAttribute('color');
+  if (attribute === undefined || attribute.count === 0) {
+    return color;
+  }
+  const sum = new THREE.Vector3();
+  for (let vertex = 0; vertex < attribute.count; vertex += 1) {
+    sum.x += attribute.getX(vertex);
+    sum.y += attribute.getY(vertex);
+    sum.z += attribute.getZ(vertex);
+  }
+  color.setRGB(sum.x / attribute.count, sum.y / attribute.count, sum.z / attribute.count, THREE.LinearSRGBColorSpace);
+  return color;
+};
+
+// A pivot at the centre of a mesh's own geometry, in the mesh's parent space. The accent of a loaded
+// artifact needs one and the procedural forms must not have it: an exporter names the node that holds
+// the gem and leaves that node at the origin of the model, so the gem's height lives in the geometry
+// and not in the transform. Without the pivot the idle would lift a gem by its own distance from the
+// ground and a shot would swell it into the sky.
+const geometryCentre = (mesh: THREE.Mesh): THREE.Vector3 => {
+  if (mesh.geometry.boundingBox === null) {
+    mesh.geometry.computeBoundingBox();
+  }
+  const box = mesh.geometry.boundingBox as THREE.Box3;
+  return box.getCenter(new THREE.Vector3()).applyMatrix4(mesh.matrix);
 };
 
 export const createTowers = (
@@ -705,20 +769,49 @@ export const createTowers = (
     const owned: THREE.Material[] = [];
     let crystal: THREE.Mesh;
     let crystalMaterial: THREE.MeshStandardMaterial;
+    let accentNode: THREE.Object3D;
     let modelRoot: THREE.Object3D | null = null;
     let clip: TowerClip | null = null;
     if (model === undefined) {
       crystal = look.build(seat, look);
       crystalMaterial = crystal.material as THREE.MeshStandardMaterial;
+      accentNode = crystal;
     } else {
       const root = cloneModelNode(model.scene, owned) as THREE.Group;
       const emissive = root.getObjectByName(model.emissiveNode);
       if (!(emissive instanceof THREE.Mesh) || !(emissive.material instanceof THREE.MeshStandardMaterial)) {
         throw new AssetContractError(`model ${model.entry.id} has no ${model.emissiveNode} mesh to animate`);
       }
+      // The palette. The file brought its colour in its vertices and no materials, and the material the
+      // client raises on top of it is the only lever there is: with `vertexColors` on, the colour that
+      // reaches the screen is `material.color x COLOR_0`, so a role's palette is one number and a hue
+      // the file did not bring cannot be put back. The accent is also given the emissive its own
+      // vertices carry, because the shot flash and the idle breath are written as intensities on this
+      // material and an emissive of black would make both of them invisible.
+      for (const child of root.children) {
+        const mesh = child as THREE.Mesh;
+        if (!(mesh instanceof THREE.Mesh)) {
+          continue;
+        }
+        const material = mesh.material as THREE.MeshStandardMaterial;
+        if (mesh.name === model.emissiveNode) {
+          material.color.multiplyScalar(look.modelAccentTone);
+          material.emissive.copy(meanVertexColor(mesh)).multiplyScalar(look.modelAccentTone);
+          continue;
+        }
+        material.color.multiplyScalar(look.modelTone);
+      }
+      const pivot = new THREE.Object3D();
+      pivot.name = 'accent-pivot';
+      pivot.position.copy(geometryCentre(emissive));
+      (emissive.parent as THREE.Object3D).add(pivot);
+      // `attach` keeps the mesh where it is on screen while re-parenting it, which is what makes this a
+      // change of bookkeeping rather than a change of the picture.
+      pivot.attach(emissive);
       seat.add(root);
       crystal = emissive;
       crystalMaterial = emissive.material;
+      accentNode = pivot;
       modelRoot = root;
       clip = model.clips[0] === undefined
         ? null
@@ -733,8 +826,9 @@ export const createTowers = (
       towerId,
       group,
       crystal,
+      accentNode,
       crystalMaterial,
-      crystalBaseY: crystal.position.y,
+      crystalBaseY: accentNode.position.y,
       source: model === undefined ? 'procedural' : 'model',
       modelId: model?.entry.id ?? null,
       growthLevel: level,
@@ -832,7 +926,9 @@ export const createTowers = (
           towerCrystalIdleIntensity -
           look.breath * (0.5 + 0.5 * Math.sin(elapsed * 1.7 + entityId)) +
           (towerCrystalFireIntensity - towerCrystalIdleIntensity) * flash;
-        view.crystal.position.y = view.crystalBaseY + (reducedMotion ? 0 : Math.sin(elapsed * 2.1 + entityId) * look.bob);
+        // The bob moves the accent, not the mesh: for a loaded artifact those are two objects, and the
+        // one that holds the gem is the one standing at its height.
+        view.accentNode.position.y = view.crystalBaseY + (reducedMotion ? 0 : Math.sin(elapsed * 2.1 + entityId) * look.bob);
         // A roll is the one idle channel the artifact's crystal can take on top of its own sway, and
         // it is what stops an idle spire from looking like a gem parked on a roof.
         view.crystal.rotation.z = reducedMotion ? 0 : Math.sin(elapsed * 1.6 + entityId) * look.roll;
@@ -868,13 +964,13 @@ export const createTowers = (
         -(target.z - view.group.position.z),
         target.x - view.group.position.x,
       );
-      // The shot itself, from the crystal to where the target is standing on the tick the event
-      // describes. Without it the only evidence of a tower working is the target's disappearance, and
-      // a beam that left a fixed height above the pad left the tower somewhere the player cannot see
+      // The shot itself, from the lit part of the tower to where the target is standing on the tick the
+      // event describes. Without it the only evidence of a tower working is the target's disappearance,
+      // and a beam that left a fixed height above the pad left the tower somewhere the player cannot see
       // the light. `getWorldPosition` updates the chain it reads, so the point belongs to this frame
-      // rather than to the one before it, and it is the same node whether the crystal is a primitive
-      // or the skinned mesh the artifact shipped.
-      view.crystal.getWorldPosition(shotMuzzle);
+      // rather than to the one before it, and it is the gem itself whether that gem is a primitive or
+      // the mesh an exported artifact named — the pivot is what puts the node at the gem.
+      view.accentNode.getWorldPosition(shotMuzzle);
       if (!Number.isFinite(shotMuzzle.y)) {
         shotMuzzle.set(view.group.position.x, view.group.position.y + towerMuzzleHeight, view.group.position.z);
       }
@@ -949,7 +1045,7 @@ export const createTowers = (
           // cheapest way to see which node of the model the client ended up animating.
           crystalNode: view.crystal.name || null,
           crystalBaseY: view.crystalBaseY,
-          crystalY: view.crystal.position.y,
+          crystalY: view.accentNode.position.y,
           crystalScale: view.crystal.scale.x,
           crystalEmissive: view.crystalMaterial.emissiveIntensity,
           clip: view.clip === null ? null : readTowerClip(view.clip),
