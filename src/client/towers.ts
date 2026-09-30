@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { AssetContractError } from '../asset-registry.ts';
-import type { ModelManifestEntry } from '../asset-registry.ts';
+import type { ModelFootprintReading, ModelManifestEntry } from '../asset-registry.ts';
 import type { BuildPadDefinition, MatchSnapshot } from '../game-core/index.ts';
 import { disposeInstance, withProbeWeight } from './shared.ts';
 import type { ProbeRole } from './shared.ts';
@@ -11,6 +11,10 @@ export type LoadedModel = {
   scene: THREE.Group;
   emissiveNode: string;
   clips: THREE.AnimationClip[];
+  // What the load measured about the model on its own ground plane, kept with the model so a view that
+  // has to place it — a creature lifted to the height its manifest declares — does not have to walk the
+  // geometry again to find out where the body already stands.
+  footprint: ModelFootprintReading;
 };
 
 export type TowerModelReading = {
@@ -788,18 +792,26 @@ export const createTowers = (
       // the file did not bring cannot be put back. The accent is also given the emissive its own
       // vertices carry, because the shot flash and the idle breath are written as intensities on this
       // material and an emissive of black would make both of them invisible.
+      //
+      // A file with no materials in it gets one material from the loader for the whole file, so the body
+      // and the gem arrive holding the same object. Two roles cannot share a multiplier — the body would
+      // be dimmed by the accent's as well — so the gem is given a copy of it. `Material.copy` carries
+      // the probe and the declared role across, and the copy is per view, which is the policy this module
+      // already runs on: a crystal's emissive is per-tower animation state.
+      const gem = root.getObjectByName(model.emissiveNode) as THREE.Mesh;
       for (const child of root.children) {
         const mesh = child as THREE.Mesh;
         if (!(mesh instanceof THREE.Mesh)) {
           continue;
         }
-        const material = mesh.material as THREE.MeshStandardMaterial;
-        if (mesh.name === model.emissiveNode) {
+        if (mesh === gem) {
+          mesh.material = (mesh.material as THREE.MeshStandardMaterial).clone();
+          const material = mesh.material as THREE.MeshStandardMaterial;
           material.color.multiplyScalar(look.modelAccentTone);
           material.emissive.copy(meanVertexColor(mesh)).multiplyScalar(look.modelAccentTone);
           continue;
         }
-        material.color.multiplyScalar(look.modelTone);
+        (mesh.material as THREE.MeshStandardMaterial).color.multiplyScalar(look.modelTone);
       }
       const pivot = new THREE.Object3D();
       pivot.name = 'accent-pivot';

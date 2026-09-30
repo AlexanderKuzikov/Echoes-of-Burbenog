@@ -103,7 +103,11 @@ ground.position.y = 0.079;
 ground.receiveShadow = true;
 scene.add(ground);
 
-const enemies = createEnemies(scene);
+// An empty store on purpose: the sheet is the reference for the seven forms this module builds, and the
+// accepted files are a second source of the same creatures rather than the thing the sheet is a sample
+// of. A sheet that loaded the registry would need the registry's loader, its probe and its budgets, and
+// would then be measuring a different thing from the one its labels describe.
+const enemies = createEnemies(scene, new Map());
 
 // The seven kinds in roster order, with the two that carry the slow cue doubled right behind their own
 // twin: the biggest common enemy and the smallest thing on the road. The only visible difference

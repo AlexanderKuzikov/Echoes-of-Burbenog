@@ -7,6 +7,7 @@ import { createMap, createMinimap, WALL_HEIGHTS } from './client/map.ts';
 import { createTowers } from './client/towers.ts';
 import type { LoadedModel, TowerClipReading, TowerModelReading } from './client/towers.ts';
 import { createEnemies } from './client/enemies.ts';
+import type { EnemyModelReading } from './client/enemies.ts';
 import { createCombatFx } from './client/combat-fx.ts';
 import { PROBE_WEIGHTS, isProbeMaterial, setEnvironmentTexture, withProbeWeight } from './client/shared.ts';
 import type { ProbeMaterialReading, ProbeRole } from './client/shared.ts';
@@ -35,7 +36,14 @@ import type {
   VersionStamp,
 } from './protocol/index.ts';
 import { ASSET_MANIFEST_URL, AssetContractError, createAssetRegistry, parseAssetManifest, resolveModelUrl } from './asset-registry.ts';
-import type { AssetChecks, AssetRegistry, AssetStatus, ModelCheck, ModelManifestEntry } from './asset-registry.ts';
+import type {
+  AssetChecks,
+  AssetRegistry,
+  AssetStatus,
+  ModelCheck,
+  ModelFootprintReading,
+  ModelManifestEntry,
+} from './asset-registry.ts';
 import {
   MODEL_BUDGET,
   REGISTRY_BUDGET,
@@ -337,6 +345,10 @@ type DebugState = {
     failures: string[];
   };
   readonly towerModels: TowerModelReading[];
+  // The same reading for the creatures: what they are made of, how high they stand, and where the bar
+  // sits against the body it measures. A creature is the one thing on this board a player reads at ten
+  // pixels, so its numbers have to be readable without a screenshot.
+  readonly enemyModels: EnemyModelReading[];
 };
 
 type FeedbackState = 'idle' | 'accepted' | 'rejected' | 'terminal';
@@ -612,7 +624,9 @@ const minimap = minimapCanvas
 // The tower views, the models they borrow from the registry, and the clip each one plays.
 const modelStore = new Map<string, LoadedModel>();
 const towers = createTowers(scene, modelStore, padDefinitions);
-const enemies = createEnemies(scene);
+// The store is handed to both domains because both of them borrow the same artifacts, and the towers
+// got it first; a creature that cannot be handed a model is a creature the registry loaded for nothing.
+const enemies = createEnemies(scene, modelStore);
 // Kill bursts and shot traces. A burst is born from an enemy event and a trace from a tower event,
 // and both need the position of a view that belongs to somebody else, so they get their own module
 // and are handed plain positions.
@@ -867,7 +881,15 @@ const loadModel = async (entry: ModelManifestEntry): Promise<LoadedModel> => {
   }
   declareModelProbe(gltf.scene);
   assetRegistry.recordModelCheck({ modelId: entry.id, accepted: true, ...reading, failures: [] });
-  return { entry, scene: gltf.scene, emissiveNode: entry.emissiveNode, clips: gltf.animations };
+  // The footprint travels with the model: the reading is the measurement, and a view that has to put the
+  // body at the height the manifest declares needs the same two numbers the gate just compared.
+  return {
+    entry,
+    scene: gltf.scene,
+    emissiveNode: entry.emissiveNode,
+    clips: gltf.animations,
+    footprint: reading.footprint as ModelFootprintReading,
+  };
 };
 
 // The status line is a single line of viewport chrome, and two whole digests are exactly what
@@ -1040,6 +1062,7 @@ const bootAssets = async () => {
   }
   applyAssetStatus();
   towers.upgradeWithModels(presentationTime());
+  enemies.upgradeWithModels();
 };
 
 const rejectionMessages: Record<string, string> = {
@@ -3672,6 +3695,9 @@ window.__ECHOES_DEBUG__ = {
   },
   get towerModels(): TowerModelReading[] {
     return towers.modelReadings();
+  },
+  get enemyModels(): EnemyModelReading[] {
+    return enemies.modelReadings();
   },
   // The QA seam goes through the same door a pad click does, so a command a test injects cannot take a
   // route the product does not take — in a room that means it is posted, not applied to a local core.

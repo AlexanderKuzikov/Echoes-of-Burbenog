@@ -1,12 +1,44 @@
 import * as THREE from 'three';
+import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { AssetContractError } from '../asset-registry.ts';
 import type { MatchSnapshot } from '../game-core/index.ts';
+// A creature model is the same artifact a tower model is: one entry, one scene, one emissive node name.
+// The type lives in the tower module because that is the domain that fetched the first of them, and the
+// alternative — a third copy of the same four fields — would be a second shape for one file.
+import type { LoadedModel } from './towers.ts';
 import { disposeInstance, withProbeWeight } from './shared.ts';
 
 export type EnemyView = {
   group: THREE.Group;
   body: THREE.Mesh;
   healthFill: THREE.Mesh;
+};
+
+// What one creature is made of, published so the things a frame cannot prove can be read instead: where
+// the bar sits against the body it measures (EOB-034), how high the body stands above the road, and
+// whether the art on screen is the file or the form standing in for it.
+export type EnemyModelReading = {
+  entityId: number;
+  enemyId: string;
+  source: 'procedural' | 'model';
+  modelId: string | null;
+  // The gap the manifest declares, the lift the client applied to honour it, and the height of the
+  // body above the road. Two of the seven float; on a road 1.2 wide, 0.16 is a gap a player can see and
+  // 0.18 is one he can miss, so the numbers are named rather than left to the picture.
+  hoverY: number;
+  lift: number;
+  bodyBottom: number;
+  // The bar and the top of the body it belongs to. The bar has to read as a bar on this creature, and
+  // the only way to say that is to say how far above the body it floats.
+  barY: number;
+  bodyTop: number;
+  accentNode: string | null;
+  accentGlow: number;
+  // The slow tint is the one gameplay cue a creature carries, and on a model it lands on a material that
+  // has no emissive until the client gives it one.
+  slowed: boolean;
+  bodyEmissive: number;
 };
 
 // The ground line: the surface of the road ribbon the enemy stands on, in the same world the route
@@ -33,6 +65,10 @@ export type EnemyPresentation = {
   applySnapshot: (next: MatchSnapshot) => void;
   animate: (elapsed: number, ambientDelta: number) => void;
   positionOf: (entityId: number) => THREE.Vector3 | null;
+  // The two-phase swap, the same one the towers use: a creature built before the registry answered keeps
+  // walking as the form it was born as, and is replaced in place once the file is in. No entity is
+  // recreated, no position moves, and the snapshot is not touched.
+  upgradeWithModels: () => void;
   // The multiplier a model of this creature is measured in, for the world footprint gate on load.
   // Null for an id the roster has no entry for: no view will ever be built for it, so there is no
   // seat to measure it in and the gate has nothing to compare.
@@ -41,6 +77,7 @@ export type EnemyPresentation = {
   positions: () => Array<{ x: number; z: number }>;
   bobOffset: () => number;
   setReducedMotion: (reduced: boolean) => void;
+  modelReadings: () => EnemyModelReading[];
 };
 
 // The fill is drawn from the middle of the bar, so half of it hangs out of the back plate while it
@@ -89,6 +126,16 @@ type EnemyLook = {
   // before their shape is read: a tank shifts its weight, a sprinter fidgets, a floater drifts, a
   // swarmling twitches, a shell rolls, a mote banks, a boss heaves.
   motion: { bob: number; bobRate: number; sway: number; swayRate: number; yaw: number; yawRate: number };
+  // What a loaded file of this kind is multiplied by, per role, and how hard its accent glows. A file
+  // arrives with its colour in its vertices and no materials, so the material the client raises on top
+  // is the whole of the palette: with `vertexColors` the colour that reaches the screen is
+  // `material.color x COLOR_0`, and one number is a role's entire palette. The bodies of the accepted
+  // set are dark and nearly neutral where the procedural ones are saturated, which is not a defect but a
+  // different job: the hue that tells the kinds apart moved to the accent, and it is the accent this
+  // module was always reading first.
+  modelBodyTone: number;
+  modelAccentTone: number;
+  modelAccentGlow: number;
   form: () => EnemyForm;
 };
 
@@ -376,6 +423,9 @@ const enemyLooks: Record<string, EnemyLook> = {
     shell: { color: 0xc25a34, emissive: 0xc25a34, roughness: 0.82, metalness: 0.1 },
     accent: { color: 0xf0dcb0, emissive: 0xf0dcb0, emissiveIntensity: 0.1, roughness: 0.55, metalness: 0.05 },
     motion: { bob: 0.016, bobRate: 1.5, sway: 0.045, swayRate: 1.5, yaw: 0.1, yawRate: 0.35 },
+    modelBodyTone: 1,
+    modelAccentTone: 1,
+    modelAccentGlow: 0.8,
     form: buildHusk,
   },
   runner: {
@@ -388,6 +438,9 @@ const enemyLooks: Record<string, EnemyLook> = {
     shell: { color: 0xf2c33c, emissive: 0xf2c33c, roughness: 0.45, metalness: 0.28 },
     accent: { color: 0xfff6d8, emissive: 0xffe9a0, emissiveIntensity: 0.18, roughness: 0.28, metalness: 0.2 },
     motion: { bob: 0.028, bobRate: 5, sway: 0.075, swayRate: 2.8, yaw: 0.06, yawRate: 0.6 },
+    modelBodyTone: 1,
+    modelAccentTone: 1,
+    modelAccentGlow: 0.8,
     form: buildRunner,
   },
   wisp: {
@@ -399,6 +452,9 @@ const enemyLooks: Record<string, EnemyLook> = {
     shell: { color: 0x8f6bf0, emissive: 0x6a45d8, roughness: 0.55, metalness: 0.15 },
     accent: { color: 0x9fd4e8, emissive: 0x8fdcff, emissiveIntensity: 0.25, roughness: 0.2, metalness: 0.15 },
     motion: { bob: 0.045, bobRate: 1, sway: 0, swayRate: 1, yaw: 0.5, yawRate: 0.45 },
+    modelBodyTone: 1,
+    modelAccentTone: 1,
+    modelAccentGlow: 0.8,
     form: buildWisp,
   },
   swarmling: {
@@ -411,6 +467,9 @@ const enemyLooks: Record<string, EnemyLook> = {
     shell: { color: 0xa8e04a, emissive: 0x6f9a2a, roughness: 0.6, metalness: 0.1 },
     accent: { color: 0xf4ffcf, emissive: 0xdaff8c, emissiveIntensity: 0.3, roughness: 0.4, metalness: 0.05 },
     motion: { bob: 0.022, bobRate: 9, sway: 0.05, swayRate: 6, yaw: 0.16, yawRate: 3.2 },
+    modelBodyTone: 1,
+    modelAccentTone: 1,
+    modelAccentGlow: 0.8,
     form: buildSwarmling,
   },
   carapace: {
@@ -424,6 +483,13 @@ const enemyLooks: Record<string, EnemyLook> = {
     shell: { color: 0x4a6a8c, emissive: 0x5c86b4, roughness: 0.92, metalness: 0.05 },
     accent: { color: 0xffb257, emissive: 0xff9a3c, emissiveIntensity: 0.3, roughness: 0.45, metalness: 0.1 },
     motion: { bob: 0.008, bobRate: 0.55, sway: 0.022, swayRate: 0.42, yaw: 0.05, yawRate: 0.24 },
+    // The one kind the frame asked for. Its body is a dome, so the whole of what the player sees is the
+    // face that looks straight into the key light, and at the file's own value it came out the lightest
+    // large body on the board — the exact opposite of what  027 separated it by, when this kind was
+    // chosen to be the one dark shell in the roster. 0.5 puts it back under the maw.
+    modelBodyTone: 0.5,
+    modelAccentTone: 1,
+    modelAccentGlow: 0.8,
     form: buildCarapace,
   },
   mote: {
@@ -437,6 +503,9 @@ const enemyLooks: Record<string, EnemyLook> = {
     shell: { color: 0x7cc4e8, emissive: 0x4a90c0, roughness: 0.38, metalness: 0.05 },
     accent: { color: 0xf2fbff, emissive: 0xdcf4ff, emissiveIntensity: 0.4, roughness: 0.22, metalness: 0.05 },
     motion: { bob: 0.03, bobRate: 1.7, sway: 0.09, swayRate: 1.1, yaw: 0.22, yawRate: 0.9 },
+    modelBodyTone: 1,
+    modelAccentTone: 1,
+    modelAccentGlow: 0.8,
     form: buildMote,
   },
   maw: {
@@ -449,6 +518,9 @@ const enemyLooks: Record<string, EnemyLook> = {
     shell: { color: 0x8e1f30, emissive: 0x7a1a2a, roughness: 0.8, metalness: 0.08 },
     accent: { color: 0xffe8d2, emissive: 0xffd9b0, emissiveIntensity: 0.22, roughness: 0.5, metalness: 0.05 },
     motion: { bob: 0.026, bobRate: 0.8, sway: 0.038, swayRate: 0.6, yaw: 0.12, yawRate: 0.3 },
+    modelBodyTone: 1,
+    modelAccentTone: 1,
+    modelAccentGlow: 0.8,
     form: buildMaw,
   },
   unknown: {
@@ -458,30 +530,189 @@ const enemyLooks: Record<string, EnemyLook> = {
     shell: { color: 0xc9a27a, emissive: 0xa8794f, roughness: 0.7, metalness: 0.1 },
     accent: { color: 0xe8dcc4, emissive: 0xe8dcc4, emissiveIntensity: 0.1, roughness: 0.5, metalness: 0.05 },
     motion: { bob: 0.02, bobRate: 2, sway: 0.04, swayRate: 2, yaw: 0.12, yawRate: 0.4 },
+    modelBodyTone: 1,
+    modelAccentTone: 1,
+    modelAccentGlow: 0.8,
     form: buildUnknown,
   },
+};
+
+// The bar, drawn from the middle and squared to the world rather than to the creature: it must stay the
+// same shape whatever the heading does, or the player reads a bar edge-on twice per lap and a bar's
+// angle says nothing about the enemy under it. `barY` is a world height above the road and is passed in
+// rather than read from the look, because a creature standing on a file and a floater standing on a file
+// do not stand at the same height.
+const makeHealthBar = (group: THREE.Group, look: EnemyLook, barY: number): THREE.Mesh => {
+  const healthBack = new THREE.Mesh(
+    new THREE.BoxGeometry(look.barWidth + healthBackOverhang, healthBackHeight, 0.05),
+    new THREE.MeshBasicMaterial({ color: 0x152229 }),
+  );
+  healthBack.name = 'health-back';
+  healthBack.position.y = barY;
+  group.add(healthBack);
+
+  const healthFill = new THREE.Mesh(
+    new THREE.BoxGeometry(look.barWidth, healthFillHeight, 0.055),
+    new THREE.MeshBasicMaterial({ color: 0x74e0b4 }),
+  );
+  healthFill.name = 'health-fill';
+  healthFill.position.set(0, barY, 0.01);
+  group.add(healthFill);
+  return healthFill;
+};
+
+// The colour a mesh was exported in, read off its own vertices. A file with no material gets one from the
+// client, and the only honest question about its colour is what the file already looks like, so the
+// answer is measured rather than declared. A mesh with no vertex colours has no colour to be and is
+// white.
+const meanVertexColor = (mesh: THREE.Mesh): THREE.Color => {
+  const attribute = mesh.geometry.getAttribute('color');
+  if (attribute === undefined || attribute.count === 0) {
+    return new THREE.Color(1, 1, 1);
+  }
+  let red = 0;
+  let green = 0;
+  let blue = 0;
+  for (let vertex = 0; vertex < attribute.count; vertex += 1) {
+    red += attribute.getX(vertex);
+    green += attribute.getY(vertex);
+    blue += attribute.getZ(vertex);
+  }
+  return new THREE.Color().setRGB(
+    red / attribute.count,
+    green / attribute.count,
+    blue / attribute.count,
+    THREE.LinearSRGBColorSpace,
+  );
+};
+
+const firstMeshExcept = (root: THREE.Object3D, except: THREE.Object3D): THREE.Mesh | null => {
+  let found: THREE.Mesh | null = null;
+  root.traverse((child) => {
+    if (found === null && child instanceof THREE.Mesh && child !== except) {
+      found = child;
+    }
+  });
+  return found;
+};
+
+// How tall a body stands, in the units of the rig that holds it, measured on the vertices rather than
+// read off a node transform: an exported model carries its height in the geometry and leaves the node
+// that holds it at the origin, which is the same trap the tower accent was caught in.
+const measuredHeight = (object: THREE.Object3D): number => {
+  const box = new THREE.Box3();
+  const point = new THREE.Vector3();
+  object.updateMatrixWorld(true);
+  object.traverse((child) => {
+    const position = (child as THREE.Mesh).geometry?.getAttribute('position');
+    if (position === undefined) {
+      return;
+    }
+    for (let vertex = 0; vertex < position.count; vertex += 1) {
+      point.set(position.getX(vertex), position.getY(vertex), position.getZ(vertex)).applyMatrix4(child.matrixWorld);
+      box.expandByPoint(point);
+    }
+  });
+  return box.isEmpty() ? 0 : Number((box.max.y - box.min.y).toFixed(5));
 };
 
 // The entry the module keeps for itself. The published `EnemyView` is the three members the page
 // reads; the rest is presentation state that has to travel with the view — where it came from, which
 // way it is walking, and the look that was picked once at birth.
 type EnemyEntry = EnemyView & {
+  // The kind this view was born as. The look table is keyed by it and the model store answers by it, so
+  // the swap can ask the store about a view without the view having to remember where it came from.
+  enemyId: string;
   look: EnemyLook;
   facing: THREE.Group;
   rig: THREE.Group;
   travelX: number;
   travelZ: number;
   headed: boolean;
+  source: 'procedural' | 'model';
+  modelId: string | null;
+  hoverY: number;
+  lift: number;
+  bodyBottom: number;
+  barY: number;
+  bodyTop: number;
+  accentName: string | null;
+  accentGlow: number;
+  slowed: boolean;
+  // Everything this view created for itself. The body of a model view is the registry's geometry and the
+  // registry's materials, with a dozen more creatures of the same kind about to borrow them, so a release
+  // hands back only what the view owns — and the health bar, two small boxes, belongs to the view whoever
+  // the body came from.
+  release: () => void;
 };
 
-export const createEnemies = (scene: THREE.Scene): EnemyPresentation => {
+export const createEnemies = (scene: THREE.Scene, modelStore: ReadonlyMap<string, LoadedModel>): EnemyPresentation => {
   const enemyViews = new Map<number, EnemyEntry>();
   let enemyBobOffset = 0;
   let reducedMotion = false;
+  // The models of the accepted set are painted once, not once per view. A creature's palette and its
+  // slow tint are both per kind rather than per individual — every husk on the road is the same rust —
+  // so the materials stay the ones the registry loaded and every view of that kind borrows them. The
+  // tower domain copies its materials per view instead, because a crystal's emissive is per-tower
+  // animation state; this is the other policy, and it is the right one for a creature.
+  const painted = new Set<string>();
+
+  // Where the body of a file stands, and therefore how far it has to be lifted to stand where the
+  // manifest says it stands. The two floaters declare 0.16 and 0.18 and their geometry already starts
+  // there, so the lift is zero and the declaration is confirmed rather than applied; a file that
+  // declares a gap it does not have is lifted by the difference, and a file that declares nothing is
+  // left where its author put it.
+  const hoverFor = (model: LoadedModel): { hoverY: number; lift: number } => {
+    const minY = model.footprint.minY;
+    const hoverY = model.entry.hoverY ?? minY;
+    return { hoverY, lift: Number((hoverY - minY).toFixed(5)) };
+  };
+
+  // The two numbers a file of this kind is multiplied by, applied to the materials the registry loaded.
+  // The body gets its own colour as its emissive as well, because the slow tint is written as an
+  // intensity on that emissive and a material that arrives with none would make the cue invisible: a
+  // frozen creature has to look frozen, and that is the one thing about it a player must never miss.
+  //
+  // A file with no materials in it gets one material from the loader for the whole file, so the body and
+  // the accent arrive holding the same object. Two roles cannot share a multiplier, and a shared emissive
+  // would light the whole creature in the accent's colour at the body's intensity, which is how the
+  // accent stops being an accent. The accent is therefore given a copy of that material — one per kind,
+  // not per view — and the shared one is left to the body.
+  const paintModel = (model: LoadedModel, look: EnemyLook): void => {
+    if (painted.has(model.entry.id)) {
+      return;
+    }
+    painted.add(model.entry.id);
+    const meshes: Array<{ mesh: THREE.Mesh; material: THREE.MeshStandardMaterial }> = [];
+    model.scene.traverse((child) => {
+      if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshStandardMaterial) {
+        meshes.push({ mesh: child, material: child.material });
+      }
+    });
+    const shared = new Map<THREE.MeshStandardMaterial, number>();
+    for (const entry of meshes) {
+      shared.set(entry.material, (shared.get(entry.material) ?? 0) + 1);
+    }
+    for (const { mesh, material: current } of meshes) {
+      if (mesh.name === model.emissiveNode) {
+        // `Material.copy` carries the probe and the declared role across, so the copy is a material that
+        // the scene already knows how to light.
+        const material = (shared.get(current) ?? 0) > 1 ? current.clone() : current;
+        mesh.material = material;
+        material.color.multiplyScalar(look.modelAccentTone);
+        material.emissive.copy(meanVertexColor(mesh)).multiplyScalar(look.modelAccentTone);
+        material.emissiveIntensity = look.modelAccentGlow;
+        continue;
+      }
+      current.color.multiplyScalar(look.modelBodyTone);
+      current.emissive.copy(meanVertexColor(mesh)).multiplyScalar(look.modelBodyTone);
+      current.emissiveIntensity = baseBodyEmissive;
+    }
+  };
 
   const createEnemyView = (enemyId: string, x: number, z: number): EnemyEntry => {
     const look = enemyLooks[enemyId] ?? enemyLooks.unknown;
-    const form = look.form();
+    const model = modelStore.get(enemyId);
     const group = new THREE.Group();
     group.name = `enemy:${enemyId}`;
 
@@ -492,64 +723,133 @@ export const createEnemies = (scene: THREE.Scene): EnemyPresentation => {
     facing.name = 'facing';
     const rig = new THREE.Group();
     rig.name = 'rig';
-    rig.scale.setScalar(look.scale);
+    // A file is authored in world units and stands as it is; the procedural form around it is drawn
+    // oversized and pulled down by the kind's own scale. The two reach the same size on the road, which
+    // is what makes the swap invisible and what a refused file would fall back to.
+    rig.scale.setScalar(model === undefined ? look.scale : ENEMY_MODEL_SEAT_SCALE);
     facing.add(rig);
     group.add(facing);
 
-    const body = new THREE.Mesh(
-      form.shell,
-      withProbeWeight(
-        new THREE.MeshStandardMaterial({
-          color: look.shell.color,
-          emissive: look.shell.emissive,
-          emissiveIntensity: baseBodyEmissive,
-          roughness: look.shell.roughness,
-          metalness: look.shell.metalness,
-        }),
-        'enemyBody',
-      ),
-    );
-    body.name = 'shell';
-    body.castShadow = true;
-    rig.add(body);
+    const form = model === undefined ? look.form() : null;
+    let body: THREE.Mesh;
+    if (model === undefined) {
+      body = new THREE.Mesh(
+        (form as EnemyForm).shell,
+        withProbeWeight(
+          new THREE.MeshStandardMaterial({
+            color: look.shell.color,
+            emissive: look.shell.emissive,
+            emissiveIntensity: baseBodyEmissive,
+            roughness: look.shell.roughness,
+            metalness: look.shell.metalness,
+          }),
+          'enemyBody',
+        ),
+      );
+      body.name = 'shell';
+      body.castShadow = true;
+      rig.add(body);
 
-    const accent = new THREE.Mesh(
-      form.accent,
-      withProbeWeight(
-        new THREE.MeshStandardMaterial({
-          color: look.accent.color,
-          emissive: look.accent.emissive,
-          emissiveIntensity: look.accent.emissiveIntensity,
-          roughness: look.accent.roughness,
-          metalness: look.accent.metalness,
-        }),
-        'enemyCrest',
-      ),
-    );
-    accent.name = 'crest';
-    accent.castShadow = true;
-    rig.add(accent);
+      const accent = new THREE.Mesh(
+        (form as EnemyForm).accent,
+        withProbeWeight(
+          new THREE.MeshStandardMaterial({
+            color: look.accent.color,
+            emissive: look.accent.emissive,
+            emissiveIntensity: look.accent.emissiveIntensity,
+            roughness: look.accent.roughness,
+            metalness: look.accent.metalness,
+          }),
+          'enemyCrest',
+        ),
+      );
+      accent.name = 'crest';
+      accent.castShadow = true;
+      rig.add(accent);
 
-    // The bar is the one part that is not scaled by the kind, and it is squared to the world instead
-    // of to the creature: it must stay the same shape whatever the heading does, or the player reads
-    // a bar edge-on twice per lap and a bar's angle says nothing about the enemy under it.
-    const healthBack = new THREE.Mesh(
-      new THREE.BoxGeometry(look.barWidth + healthBackOverhang, healthBackHeight, 0.05),
-      new THREE.MeshBasicMaterial({ color: 0x152229 }),
-    );
-    healthBack.name = 'health-back';
-    healthBack.position.y = look.barY;
-    group.add(healthBack);
+      const healthFill = makeHealthBar(group, look, look.barY);
+      return {
+        group,
+        body,
+        healthFill,
+        look,
+        facing,
+        rig,
+        travelX: x,
+        travelZ: z,
+        headed: false,
+        enemyId,
+        source: 'procedural',
+        modelId: null,
+        hoverY: 0,
+        lift: 0,
+        bodyBottom: 0,
+        barY: look.barY,
+        bodyTop: measuredHeight(rig),
+        accentName: null,
+        accentGlow: look.accent.emissiveIntensity,
+        slowed: false,
+        release: () => disposeInstance(group),
+      };
+    }
 
-    const healthFill = new THREE.Mesh(
-      new THREE.BoxGeometry(look.barWidth, healthFillHeight, 0.055),
-      new THREE.MeshBasicMaterial({ color: 0x74e0b4 }),
-    );
-    healthFill.name = 'health-fill';
-    healthFill.position.set(0, look.barY, 0.01);
-    group.add(healthFill);
-
-    return { group, body, healthFill, look, facing, rig, travelX: x, travelZ: z, headed: false };
+    paintModel(model, look);
+    const clone = SkeletonUtils.clone(model.scene);
+    clone.traverse((child) => {
+      if (child instanceof THREE.Mesh) {
+        child.castShadow = true;
+        child.receiveShadow = true;
+      }
+    });
+    const { hoverY, lift } = hoverFor(model);
+    clone.position.y = lift;
+    rig.add(clone);
+    // The manifest names the accent and nothing else, so the body is whatever the file draws that is not
+    // the accent. Every accepted file has exactly one such node, and taking the first keeps the published
+    // `body` a single mesh whatever a file holds.
+    const accentNode = clone.getObjectByName(model.emissiveNode);
+    if (!(accentNode instanceof THREE.Mesh)) {
+      throw new AssetContractError(`model ${model.entry.id} has no ${model.emissiveNode} mesh to light`);
+    }
+    const shell = firstMeshExcept(clone, accentNode);
+    if (shell === null) {
+      throw new AssetContractError(`model ${model.entry.id} has no body mesh beside its ${model.emissiveNode}`);
+    }
+    body = shell;
+    // The bar follows the body, not the file. A floater's body stands a sixth of a unit above the road
+    // and a bar that stayed where it was would sit inside it, which is the one thing `EOB-034` says a
+    // bar must not do.
+    const barY = look.barY + hoverY * ENEMY_MODEL_SEAT_SCALE;
+    const healthFill = makeHealthBar(group, look, barY);
+    return {
+      group,
+      body,
+      healthFill,
+      look,
+      facing,
+      rig,
+      travelX: x,
+      travelZ: z,
+      headed: false,
+      enemyId,
+      source: 'model',
+      modelId: model.entry.id,
+      hoverY,
+      lift,
+      bodyBottom: hoverY,
+      barY,
+      bodyTop: Number((hoverY + measuredHeight(clone)).toFixed(5)),
+      accentName: accentNode.name || null,
+      accentGlow: (accentNode.material as THREE.MeshStandardMaterial).emissiveIntensity,
+      slowed: false,
+      release: () => {
+        disposeInstance(healthFill);
+        const back = group.getObjectByName('health-back');
+        if (back !== null && back !== undefined) {
+          disposeInstance(back);
+        }
+      },
+    };
   };
 
   return {
@@ -578,15 +878,16 @@ export const createEnemies = (scene: THREE.Scene): EnemyPresentation => {
         const healthRatio = enemy.maxHealth > 0 ? Math.max(0, Math.min(1, enemy.health / enemy.maxHealth)) : 0;
         entry.healthFill.scale.x = Math.max(healthRatio, 0.001);
         entry.healthFill.position.x = (-entry.look.barWidth / 2) * (1 - healthRatio);
+        entry.slowed = enemy.slowTicks > 0;
         const bodyMaterial = entry.body.material as THREE.MeshStandardMaterial;
-        bodyMaterial.emissiveIntensity = enemy.slowTicks > 0 ? slowedBodyEmissive : baseBodyEmissive;
+        bodyMaterial.emissiveIntensity = entry.slowed ? slowedBodyEmissive : baseBodyEmissive;
       }
       for (const [entityId, view] of enemyViews) {
         if (aliveEnemies.has(entityId)) {
           continue;
         }
         scene.remove(view.group);
-        disposeInstance(view.group);
+        view.release();
         enemyViews.delete(entityId);
       }
     },
@@ -615,6 +916,31 @@ export const createEnemies = (scene: THREE.Scene): EnemyPresentation => {
     // The live position of an enemy body, handed to the tower that shot it and to the burst that
     // marks its death. The vector is the view's own, so the caller reads it before the next snapshot.
     positionOf: (entityId: number) => enemyViews.get(entityId)?.group.position ?? null,
+    // The two-phase swap, and the promise it has to keep. A view replaced in place takes its predecessor's
+    // position, heading, bar and slow state across, and the map key is written back where it was, so the
+    // order the views are walked in — which is what staggers the idle of a crowd — survives the swap. What
+    // the snapshot holds is never touched: a late model cannot make two renderings of one run differ.
+    upgradeWithModels: () => {
+      for (const [entityId, view] of [...enemyViews]) {
+        if (view.source === 'model' || !modelStore.has(view.enemyId)) {
+          continue;
+        }
+        const next = createEnemyView(view.enemyId, view.travelX, view.travelZ);
+        next.group.position.copy(view.group.position);
+        next.facing.rotation.y = view.facing.rotation.y;
+        next.headed = view.headed;
+        next.healthFill.scale.x = view.healthFill.scale.x;
+        next.healthFill.position.x = view.healthFill.position.x;
+        next.slowed = view.slowed;
+        (next.body.material as THREE.MeshStandardMaterial).emissiveIntensity = view.slowed
+          ? slowedBodyEmissive
+          : baseBodyEmissive;
+        scene.remove(view.group);
+        view.release();
+        scene.add(next.group);
+        enemyViews.set(entityId, next);
+      }
+    },
     seatScaleFor: (enemyId: string) => (enemyLooks[enemyId] === undefined ? null : ENEMY_MODEL_SEAT_SCALE),
     viewCount: () => enemyViews.size,
     positions: () => Array.from(enemyViews.values(), (view) => ({ x: view.group.position.x, z: view.group.position.z })),
@@ -622,5 +948,21 @@ export const createEnemies = (scene: THREE.Scene): EnemyPresentation => {
     setReducedMotion: (reduced: boolean) => {
       reducedMotion = reduced;
     },
+    modelReadings: () =>
+      Array.from(enemyViews, ([entityId, view]): EnemyModelReading => ({
+        entityId,
+        enemyId: view.enemyId,
+        source: view.source,
+        modelId: view.modelId,
+        hoverY: view.hoverY,
+        lift: view.lift,
+        bodyBottom: view.bodyBottom,
+        barY: view.barY,
+        bodyTop: view.bodyTop,
+        accentNode: view.accentName,
+        accentGlow: view.accentGlow,
+        slowed: view.slowed,
+        bodyEmissive: (view.body.material as THREE.MeshStandardMaterial).emissiveIntensity,
+      })),
   };
 };
