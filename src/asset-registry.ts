@@ -21,6 +21,12 @@ export type ModelManifestEntry = {
   contentHash: string;
   triangles: number;
   emissiveNode: string;
+  // How high the body of this model stands above the ground it is placed on, in the same units as
+  // the model itself. Optional because most models stand on it: a floater declares a gap so the
+  // client can put its health bar over the body instead of through it, and a walker that omits the
+  // field is not claiming a gap of zero, it is making no claim. It was demanded by the first export
+  // and had nowhere to live, which is why the contract grew it here rather than in the file.
+  hoverY?: number;
 };
 
 export type AssetManifest = {
@@ -33,7 +39,34 @@ export class AssetContractError extends Error {}
 // Every check the client can report as having run. `contentHash` is separate from `bytes` on
 // purpose: it needs a secure context, so a legal http dev setup legitimately performs it not at
 // all, and a seam that could not tell those two cases apart would be lying about the load.
-export type AssetCheckName = 'bytes' | 'contentHash' | 'nodeTypes' | 'modelBudget' | 'registryBudget' | 'sceneBudget';
+// `worldFootprint` is separate from `modelBudget` for the same kind of reason: the file-space limits
+// come out of the manifest, while the world-space one needs a measurement and a seat.
+export type AssetCheckName =
+  | 'bytes'
+  | 'contentHash'
+  | 'nodeTypes'
+  | 'modelBudget'
+  | 'worldFootprint'
+  | 'registryBudget'
+  | 'sceneBudget';
+
+// What the loaded tree measures about its own ground plane, and what that becomes once it is in the
+// seat it is going to stand in. Published rather than merely checked, because a gate that refuses a
+// model without saying which number was over cannot be argued with by the person who exported it.
+export type ModelFootprintReading = {
+  // The furthest any vertex of the model reaches from its own origin, measured in the ground plane:
+  // the same quantity the generator calls `footprintRadius`, measured here on the loaded tree so a
+  // file the generator never built is measured the same way.
+  fileRadius: number;
+  // The lowest point of the model. A floater declares `hoverY` in the manifest and this is the number
+  // that has to agree with it, which is why both are reported: a lift the client applied and a gap
+  // the file already had are not the same fact.
+  minY: number;
+  // Null when nothing will ever put this model in a seat, in which case there is no world size to
+  // speak of and the gate has nothing to compare.
+  seatScale: number | null;
+  worldRadius: number | null;
+};
 
 // What the loaded tree said about its own skeleton, measured on the client and not declared by the
 // manifest: the joint count, the influence vectors, and the clips that came with the file. It is
@@ -57,6 +90,7 @@ export type ModelCheck = {
   triangles: number;
   nodeTypes: string[];
   skeleton: ModelSkeletonReading | null;
+  footprint: ModelFootprintReading | null;
   contentHash: { performed: boolean; matches: boolean; skippedReason: string | null };
   failures: string[];
 };
@@ -74,6 +108,7 @@ const emptyChecks = (): AssetChecks => ({
     contentHash: false,
     nodeTypes: false,
     modelBudget: false,
+    worldFootprint: false,
     registryBudget: false,
     sceneBudget: false,
   },
@@ -100,6 +135,19 @@ const readCount = (value: unknown, field: string): number => {
   return value;
 };
 
+// An absent optional field and a malformed one are different answers: `undefined` means the exporter
+// makes no claim, and anything else has to be a number or the registry is refused. A gap is a
+// measurement, and a measurement that arrived as text is not one.
+const readOptionalMeasure = (value: unknown, field: string): number | undefined => {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return contractFail(`model registry field ${field} must be a number when present`);
+  }
+  return value;
+};
+
 export const parseAssetManifest = (raw: unknown): AssetManifest => {
   if (typeof raw !== 'object' || raw === null) {
     return contractFail('model registry is not an object');
@@ -121,6 +169,7 @@ export const parseAssetManifest = (raw: unknown): AssetManifest => {
       // generated artifact may be resolved, never a path that walks out of the models directory.
       return contractFail(`model registry entry ${index} must name a file, not a path`);
     }
+    const hoverY = readOptionalMeasure(model.hoverY, `models[${index}].hoverY`);
     return {
       id: readString(model.id, `models[${index}].id`),
       file,
@@ -128,6 +177,7 @@ export const parseAssetManifest = (raw: unknown): AssetManifest => {
       contentHash: readString(model.contentHash, `models[${index}].contentHash`),
       triangles: readCount(model.triangles, `models[${index}].triangles`),
       emissiveNode: readString(model.emissiveNode, `models[${index}].emissiveNode`),
+      ...(hoverY === undefined ? {} : { hoverY }),
     };
   });
   const duplicates = models.filter((model, index) => models.findIndex((other) => other.id === model.id) !== index);
@@ -173,6 +223,7 @@ export const createAssetRegistry = () => {
         ...check,
         nodeTypes: [...check.nodeTypes],
         skeleton: check.skeleton === null ? null : { ...check.skeleton, clipNames: [...check.skeleton.clipNames], clipTargets: check.skeleton.clipTargets.map((target) => ({ ...target })) },
+        footprint: check.footprint === null ? null : { ...check.footprint },
         contentHash: { ...check.contentHash },
         failures: [...check.failures],
       }));

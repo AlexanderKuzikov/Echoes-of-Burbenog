@@ -19,6 +19,8 @@ import type {
   NodeReading,
   RegistryModelReading,
 } from '../src/asset-budgets.ts';
+import { parseAssetManifest } from '../src/asset-registry.ts';
+import type { AssetManifest, ModelManifestEntry } from '../src/asset-registry.ts';
 
 // Own zero-dependency glTF 2.0 binary generator. Models live in this file as text,
 // artifacts are written to public/models and are not committed, so a diff of the model
@@ -28,6 +30,12 @@ import type {
 const PROJECT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const OUTPUT_DIR = join(PROJECT_ROOT, 'public', 'models');
 const MANIFEST_PATH = join(OUTPUT_DIR, 'manifest.json');
+// The second source. `NexusDefense` exported these ten GLB and the manifest that describes them, and
+// they live in the repository as they arrived: the models a player loads have to come out of a tree
+// that also holds the game, and a path into a neighbouring checkout is a promise rather than a build
+// input. `build-assets.ts` copies them, so the copy can never drift from the source it claims to be.
+const ACCEPTED_DIR = join(PROJECT_ROOT, 'assets', 'accepted');
+const ACCEPTED_MANIFEST_PATH = join(ACCEPTED_DIR, 'manifest.json');
 const PRECISION = 1e5;
 
 const GLB_MAGIC = 0x46546c67;
@@ -41,6 +49,10 @@ const TYPE_COMPONENTS: Record<string, number> = { SCALAR: 1, VEC2: 2, VEC3: 3, V
 const TARGET_ARRAY_BUFFER = 34962;
 const TARGET_ELEMENT_ARRAY_BUFFER = 34963;
 const MODE_TRIANGLES = 4;
+// The length of a face normal below which a triangle covers no ground at all: the cross product of
+// two edges that lie on top of each other. Models in this pipeline are a few world units tall, so
+// anything under this cannot be a face anyone would ever see.
+const DEGENERATE_FACE_NORMAL = 1e-9;
 // JOINTS_0 and WEIGHTS_0 are VEC4, so a vertex can name four bones whether or not it uses them.
 const WEIGHT_SLOTS = 4;
 
@@ -111,6 +123,9 @@ type ManifestEntry = {
   contentHash: string;
   triangles: number;
   emissiveNode: string;
+  // Carried through from the accepted export untouched: a model that declares a gap above the ground
+  // has to reach the client in the published manifest, or the field the exporter wrote is a comment.
+  hoverY?: number;
 };
 
 type ModelBuild = {
@@ -1107,7 +1122,11 @@ const verifyGlb = (bytes: Buffer, entry: ManifestEntry): void => {
 
   const nodes = asArray(gltf.nodes, `${label} nodes`);
   const meshes = asArray(gltf.meshes, `${label} meshes`);
-  const materials = asArray(gltf.materials, `${label} materials`);
+  // An absent `materials` list is legal here, and it is the shape an imported model arrives in: its
+  // colour lives in COLOR_0 and the client raises the material it needs on the node it animates. What
+  // the file must not do is declare a material and leave it half described, so the material rules
+  // below apply to the materials that are there rather than to the ones that are missing.
+  const materials = asArray(gltf.materials ?? [], `${label} materials`);
   let triangleCount = 0;
   for (const [meshIndex, mesh] of meshes.entries()) {
     const primitives = asArray(mesh.primitives, `${label} mesh ${meshIndex} primitives`);
@@ -1144,13 +1163,15 @@ const verifyGlb = (bytes: Buffer, entry: ManifestEntry): void => {
       if (primitive.mode !== undefined && primitive.mode !== MODE_TRIANGLES) {
         fail(`${where}: mode ${String(primitive.mode)} is not TRIANGLES`);
       }
-      const materialIndex = asNumber(primitive.material, `${where} material`);
-      const material = materials[materialIndex];
-      if (!material) {
-        fail(`${where}: material ${materialIndex} does not exist`);
-      }
-      if (material.pbrMetallicRoughness === undefined) {
-        fail(`${where}: pbrMetallicRoughness is required`);
+      if (primitive.material !== undefined) {
+        const materialIndex = asNumber(primitive.material, `${where} material`);
+        const material = materials[materialIndex];
+        if (!material) {
+          fail(`${where}: material ${materialIndex} does not exist`);
+        }
+        if (material.pbrMetallicRoughness === undefined) {
+          fail(`${where}: pbrMetallicRoughness is required`);
+        }
       }
       const indices = readAccessorValues(bytes, gltf, bin, asNumber(primitive.indices, `${where} indices`), where);
       if (indices.components !== 1) {
@@ -1166,7 +1187,10 @@ const verifyGlb = (bytes: Buffer, entry: ManifestEntry): void => {
         }
       }
       // Winding and vertex normals have to agree, otherwise front faces point inwards and the
-      // model renders as an empty shell under backface culling.
+      // model renders as an empty shell under backface culling. A triangle with no area is not that
+      // case and is not refused: it draws nothing in either winding, it has no front face to point
+      // the wrong way, and an exporter that simplifies a mesh leaves a few of them behind. What is
+      // still refused is a triangle that covers ground and says its normals point the other way.
       for (let triangle = 0; triangle < indices.count; triangle += 3) {
         const read = (element: number, component: number) =>
           positions.values[element * 3 + component] as number;
@@ -1184,7 +1208,8 @@ const verifyGlb = (bytes: Buffer, entry: ManifestEntry): void => {
           normalAt(first, 1) + normalAt(second, 1) + normalAt(third, 1),
           normalAt(first, 2) + normalAt(second, 2) + normalAt(third, 2),
         ];
-        if (faceNormal[0] * stored[0] + faceNormal[1] * stored[1] + faceNormal[2] * stored[2] <= 0) {
+        const faceLength = Math.hypot(faceNormal[0], faceNormal[1], faceNormal[2]);
+        if (faceLength > DEGENERATE_FACE_NORMAL && faceNormal[0] * stored[0] + faceNormal[1] * stored[1] + faceNormal[2] * stored[2] <= 0) {
           fail(`${where}: triangle ${triangle / 3} winds against its vertex normals`);
         }
       }
@@ -1206,13 +1231,15 @@ const verifyGlb = (bytes: Buffer, entry: ManifestEntry): void => {
   if (!emissivePrimitive) {
     fail(`${label}: emissive node ${entry.emissiveNode} has no primitive`);
   }
-  const emissiveMaterial = materials[asNumber(emissivePrimitive.material, `${label} emissive material`)];
-  const pbr = (emissiveMaterial?.pbrMetallicRoughness ?? {}) as Json;
-  if (emissiveMaterial?.emissiveFactor === undefined) {
-    fail(`${label}: emissive node ${entry.emissiveNode} has no emissiveFactor`);
-  }
-  if (pbr.baseColorFactor === undefined || pbr.metallicFactor === undefined || pbr.roughnessFactor === undefined) {
-    fail(`${label}: emissive node ${entry.emissiveNode} needs baseColorFactor, metallicFactor and roughnessFactor`);
+  if (emissivePrimitive.material !== undefined) {
+    const emissiveMaterial = materials[asNumber(emissivePrimitive.material, `${label} emissive material`)] as Json | undefined;
+    const pbr = (emissiveMaterial?.pbrMetallicRoughness ?? {}) as Json;
+    if (emissiveMaterial?.emissiveFactor === undefined) {
+      fail(`${label}: emissive node ${entry.emissiveNode} has no emissiveFactor`);
+    }
+    if (pbr.baseColorFactor === undefined || pbr.metallicFactor === undefined || pbr.roughnessFactor === undefined) {
+      fail(`${label}: emissive node ${entry.emissiveNode} needs baseColorFactor, metallicFactor and roughnessFactor`);
+    }
   }
   for (const [index, material] of materials.entries()) {
     if (material.textures !== undefined) {
@@ -1606,14 +1633,59 @@ const assemble = (models: readonly ModelDefinition[]): { entries: ManifestEntry[
   return { entries, built };
 };
 
-const build = (): { entries: ManifestEntry[]; built: Map<string, ModelBuild> } => {
-  const { entries, built } = assemble(MODELS);
-  // Every model passed, so the registry can be written as a description of what is on disk.
-  for (const entry of entries) {
+// The second source of `public/models`, read through the client's own registry contract rather than
+// the generator's own parser. The exporter is another project, but the manifest it wrote is the same
+// file the browser parses, so it is held to that parser and to the same structural check and byte
+// count every generated artifact passes. A hand-pasted copy that skipped either of those would
+// otherwise reach the game as a file nobody had looked at.
+const readAccepted = (): ManifestEntry[] => {
+  let parsed: AssetManifest;
+  try {
+    parsed = parseAssetManifest(JSON.parse(readFileSync(ACCEPTED_MANIFEST_PATH, 'utf8')));
+  } catch (error) {
+    return fail(`accepted export: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const entries: ManifestEntry[] = [];
+  for (const entry of parsed.models) {
+    const bytes = readFileSync(join(ACCEPTED_DIR, entry.file));
+    verifyGlb(bytes, entry);
+    // Only the counts are gated here. The geometry bounds stay the client's job, because the generator
+    // measures its own arrays and a file it did not write has to be measured where it is loaded.
+    const failures = checkModelContract({ id: entry.id, bytes: entry.bytes, triangles: entry.triangles });
+    if (failures.length > 0) {
+      fail(`accepted export: budget check refused: ${describeFailures(failures)}`);
+    }
+    entries.push({ ...(entry as ModelManifestEntry) });
+  }
+  return entries;
+};
+
+const build = (): { entries: ManifestEntry[]; own: ManifestEntry[]; built: Map<string, ModelBuild> } => {
+  const { entries: own, built } = assemble(MODELS);
+  const accepted = readAccepted();
+  // One id, one file. The generator and the accepted export both claim `pulse-spire`, and a registry
+  // that listed both would leave the client to choose, so the accepted artifact takes the id: the
+  // models the game shows are the ones that were exported for it. The generated one is still built,
+  // hashed and self-tested, because it is the only model here that carries a skeleton, and the
+  // determinism and clip checks hang on it.
+  const claimed = new Set(accepted.map((entry) => entry.id));
+  const entries = [...own.filter((entry) => !claimed.has(entry.id)), ...accepted];
+  const registryFailures = checkRegistryBudgets(entries);
+  if (registryFailures.length > 0) {
+    fail(`registry budget refused: ${describeFailures(registryFailures)}`);
+  }
+  for (const entry of own) {
+    if (claimed.has(entry.id)) {
+      continue;
+    }
     writeFileSync(join(OUTPUT_DIR, entry.file), (built.get(entry.id) as ModelBuild).bytes);
   }
+  for (const entry of accepted) {
+    writeFileSync(join(OUTPUT_DIR, entry.file), readFileSync(join(ACCEPTED_DIR, entry.file)));
+  }
+  // Last, because it is the description of what the two sources above put on disk.
   writeFileSync(MANIFEST_PATH, `${JSON.stringify({ version: 1, models: entries }, null, 2)}\n`);
-  return { entries, built };
+  return { entries, own, built };
 };
 
 const check = (): ManifestEntry[] => {
@@ -1653,14 +1725,21 @@ const main = (): void => {
     return;
   }
   mkdirSync(OUTPUT_DIR, { recursive: true });
-  const { entries, built } = build();
+  const { entries, own, built } = build();
   check();
+  const published = new Set(entries.map((entry) => entry.contentHash));
+  for (const entry of own) {
+    const note = published.has(entry.contentHash) ? '' : ' · not published, the accepted export claims this id';
+    console.log(`generated ${entry.id}: ${entry.bytes} bytes, ${entry.triangles} triangles, ${entry.contentHash}${note}`);
+  }
   if (mode === '--test') {
-    const first = entries[0];
-    runSelfTest(MODELS[0], first, built.get(first.id) as ModelBuild, entries);
+    // The self-test runs against the generated model and its own entry, not against the published
+    // list: an accepted artifact that took the id would otherwise be verified with bytes it never
+    // had, and the eleven red checks would stop meaning what they mean.
+    runSelfTest(MODELS[0], own[0], built.get(own[0].id) as ModelBuild, entries);
   }
   for (const entry of entries) {
-    console.log(`${entry.id}: ${entry.file} ${entry.bytes} bytes, ${entry.triangles} triangles, ${entry.contentHash}`);
+    console.log(`published ${entry.id}: ${entry.file} ${entry.bytes} bytes, ${entry.triangles} triangles, ${entry.contentHash}`);
   }
   for (const model of MODELS) {
     console.log(`${model.id}: ${describeSkeleton(model)}`);

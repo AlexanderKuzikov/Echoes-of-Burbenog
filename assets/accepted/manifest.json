@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "id": "pulse-spire",
+      "file": "pulse-spire.glb",
+      "bytes": 452644,
+      "contentHash": "sha256:cf50c35271a596ddb262186e184060c36801e18f41e55074f1cfc67aa73b6933",
+      "triangles": 3576,
+      "emissiveNode": "crystal"
+    },
+    {
+      "id": "grove-lens",
+      "file": "grove-lens.glb",
+      "bytes": 144656,
+      "contentHash": "sha256:5527ed71a98945240339a62f1e0d57d7995ebc58c8e8169cf63ffc08353ce964",
+      "triangles": 1132,
+      "emissiveNode": "crystal"
+    },
+    {
+      "id": "frost-relay",
+      "file": "frost-relay.glb",
+      "bytes": 101856,
+      "contentHash": "sha256:fa1802cae2d4fcb0ecda2487b464f8ba7737bb7e1961ea920db571bdc4648103",
+      "triangles": 792,
+      "emissiveNode": "crystal"
+    },
+    {
+      "id": "husk",
+      "file": "husk.glb",
+      "bytes": 152984,
+      "contentHash": "sha256:3fd2b649b90b267f172a45d8ea0969d5c6b2804a82245ae4291a6d284e6b4b7f",
+      "triangles": 1198,
+      "emissiveNode": "core"
+    },
+    {
+      "id": "runner",
+      "file": "runner.glb",
+      "bytes": 172260,
+      "contentHash": "sha256:dddaa4968fa7d4122bc9e520ff97693a21846b61a6ef2fcdd8f700983abad7fb",
+      "triangles": 1351,
+      "emissiveNode": "core"
+    },
+    {
+      "id": "wisp",
+      "file": "wisp.glb",
+      "bytes": 237908,
+      "contentHash": "sha256:3f800e72bd40463e8c4cf401fb16398e4c8ad918804403233e5774e2dc9c48e8",
+      "triangles": 1872,
+      "emissiveNode": "core",
+      "hoverY": 0.16
+    },
+    {
+      "id": "swarmling",
+      "file": "swarmling.glb",
+      "bytes": 131564,
+      "contentHash": "sha256:86a4c2c8af1ff7277fb372a467d9dab0c33aa6038ed8d700a97c0d04207e3384",
+      "triangles": 1028,
+      "emissiveNode": "core"
+    },
+    {
+      "id": "carapace",
+      "file": "carapace.glb",
+      "bytes": 127688,
+      "contentHash": "sha256:3910b0720eabb2736430cdb97b4b1ce1d80877542336a52ce881cc3e31cf416c",
+      "triangles": 997,
+      "emissiveNode": "core"
+    },
+    {
+      "id": "mote",
+      "file": "mote.glb",
+      "bytes": 164308,
+      "contentHash": "sha256:6f2750e78b6fd5cfe4194b8f76b4e1b8f86bb6f13225f4920d4b799960c93e61",
+      "triangles": 1288,
+      "emissiveNode": "core",
+      "hoverY": 0.18
+    },
+    {
+      "id": "maw",
+      "file": "maw.glb",
+      "bytes": 141128,
+      "contentHash": "sha256:2bfc965783367d768a1e2575edea0f646dfd03d3b64178c23ddb9f03e3e90a06",
+      "triangles": 1104,
+      "emissiveNode": "core"
+    }
+  ]
+}

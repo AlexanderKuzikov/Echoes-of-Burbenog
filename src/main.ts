@@ -40,11 +40,13 @@ import {
   MODEL_BUDGET,
   REGISTRY_BUDGET,
   SCENE_BUDGET,
+  WORLD_FOOTPRINT_BUDGET,
   checkClipTargets,
   checkModelContract,
   checkNodeTypes,
   checkRegistryBudgets,
   checkSceneBudget,
+  checkWorldFootprint,
   describeFailures,
   gltfPathForTrack,
   sumRegistry,
@@ -325,7 +327,12 @@ type DebugState = {
   // time are the only non-deterministic numbers here, so a test may only check that they land
   // inside the budget, never their exact value.
   readonly assetBudgets: {
-    budgets: { model: typeof MODEL_BUDGET; registry: typeof REGISTRY_BUDGET; scene: typeof SCENE_BUDGET };
+    budgets: {
+      model: typeof MODEL_BUDGET;
+      registry: typeof REGISTRY_BUDGET;
+      scene: typeof SCENE_BUDGET;
+      worldFootprint: typeof WORLD_FOOTPRINT_BUDGET;
+    };
     checks: AssetChecks;
     failures: string[];
   };
@@ -756,6 +763,38 @@ const readSkeleton = (scene: THREE.Object3D, clips: readonly THREE.AnimationClip
   };
 };
 
+// The ground plane of a loaded model, measured on the tree that was actually parsed: the furthest a
+// vertex reaches from the model's own origin, and the lowest point of its body. Both numbers come
+// from the same walk the node types and the skeleton come from, because they are the same kind of
+// fact — something the file says about itself, which the manifest does not have to repeat and cannot
+// be trusted to.
+//
+// The radius is the file's, not the world's, and the seat multiplier turns it into one. The generator
+// measures the same quantity on the arrays it writes, so the two measurements are in the same units
+// and a file it never built is still compared against the same niche.
+const readFootprint = (root: THREE.Object3D): { fileRadius: number; minY: number } => {
+  let fileRadius = 0;
+  let minY = Number.POSITIVE_INFINITY;
+  // A node may carry its own transform, and a model is measured in the space it will be placed in, so
+  // the vertex is read through the world matrix rather than in the mesh's own frame.
+  root.updateMatrixWorld(true);
+  root.traverse((child) => {
+    const position = (child as THREE.Mesh).geometry?.getAttribute('position');
+    if (position === undefined) {
+      return;
+    }
+    for (let vertex = 0; vertex < position.count; vertex += 1) {
+      footprintVertex.set(position.getX(vertex), position.getY(vertex), position.getZ(vertex)).applyMatrix4(child.matrixWorld);
+      minY = Math.min(minY, footprintVertex.y);
+      fileRadius = Math.max(fileRadius, Math.hypot(footprintVertex.x, footprintVertex.z));
+    }
+  });
+  return { fileRadius: roundMeasure(fileRadius), minY: roundMeasure(Number.isFinite(minY) ? minY : 0) };
+};
+
+const footprintVertex = new THREE.Vector3();
+const roundMeasure = (value: number): number => Number(value.toFixed(5));
+
 const loadModel = async (entry: ModelManifestEntry): Promise<LoadedModel> => {
   const response = await fetch(resolveModelUrl(entry));
   if (!response.ok) {
@@ -774,6 +813,7 @@ const loadModel = async (entry: ModelManifestEntry): Promise<LoadedModel> => {
     triangles: entry.triangles,
     nodeTypes: [],
     skeleton: null,
+    footprint: null,
     contentHash,
   };
   assetRegistry.markCheckPerformed('bytes');
@@ -800,12 +840,25 @@ const loadModel = async (entry: ModelManifestEntry): Promise<LoadedModel> => {
   assetRegistry.markCheckPerformed('nodeTypes');
   const skeleton = readSkeleton(gltf.scene, gltf.animations);
   reading.skeleton = skeleton.reading;
+  // The world gate, and the only one that needs the seat a model is about to be put in. Both
+  // presentation domains own a multiplier — a tower scales its seat, a creature stands in world units
+  // — so the page asks both and takes the answer from whichever claims the id. A model nothing will
+  // ever instantiate has no seat, and the gate stays out of it rather than inventing a number.
+  const geometry = readFootprint(gltf.scene);
+  const seatScale = towers.seatScaleFor(entry.id) ?? enemies.seatScaleFor(entry.id);
+  reading.footprint = {
+    ...geometry,
+    seatScale,
+    worldRadius: seatScale === null ? null : roundMeasure(geometry.fileRadius * seatScale),
+  };
   const failures = [
     ...checkModelContract({ id: entry.id, bytes: entry.bytes, triangles: entry.triangles, ...skeleton.measurement }),
     ...checkNodeTypes(entry.id, nodes),
     ...checkClipTargets(entry.id, skeleton.targets),
+    ...(seatScale === null ? [] : checkWorldFootprint(entry.id, geometry.fileRadius, seatScale)),
   ];
   assetRegistry.markCheckPerformed('modelBudget');
+  assetRegistry.markCheckPerformed('worldFootprint');
   if (failures.length > 0) {
     return refuseModel(entry, reading, describeFailures(failures));
   }
@@ -3609,7 +3662,7 @@ window.__ECHOES_DEBUG__ = {
   },
   get assetBudgets() {
     return {
-      budgets: { model: MODEL_BUDGET, registry: REGISTRY_BUDGET, scene: SCENE_BUDGET },
+      budgets: { model: MODEL_BUDGET, registry: REGISTRY_BUDGET, scene: SCENE_BUDGET, worldFootprint: WORLD_FOOTPRINT_BUDGET },
       checks: assetRegistry.checks,
       failures: [
         ...assetRegistry.modelChecks.flatMap((check) => check.failures),

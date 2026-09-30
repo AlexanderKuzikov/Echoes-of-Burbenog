@@ -16,6 +16,7 @@
     "test": "npm run test:core && npm run test:assets && playwright test",
     "test:core": "tsx scripts/check-simulation.ts",
     "test:assets": "tsx scripts/build-assets.ts --test",
+    "test:nexus": "tsx scripts/check-nexus-models.ts",
     "test:e2e": "playwright test",
     "server": "tsx scripts/serve-session.ts",
     "typecheck": "tsc --noEmit"

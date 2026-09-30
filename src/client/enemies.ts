@@ -16,6 +16,16 @@ export type EnemyView = {
 // where the feet are. A creature is modelled with its feet on y = 0 and reads this as its floor.
 export const ENEMY_BASE_Y = 0.08;
 
+// The multiplier a creature model is measured in, and the one fact that separates an imported model
+// from the form it replaces. Every creature in the accepted export is authored in world units: the
+// seven files are 0.78 x 0.47, 0.27 x 0.80, 0.86 x 0.92, 0.15 x 0.41, 0.89 x 0.70, 0.50 x 0.44 and
+// 0.98 x 0.86, which are the seven world dimensions this roster was accepted with, digit for digit.
+// The procedural forms around them are drawn oversized and pulled down by their own `scale`, so a
+// model stands at 1.0 and the two paths reach the same size on the road — which is what makes the
+// swap invisible, and what would be lost if the file were multiplied by the same number the primitive
+// is.
+const ENEMY_MODEL_SEAT_SCALE = 1;
+
 // The enemy domain: one view per live enemy, its health bar, its slow tint, the idle bob, and the
 // readings the debug seam publishes. `bobOffset` is the largest bob on screen this frame, which is
 // what a reduced-motion test reads to say the drift is actually off.
@@ -23,6 +33,10 @@ export type EnemyPresentation = {
   applySnapshot: (next: MatchSnapshot) => void;
   animate: (elapsed: number, ambientDelta: number) => void;
   positionOf: (entityId: number) => THREE.Vector3 | null;
+  // The multiplier a model of this creature is measured in, for the world footprint gate on load.
+  // Null for an id the roster has no entry for: no view will ever be built for it, so there is no
+  // seat to measure it in and the gate has nothing to compare.
+  seatScaleFor: (enemyId: string) => number | null;
   viewCount: () => number;
   positions: () => Array<{ x: number; z: number }>;
   bobOffset: () => number;
@@ -601,6 +615,7 @@ export const createEnemies = (scene: THREE.Scene): EnemyPresentation => {
     // The live position of an enemy body, handed to the tower that shot it and to the burst that
     // marks its death. The vector is the view's own, so the caller reads it before the next snapshot.
     positionOf: (entityId: number) => enemyViews.get(entityId)?.group.position ?? null,
+    seatScaleFor: (enemyId: string) => (enemyLooks[enemyId] === undefined ? null : ENEMY_MODEL_SEAT_SCALE),
     viewCount: () => enemyViews.size,
     positions: () => Array.from(enemyViews.values(), (view) => ({ x: view.group.position.x, z: view.group.position.z })),
     bobOffset: () => enemyBobOffset,

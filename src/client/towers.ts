@@ -63,6 +63,8 @@ export type TowerClip = {
 export type TowerView = {
   towerId: string;
   group: THREE.Group;
+  // The lit part of a tower and the only node the client animates on a model: the mesh whose material
+  // carries the glow and whose scale answers a shot.
   crystal: THREE.Mesh;
   crystalMaterial: THREE.MeshStandardMaterial;
   // The idle bob is measured from wherever the emissive node starts, so a loaded model and
@@ -100,6 +102,11 @@ export type TowerPresentation = {
   upgradeWithModels: (presentationTime: number) => void;
   resetFired: () => void;
   setReducedMotion: (reduced: boolean) => void;
+  // The multiplier the seat of this tower will scale a model by, which is the number the world
+  // footprint gate measures a model against before it is ever put on screen. Every id in the look
+  // table has a seat, including the one no table has an entry for, because an unknown tower still
+  // stands somewhere.
+  seatScaleFor: (towerId: string) => number;
   viewCount: () => number;
   positions: () => Array<{ x: number; z: number }>;
   modelReadings: () => TowerModelReading[];
@@ -482,12 +489,16 @@ const towerLooks: Record<string, TowerLook> = {
     stem: 0x346f75,
     roof: 0xd29b62,
     lip: 0xd29b62,
-    // The artifact owns this tower's shape, and that shape is a drum with a cone on it: 1.29 tall
-    // against 1.12 wide, so it is the one tower here that cannot be made to read as tall by scaling
-    // alone without becoming a 2.6-unit-wide drum. `rise` is the one place a single tower's
-    // proportions may be answered, and it is the only field of the three looks that is not one.
-    scale: 1.7,
-    rise: 1.5,
+    // The seat of this tower is two numbers, and both of them are set by the model that now stands in
+    // it rather than by the form it replaced. The width is the world gate: the artifact reaches 0.70045
+    // from its own origin, so 1.42 puts it at 0.99464 in the world, inside the 1.00 a niche allows and
+    // against the 2.02-wide tower the procedural drum used to occupy. The height is what the drum was
+    // doing with `rise: 1.5`, and the artifact does not need it: the file is 3.2 tall against 1.4 wide
+    // where the drum was 1.61 against 1.19, so the same 4.91 world height is reached with 0.9. The
+    // procedural form still stands in this seat as the fallback, and it now stands at half the height
+    // it used to — the price of a seat that belongs to the artifact, paid only while a model is missing.
+    scale: 1.42,
+    rise: 0.9,
     tiltX: 0.02,
     tiltZ: 0.03,
     nod: 0,
@@ -505,8 +516,12 @@ const towerLooks: Record<string, TowerLook> = {
     stem: 0x24543a,
     roof: 0x2f7d52,
     lip: 0x7ff0b0,
-    scale: 1.25,
-    rise: 1,
+    // 0.8362 from its own origin, so 1.15 puts it at 0.96163 in the world; the canopy it replaces was
+    // 1.8 wide in the world and this is 1.92, which is the same tower on a slightly wider file. `rise`
+    // answers the same thing here as it does on the spire: the file is 2.9 tall where the procedural
+    // canopy stood at 2.23, so the height the board was opened with, 3.35, needs 0.84 of it.
+    scale: 1.15,
+    rise: 0.84,
     tiltX: 0,
     tiltZ: 0.02,
     // A canopy on a leaning stem does not bob, it sweeps. The body already carries its lean, so all
@@ -530,8 +545,14 @@ const towerLooks: Record<string, TowerLook> = {
     // tall without becoming a solid mass, which is what keeps it off the spire's outline, and the
     // bright steel is what keeps it off the stone: this board is cold and mid-value everywhere, and
     // the one tower built out of near-white bars is the one the eye finds first.
-    scale: 1.8,
-    rise: 1,
+    // The gate is what moves this tower the most: the file reaches 1.01021 from its origin, deeper than
+    // the 0.85 the primitive was held to, so at the old 1.8 it stood 1.82 in the world — on the stone
+    // in front of the next niche, which is the whole reason the world gate exists. 0.98 brings it to
+    // 0.99001 and, in doing so, turns a wide A-frame into what this tower was accepted as being: a
+    // narrow upright with a hole in it, 1.72 wide and 1.96 deep. `rise` puts the height back, 3.73
+    // against the 3.75 the frame used to reach.
+    scale: 0.98,
+    rise: 1.22,
     tiltX: 0,
     tiltZ: 0,
     nod: 0,
@@ -906,6 +927,7 @@ export const createTowers = (
         view.clip.action.stop();
       }
     },
+    seatScaleFor: (towerId: string) => lookOf(towerId).scale,
     viewCount: () => towerViews.size,
     positions: () => Array.from(towerViews.values(), (view) => ({ x: view.group.position.x, z: view.group.position.z })),
     modelReadings: () =>

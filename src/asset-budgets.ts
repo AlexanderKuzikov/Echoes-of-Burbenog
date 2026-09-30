@@ -81,6 +81,23 @@ export const SCENE_BUDGET: SceneBudget = {
   assetLoadMs: 1_500,
 };
 
+// The one size limit that is compared with the world instead of with the file. `footprintRadius`
+// above answers "how far does this artifact reach", and it is a file-space question: the client puts
+// a model into a seat that multiplies it, so a file that passes can still land outside the pad it was
+// placed on. The number is the world half-width of a build niche (2.0 x 2.0), and it is checked by
+// the client rather than by the generator, because the generator only ever sees its own primitives.
+//
+// The two limits live in the same table on purpose. They are different coordinates of the same fact,
+// and the decision that moved the tower contract into the world is what made them two numbers instead
+// of one: a model refused here would have been accepted on its own terms by every other gate.
+export type WorldFootprintBudget = {
+  radius: number;
+};
+
+export const WORLD_FOOTPRINT_BUDGET: WorldFootprintBudget = {
+  radius: 1.0,
+};
+
 // What the client can instantiate out of a loaded model. A node type outside this set is refused on
 // load, because the client walks a known tree and nothing tells it how to reproduce a light node or
 // a point cloud. `SkinnedMesh` and `Bone` are in the set because `SkeletonUtils.clone` rebuilds the
@@ -270,6 +287,33 @@ export const checkClipTargets = (
       parameter: 'clipTarget',
       reason: `${modelId}: clip ${target.clip} animates ${target.node} .${target.path}; the client plays only ${joinList(supported)}`,
     }));
+
+// The world's own answer to "how big is this model", and the only gate a foreign artifact can reach:
+// the file radius is measured on the loaded tree and the seat multiplier is the one the client is
+// about to put it in, so the number compared here is the width a player would actually see. The
+// refusal names all three, because "too big" without the arithmetic is a shrug.
+export const checkWorldFootprint = (
+  modelId: string,
+  fileRadius: number,
+  seatScale: number,
+  budget: WorldFootprintBudget = WORLD_FOOTPRINT_BUDGET,
+): AssetFailure[] => {
+  const worldRadius = fileRadius * seatScale;
+  if (worldRadius <= budget.radius) {
+    return [];
+  }
+  return [
+    {
+      modelId,
+      parameter: 'world footprint radius',
+      reason:
+        `${modelId}: world footprint radius is ${round(worldRadius)} ` +
+        `(file radius ${round(fileRadius)} x seat ${seatScale}), the world allows ${budget.radius}`,
+    },
+  ];
+};
+
+const round = (value: number): number => Number(value.toFixed(5));
 
 export const checkSceneBudget = (reading: SceneReading, budget: SceneBudget = SCENE_BUDGET): AssetFailure[] => {
   const failures: AssetFailure[] = [];
