@@ -485,11 +485,19 @@ const enemyLooks: Record<string, EnemyLook> = {
     motion: { bob: 0.008, bobRate: 0.55, sway: 0.022, swayRate: 0.42, yaw: 0.05, yawRate: 0.24 },
     // The one kind the frame asked for. Its body is a dome, so the whole of what the player sees is the
     // face that looks straight into the key light, and at the file's own value it came out the lightest
-    // large body on the board — the exact opposite of what  027 separated it by, when this kind was
+    // large body on the board — the exact opposite of what EOB-027 separated it by, when this kind was
     // chosen to be the one dark shell in the roster. 0.5 puts it back under the maw.
-    modelBodyTone: 0.5,
-    modelAccentTone: 1,
-    modelAccentGlow: 0.8,
+    //
+    // Measured, that 0.5 is too much of a pull: the file's body is 0.160 in linear light, the second
+    // darkest in the roster, and its accent is 0.337 — twice its own body. Darkening a body that is
+    // already dark and leaving the accent where it is does not make the shell read, it makes the
+    // crystal the only thing there is. 0.75 lifts the shell back into the band its neighbours are in
+    // while keeping it the darkest of the seven, which is the property EOB-035 depends on.
+    modelBodyTone: 0.75,
+    // 0.6 against the body's 0.75: the plough is still the brightest mark on this creature, and it is
+    // no longer the first thing the eye finds.
+    modelAccentTone: 0.6,
+    modelAccentGlow: 0.55,
     form: buildCarapace,
   },
   mote: {

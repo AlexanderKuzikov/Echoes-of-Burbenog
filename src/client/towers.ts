@@ -226,6 +226,15 @@ type TowerLook = {
   // place our palette can act: with `vertexColors` the colour on screen is `material.color x COLOR_0`,
   // which makes the whole of a role's palette one number. `0` is not "leave it alone", it is black, so
   // a role the file got right and we want as it is carries 1.
+  //
+  // The two numbers exist to hold one order of reading, and the order is the whole point. Measured on
+  // the accepted files, in linear light: the bodies of the three towers sit at 0.236, 0.380 and 0.430,
+  // their accents at 0.310, 0.331 and 0.824. `frost-relay`'s accent is therefore 1.9 times its own body
+  // before we multiply anything, and at 0.8 on the accent against 0.45 on the body it arrived on screen
+  // as a white blob with a gate hidden behind it — the eye took the light and never got to the shape.
+  // The body is raised and the accent is lowered, which is the same statement in two numbers: the mass
+  // is the subject, the gem is a highlight on it. Neither number is "correct" alone; the pair is what
+  // puts form before light.
   modelTone: number;
   modelAccentTone: number;
   build: (seat: THREE.Object3D, look: TowerLook) => THREE.Mesh;
@@ -527,13 +536,15 @@ const towerLooks: Record<string, TowerLook> = {
     bob: 0.07,
     roll: 0.05,
     breath: 0,
-    // The artifact is the brightest thing on the board as it arrives — its body averages 0.57 on the
-    // red channel and half its vertices are above 0.8 — and it is lit with the full probe, so without
-    // a number here it stands in front of the map instead of on it. 0.42 puts the body back into the
-    // band the procedural drum was painted in, and the gem keeps 0.8 because an accent is supposed to
-    // be the brightest thing on its own tower.
-    modelTone: 0.55,
-    modelAccentTone: 0.8,
+    // The artifact's body is the darkest of the three towers — 0.236 in linear light, and it arrives
+    // with a tenth of its vertices at full white — so it takes the largest lift of the three. 1.05 puts
+    // its lit mass on top of the board's own value, which is the point: a silhouette the eye can only
+    // find by looking for a light is not a silhouette.
+    modelTone: 1.05,
+    // The gem is bright by construction and is given an emissive on top of that, so it does not need
+    // 0.8 to be the brightest pixel of its own model — it needs to stop being the brightest thing in the
+    // frame. 0.19 leaves it unmistakably the lit crystal on top of a spire and nothing more.
+    modelAccentTone: 0.19,
     build: spireBody,
   },
   'grove-lens': {
@@ -559,10 +570,15 @@ const towerLooks: Record<string, TowerLook> = {
     bob: 0.02,
     roll: 0,
     breath: 0.35,
-    // Same argument as the spire's, and a slightly lower number: this file's body is lighter than the
-    // spire's on two of its three channels, and its legs were the palest thing in the first frame.
-    modelTone: 0.5,
-    modelAccentTone: 0.8,
+    // Same argument as the spire's, and this file's body is the second darkest of the three at 0.380
+    // against the spire's 0.236, so it takes the same lift. The two land on one mass on purpose: they
+    // are told apart by outline, which is what `0028` bought, and a difference of brightness between
+    // them would be a difference of brightness the player has to learn instead.
+    modelTone: 1.05,
+    // Its crystal averages 0.331, a shade darker than the spire's gem, but it is a broad disc rather
+    // than a point and a disc covers more of the frame at any given value. 0.18 keeps the rim lit and
+    // drops the disc back to a highlight.
+    modelAccentTone: 0.18,
     build: lensBody,
   },
   'frost-relay': {
@@ -594,11 +610,17 @@ const towerLooks: Record<string, TowerLook> = {
     roll: 0.09,
     breath: 0.28,
     // The relay's struts are the whitest thing in the accepted set and they were the first thing to
-    // leave the board in the first frame, so it takes the strongest pull of the three. Its base ring is
-    // the one warm note the export gave us and it is worth keeping at 0.7 rather than dimming with the
-    // frame — that ring is what tells the tower apart from the stone it stands on.
-    modelTone: 0.45,
-    modelAccentTone: 0.8,
+    // leave the board in the first frame, so it takes the smallest lift of the three: its body already
+    // measures 0.430 in linear light, the lightest of the towers. 0.8 keeps it clear of white under the
+    // key light, which is what 0.45 was bought for, and still leaves the mass reading.
+    modelTone: 1,
+    // The one accent that was genuinely out of order, and the reason this whole direction is measurable
+    // rather than a matter of taste: the file's crystal averages 0.824 in linear light — near-white, and
+    // 1.9 times its own body — so at 0.8 it was a white blob with a gate hidden behind it, and the
+    // player's first read of this tower was a sphere. 0.07 is the smallest pull that clears it: the lit
+    // gem drops under the body's own value and the A-frame comes back. The warm base ring is part of the
+    // same node, and that ring is what tells the tower off the stone, so this is not driven to zero.
+    modelAccentTone: 0.07,
     build: relayBody,
   },
 };
