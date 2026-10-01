@@ -485,7 +485,7 @@ const createDevDiagnostics = (): DevDiagnostics => {
   kicker.textContent = 'Dev diagnostics · ?dev';
   element.append(kicker);
   const rows: Record<string, HTMLElement> = {};
-  for (const key of ['scene', 'model', 'registry', 'checks']) {
+  for (const key of ['scene', 'model', 'models', 'registry', 'checks']) {
     const row = document.createElement('p');
     row.dataset.diag = key;
     element.append(row);
@@ -898,11 +898,17 @@ const loadModel = async (entry: ModelManifestEntry): Promise<LoadedModel> => {
 // exact value to compare.
 const viewportRefusal = (reason: string): string => reason.replace(/(sha256:)([0-9a-f]{8})[0-9a-f]+/gi, '$1$2…');
 
-// Two surfaces, one source. What a player reads is the state of the match, the models that came
-// with it and whether the artifact was checked; every number this machine measured — scene budgets,
-// renderer counters, load time, which checks ran — is developer information. A budget is measured
-// on the build machine and is not a promise to a player on a slow connection, so printing it in
-// the status line would be a false alarm dressed as a trustworthy status.
+// Two surfaces, one source. What a player reads is the state of the match, how many models came with
+// it, what they are made of and whether the artifact was checked; every number this machine measured —
+// scene budgets, renderer counters, load time, which checks ran — is developer information. A budget is
+// measured on the build machine and is not a promise to a player on a slow connection, so printing it
+// in the status line would be a false alarm dressed as a trustworthy status.
+//
+// The line counts and names the split instead of listing ten ids. `0013` promised one line, and ten
+// names do not fit on one: the chip wrapped to two and walked left over the sector caption, which is
+// the exact regression that promise was made to prevent. A count and a split say everything a player
+// needs from this line — ten models arrived, three of them towers, seven creatures — and the names
+// stay where detail belongs, in the `?dev` block.
 const gameplayStatus = (): string => {
   const status = assetRegistry.status;
   if (status === 'ready') {
@@ -911,7 +917,12 @@ const gameplayStatus = (): string => {
     const integrity = assetRegistry.checks.performed.contentHash
       ? 'integrity checked'
       : `content hash not checked (${assetRegistry.modelChecks.find((check) => check.contentHash.skippedReason)?.contentHash.skippedReason ?? 'no reason given'})`;
-    return `Scene online · models ready (${assetRegistry.modelIds.join(', ')}) · ${integrity}`;
+    const ids = assetRegistry.modelIds;
+    // The same two seat lookups the world gate uses to decide which seat a model goes into: a model
+    // with an enemy seat is a creature, and everything else is a tower. Inventing a third list here
+    // would be one more place to forget a name in.
+    const creatures = ids.filter((id) => enemies.seatScaleFor(id) !== null).length;
+    return `Scene online · ${ids.length} models (${ids.length - creatures} towers · ${creatures} creatures) · ${integrity}`;
   }
   if (status === 'error') {
     return `Scene online · model registry failed: ${viewportRefusal(assetRegistry.error ?? 'unknown reason')}`;
@@ -943,6 +954,12 @@ const paintDevDiagnostics = () => {
     ? `Scene ${scene.drawCalls}/${SCENE_BUDGET.drawCalls} calls · ${scene.renderedTriangles}/${SCENE_BUDGET.renderedTriangles} tris · ${scene.shaderPrograms}/${SCENE_BUDGET.shaderPrograms} programs · ${Math.round(scene.assetLoadMs)}/${SCENE_BUDGET.assetLoadMs} ms load`
     : 'Scene not measured yet';
   devDiagnostics.rows.model!.textContent = modelLine;
+  // The names of all ten, which is what the status line gave up when it started counting instead of
+  // listing. The chip is one line of viewport chrome; this is a `?dev` block in the dock, and a list of
+  // ids belongs to the surface that is allowed to grow.
+  devDiagnostics.rows.models!.textContent = assetRegistry.modelIds.length > 0
+    ? `Models ${assetRegistry.modelIds.join(', ')}`
+    : 'Models none loaded';
   devDiagnostics.rows.registry!.textContent = registry
     ? `Registry ${registry.models}/${REGISTRY_BUDGET.models} models · ${registry.bytes}/${REGISTRY_BUDGET.bytes} B · ${registry.triangles}/${REGISTRY_BUDGET.triangles} tris`
     : 'Registry not measured yet';
