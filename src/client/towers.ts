@@ -152,31 +152,34 @@ const towerSeatHeight = 0.14;
 // puts the artifact into this same seat and a difference here would be a jump in the picture.
 const towerHeightCompensation = 1.2;
 
-// What a growth level looks like from the outside: how much broader, and how much taller, a tower
-// stands than it did at level 1. Ten numbers each, level 1 first, and level 1 is 1.00 in both — so the
-// picture a match opens on is byte for byte the one `0028` was accepted for, and a tower only starts
-// to move once it has actually killed something.
+// What a growth level looks like from the outside: how much taller a tower stands than it did at
+// level 1. Ten numbers, level 1 first, and level 1 is 1.00 — so the picture a match opens on is byte
+// for byte the one `0037` was accepted for, and a tower only starts to move once it has actually
+// killed something.
 //
-// Two numbers and no colour, and that is a decision rather than a shortage. `0028` moved these three
-// towers apart on silhouette and proportion after a difference of colour had already failed once, and
-// at the 11.19 pixels a unit that a match is actually played at, a hue is not a distance anything
-// survives. A levelled tower has to be told from an unlevelled one across the board, so it is told by
-// standing differently.
+// Height only. There is no width table and that is the invariant, not a shortage: the world gate
+// allows a tower a footprint radius of 1.00, the seat multiplier is chosen so that the artifact
+// reaches 0.99464 / 0.96163 / 0.99001 in the world on level 1, and width growth was the only thing
+// that could break that number — at the 1.228 this table used to end on, the same three files stood
+// at 1.2213, 1.1809 and 1.2157, that is 18 to 22 per cent of a tower standing on the stone in front
+// of the next niche. The gate measures the seat on load, where the level is 1, and rewriting it to
+// know about growth would mean refusing a model out of the player's hands on the tenth level. So the
+// invariant holds the only way it can: width does not grow, and height is free to.
 //
-// Height is given more of the growth than width, and the reason is what the two would mean. A tower
-// that only got wider would read as a different tower type — a fatter spire, a broader gate — and
-// the player's first reading of a board is which of the three it is looking at. A tower that got
-// taller reads as the same tower carrying more of itself, which is what growing is. The last level
-// is 1.23 wide and 1.56 tall, and on a 37-pixel tower that is about 58 pixels: enough that the two
-// ends of the table cannot be confused, and not so much that a late board of grown towers closes
-// over the road it is supposed to be covering.
-const towerGrowthWidth = [1, 1.024, 1.049, 1.074, 1.1, 1.126, 1.152, 1.178, 1.203, 1.228] as const;
+// What is lost is the smaller of two growth signals, and it is the smaller one. Height still grows
+// 1.56 against a width of 1.00, so "this tower grew" is still on screen as a change of proportion —
+// on a 37-pixel tower the last level is about 58 pixels — and only the addition to the width is gone.
+//
+// Size and no colour, and that is a decision rather than a shortage. `0028` moved these three towers
+// apart on silhouette and proportion after a difference of colour had already failed once, and at the
+// pixels a unit that a match is actually played at, a hue is not a distance anything survives. A
+// levelled tower has to be told from an unlevelled one across the board, so it is told by standing
+// differently.
 const towerGrowthHeight = [1, 1.057, 1.116, 1.176, 1.238, 1.3, 1.363, 1.428, 1.493, 1.56] as const;
 
 // The level a snapshot gave, read off a table that is never asked for a level it does not have. A
 // level out of range falls back to the ends rather than to `undefined`: a tower with an unreadable
 // level has to stand at one size or the other, and level 1 is the one that costs nothing.
-const growthWidthAt = (level: number): number => towerGrowthWidth[level - 1] ?? towerGrowthWidth[0];
 const growthHeightAt = (level: number): number => towerGrowthHeight[level - 1] ?? towerGrowthHeight[0];
 
 // One clip per view, started at a slot-derived offset instead of at a random moment. The offset
@@ -751,11 +754,16 @@ export const createTowers = (
   // skinned mesh keeps its bind inverse in step with its own world matrix, so the seat's scale and
   // lean reach a model exactly once and land on a procedural tower exactly once, which is what makes
   // the swap in place invisible.
+  //
+  // The horizontal pair carries no growth at all, and that is the gate holding: `look.scale` is the
+  // number the world footprint check compared at load, and multiplying it by a level-dependent width
+  // is what put all three accepted files over 1.00 by the tenth level. The vertical axis answers
+  // growth on its own, and the camera flattens height anyway.
   const seatScale = (look: TowerLook, level: number): THREE.Vector3 =>
     new THREE.Vector3(
-      look.scale * growthWidthAt(level),
+      look.scale,
       look.scale * towerHeightCompensation * look.rise * growthHeightAt(level),
-      look.scale * growthWidthAt(level),
+      look.scale,
     );
 
   const createTowerView = (

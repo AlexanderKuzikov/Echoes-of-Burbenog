@@ -372,6 +372,12 @@ const TOWER_SEAT_SCALE: Readonly<Record<string, number>> = {
 const CREATURE_IDS = ['husk', 'runner', 'wisp', 'swarmling', 'carapace', 'mote', 'maw', 'unknown'] as const;
 const CREATURE_SEAT_SCALE = 1;
 
+// The broadest the seat of a tower ever gets, as a multiplier of the width the world gate was given.
+// It is 1, and it is written down rather than assumed: this is the number that used to be 1.228 and
+// put all three files over the niche, so the table that prints the level-10 column and the run that
+// refuses it both have to name a value instead of reading a truth that lives in another module.
+const TOWER_GROWTH_WIDTH_AT_LEVEL_10 = 1;
+
 const seatScaleFor = (id: string): number | null =>
   TOWER_SEAT_SCALE[id] ?? ((CREATURE_IDS as readonly string[]).includes(id) ? CREATURE_SEAT_SCALE : null);
 
@@ -494,21 +500,38 @@ const main = (): void => {
   // Every model has to pass the world gate in the seat the client will put it in, through the same
   // predicate `loadModel` calls. The run fails here if any of the ten would be refused in the browser,
   // which is the whole point of moving the gate off the build: the build only sees its own primitives.
+  //
+  // A tower is measured twice, and the second column is the one that used to be missing. The gate
+  // compares the seat as it stands on load, where the level is 1, and a level-10 seat is the same
+  // width by decision — so the two numbers have to be printed side by side for the invariant to be
+  // visible rather than asserted. A creature has no levels and carries its own file radius across.
   const table = readings.map((reading) => {
     const entry = manifest.models.find((candidate) => candidate.id === reading.id) as ModelManifestEntry;
     const seat = seatScaleFor(reading.id);
     if (seat === null) {
       fail(`${reading.id} has no seat, so nothing will ever instantiate it and the registry is carrying a file for nothing`);
     }
+    const isTower = TOWER_SEAT_SCALE[reading.id] !== undefined;
+    const grownSeat = isTower ? seat * TOWER_GROWTH_WIDTH_AT_LEVEL_10 : seat;
     const world = round5(reading.fileRadius * seat);
+    const worldGrown = round5(reading.fileRadius * grownSeat);
     const gated = checkWorldFootprint(reading.id, reading.fileRadius, seat);
     if (gated.length > 0) {
       fail(`${reading.id} would be refused by the world gate: ${describeFailures(gated)}`);
     }
+    // The gate is one predicate, and the level-10 seat goes through the same one: a tower that is
+    // inside a niche on level 1 and outside it on level 10 is exactly the defect this column exists
+    // for, and a run that only compared the load-time number would call that tree green.
+    const grownGated = checkWorldFootprint(reading.id, reading.fileRadius, grownSeat);
+    if (grownGated.length > 0) {
+      fail(`${reading.id} would be refused by the world gate at level 10: ${describeFailures(grownGated)}`);
+    }
     const hover = entry.hoverY === undefined ? 'on the ground' : `hover ${entry.hoverY}`;
     return (
       `${reading.id.padEnd(12)} file radius ${String(reading.fileRadius).padStart(7)} x seat ${String(seat).padStart(4)} ` +
-      `= world ${String(world).padStart(6)} / ${WORLD_FOOTPRINT_BUDGET.radius} · height ${String(reading.height).padStart(6)} · ` +
+      `= world ${String(world).padStart(6)} / ${WORLD_FOOTPRINT_BUDGET.radius} · ` +
+      `world at L10 ${String(worldGrown).padStart(6)} / ${WORLD_FOOTPRINT_BUDGET.radius} · ` +
+      `height ${String(reading.height).padStart(6)} · ` +
       `${hover.padEnd(13)} · ${String(reading.triangles).padStart(4)} tris, ${entry.emissiveNode} ${reading.emissiveTriangles} · ` +
       `degenerate ${reading.degenerateTriangles}`
     );
@@ -528,6 +551,35 @@ const main = (): void => {
       () => parseAssetManifest(broken),
       /model registry field models\[0\]\.hoverY must be a number when present/,
       `${label}, refused by the registry contract`,
+    );
+  }
+
+  // The growth seat, refused. This is the red run the whole level-10 column rests on, and it does not
+  // invent a model: it takes a tower that is inside its niche today and multiplies the seat by the
+  // width growth that used to be in the table. `pulse-spire` is the worst of the three at 0.99464 —
+  // 0.5 per cent of headroom — so it crosses first, and the refusal has to come back with the same
+  // three numbers the gate names. If this run were ever to pass, the column above would be printing
+  // a number no check looks at.
+  {
+    const id = 'pulse-spire';
+    const reading = readings.find((candidate) => candidate.id === id) as ModelReading;
+    const seat = seatScaleFor(id) as number;
+    const widened = round5(seat * 1.228);
+    const worldGrown = round5(reading.fileRadius * widened);
+    const gated = checkWorldFootprint(id, reading.fileRadius, widened);
+    if (gated.length === 0) {
+      fail(
+        `red check: a ${id} seat grown to ${widened} in width stands at world radius ${worldGrown}, ` +
+          `which the gate of ${WORLD_FOOTPRINT_BUDGET.radius} accepted`,
+      );
+    }
+    console.log(`  level-10 seat: ${id} x ${widened} = world ${worldGrown}, over the gate`);
+    expectRefusal(
+      () => {
+        throw new Error(describeFailures(gated));
+      },
+      new RegExp(`${id}: world footprint radius is ${String(worldGrown).replace('.', '\\.')}[^;]*the world allows ${WORLD_FOOTPRINT_BUDGET.radius}`),
+      `${id} at a width-grown level-10 seat, refused with its numbers`,
     );
   }
 
