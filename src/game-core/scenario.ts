@@ -177,19 +177,26 @@ export { towerGrowthPointsPerKill };
 // **Where the numbers come from, so they can be checked instead of believed.** The drawing is 1241
 // pixels square and holds four colours: green plate, grey road, dark base, white outside. The plate
 // is the green rectangle at pixels 30..1209 by 31..1210, that is 1180 by 1180 of it, and its centre is
-// (619.5, 620.5) — which is also the centre of the base square, measured the same way. Taking the
-// plate as the ninety-six units the game already has puts one unit at 1180 / 96 = 12.2917 pixels, and
-// every number below is `(pixel - centre) / 12.2917`. The twenty segments were read off the drawing by
-// scanning it for runs of the road colour in both directions, and the road was measured at 58 pixels
-// (4.72 units) and the base at 117 (9.52); the widths in this table are the owner's own — 4.8 and 9 —
-// which is within two pixels of the drawing at this scale and is the design value rather than the
-// measurement of a drawn rectangle.
+// (619.5, 620.5). Taking the plate as the ninety-six units the game already has puts one unit at
+// 1180 / 96 = 12.2917 pixels. The base square measures out at pixels 561..678 by 562..679 — the same
+// centre to the same half pixel, and one pixel further down on the second axis, which is the whole of
+// the reason the table below is a rule and not a pixel reading.
 //
-// The one thing done to the table beyond the conversion is clamping four ends to the edge of the
-// plate. The drawing runs its four entrances past the green into the white margin, because a road that
-// stops inside the map is a road that goes nowhere; here the plate is 96 by 96 and there is nothing
-// outside it to run over, so the same four ends sit on ±48 and the entrances leave the map exactly at
-// its border. They are marked in the table.
+// **The rule behind the twenty segments, and there is one.** Every end of a segment butts against the
+// edge of whatever it joins: the edge of the carriageway (the extreme 2.4 to a side of the line), the
+// edge of the base (±4.8), or the edge of the plate (±48). No other reading of the ends is available
+// for any of the twenty, and the table below is produced by that rule rather than read off the file
+// pixel by pixel — a pixel reading leaves the export's own noise in the data, up to 0.12 of a unit,
+// because the PNG export offsets the two axes against each other by one pixel. The lane grid is
+// therefore `0, ±14.4, ±26.4, ±40.8` and not the `±40.84 / ±26.44 / -0.08` a reading gives.
+//
+// The base is 9.6 by 9.6, which is exactly two road widths, and the drawing agrees: a dark square of
+// 118 pixels, that is 9.60.
+//
+// Four ends sit on the edge of the plate. The drawing runs its four entrances past the green into the
+// white margin, because a road that stops inside the map is a road that goes nowhere; here the plate is
+// 96 by 96 and there is nothing outside it to run over, so the same four ends sit on ±48 and the
+// entrances leave the map exactly at its border. They are marked in the table.
 //
 // Axis `z` grows downwards, the same way it grows down the drawing.
 // ---------------------------------------------------------------------------------------------
@@ -209,32 +216,32 @@ export const trainingRoadNetwork: RoadNetworkDefinition = {
   // 4.8 wide, so 2.4 to a side. It was 0.6 — the road grew fourfold and every coverage number the
   // old map was designed in moves with it.
   roadHalfWidth: 2.4,
-  // The base is a 9 by 9 square on the origin, which is also where two lanes cross: one along z = 0
-  // and one along x = 0, so the road comes into it from all four sides.
-  baseHalf: 4.5,
+  // The base is a 9.6 by 9.6 square on the origin, which is also where two lanes cross: one along
+  // z = 0 and one along x = 0, so the road comes into it from all four sides.
+  baseHalf: 4.8,
   horizontal: [
-    { z: -40.84, x0: -43.16, x1: -24.04 },
-    { z: -40.84, x0: 24.12, x1: 43.24 },
-    { z: -26.44, x0: -48, x1: 43.24 },        // west entrance, on the edge of the plate
-    { z: -14.4, x0: -23.96, x1: 2.4 },
-    { z: -0.08, x0: -16.72, x1: -4.76 },        // into the base from the west
-    { z: -0.08, x0: 4.84, x1: 16.8 },           // out of the base to the east
-    { z: 14.4, x0: -2.32, x1: 24.04 },
-    { z: 26.4, x0: -43.16, x1: 48 },           // east entrance, on the edge of the plate
-    { z: 40.84, x0: -43.16, x1: -23.96 },
-    { z: 40.84, x0: 24.12, x1: 43.24 },
+    { z: -40.8, x0: -43.2, x1: -24.0 },
+    { z: -40.8, x0: 24.0, x1: 43.2 },
+    { z: -26.4, x0: -48.0, x1: 43.2 },        // west entrance, on the edge of the plate
+    { z: -14.4, x0: -24.0, x1: 2.4 },
+    { z: 0.0, x0: -16.8, x1: -4.8 },          // into the base from the west
+    { z: 0.0, x0: 4.8, x1: 16.8 },            // out of the base to the east
+    { z: 14.4, x0: -2.4, x1: 24.0 },
+    { z: 26.4, x0: -43.2, x1: 48.0 },         // east entrance, on the edge of the plate
+    { z: 40.8, x0: -43.2, x1: -24.0 },
+    { z: 40.8, x0: 24.0, x1: 43.2 },
   ],
   vertical: [
-    { x: -40.84, z0: -43.16, z1: -24.04 },
-    { x: -40.84, z0: 24.12, z1: 43.24 },
-    { x: -26.4, z0: -43.16, z1: 48 },           // south entrance, on the edge of the plate
-    { x: -14.4, z0: -2.4, z1: 24.04 },
-    { x: 0, z0: -16.72, z1: -4.76 },            // into the base from the north
-    { x: 0, z0: 4.84, z1: 16.8 },               // out of the base to the south
-    { x: 14.4, z0: -28.76, z1: 2.4 },
-    { x: 26.44, z0: -48, z1: 43.24 },           // north entrance, on the edge of the plate
-    { x: 40.84, z0: -43.16, z1: -24.04 },
-    { x: 40.84, z0: 24.04, z1: 43.24 },
+    { x: -40.8, z0: -43.2, z1: -24.0 },
+    { x: -40.8, z0: 24.0, z1: 43.2 },
+    { x: -26.4, z0: -43.2, z1: 48.0 },         // south entrance, on the edge of the plate
+    { x: -14.4, z0: -2.4, z1: 24.0 },
+    { x: 0.0, z0: -16.8, z1: -4.8 },           // into the base from the north
+    { x: 0.0, z0: 4.8, z1: 16.8 },             // out of the base to the south
+    { x: 14.4, z0: -28.8, z1: 2.4 },
+    { x: 26.4, z0: -48.0, z1: 43.2 },         // north entrance, on the edge of the plate
+    { x: 40.8, z0: -43.2, z1: -24.0 },
+    { x: 40.8, z0: 24.0, z1: 43.2 },
   ],
 };
 
