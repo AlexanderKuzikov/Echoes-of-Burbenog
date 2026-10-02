@@ -3,7 +3,7 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { TICK_RATE, createSimulation, createTrainingScenario } from './game-core/index.ts';
 import type { Command, CommandResult, MatchSnapshot, MatchStatus, SimulationEvent } from './game-core/index.ts';
-import { createMap, createMinimap, WALL_HEIGHTS } from './client/map.ts';
+import { createMap, createMinimap } from './client/map.ts';
 import { createTowers } from './client/towers.ts';
 import type { LoadedModel, TowerClipReading, TowerModelReading } from './client/towers.ts';
 import { createEnemies } from './client/enemies.ts';
@@ -599,11 +599,17 @@ const fillLight = new THREE.PointLight(0x2ac7b5, 3.2, 12, 2);
 fillLight.position.set(4, 3, -4);
 scene.add(fillLight);
 
+// The plate: one flat quad, the whole of the ground, and the only thing the map is drawn on. It was
+// the floor of a channel cut through a massif and it was slate-dark, which was the right colour for a
+// floor in shadow and the wrong one for a field: the map this replaces is a lawn with a grey road
+// across it, and the value that reads as "open ground" on a dark plate reads as "bare rock" on a
+// green one. Everything that stood on this plane before — the massif, the niche floors, the chamber,
+// the pads — is gone with the map, and nothing is drawn over the plate except the road and the base.
 const groundMaterial = withProbeWeight(
   new THREE.MeshStandardMaterial({
-    color: 0x163039,
-    roughness: 0.92,
-    metalness: 0.04,
+    color: 0x97ff29,
+    roughness: 0.95,
+    metalness: 0.02,
   }),
   'ground',
 );
@@ -612,8 +618,9 @@ ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
 scene.add(ground);
 
-// The corridor, the massif, the niche floors, the core chamber and the pads. Four domains
-// share this file, so the map is the one that owns the ground a match is fought on.
+// The road, the base and the plate colour they lie on. Two domains share this file, so the map is the
+// one that owns the ground a match is fought on, and the plate stays here where the lighting already
+// was.
 const mapPresentation = createMap(scene, config);
 // The minimap reads the road the board drew and the pads the core declared, and nothing else: a
 // second description of the map in the page is a second one to fall out of step with the first.
@@ -634,7 +641,6 @@ const combatFx = createCombatFx(scene);
 // One presentation flag for the whole page, told to every domain the moment it changes, and set once
 // here so a browser that already asked for reduced motion is obeyed before the first frame. The page
 // reads it too: the guard, the ambient delta and the tower clip all have to agree.
-mapPresentation.setReducedMotion(reducedMotion);
 enemies.setReducedMotion(reducedMotion);
 towers.setReducedMotion(reducedMotion);
 
@@ -1196,12 +1202,14 @@ const CAMERA_ELEVATION_MAX = (58 * Math.PI) / 180;
 const CAMERA_ORBIT_DEGREES_PER_PIXEL = 0.5;
 const CAMERA_PITCH_DEGREES_PER_PIXEL = 0.12;
 const DEGREES = Math.PI / 180;
-// How much of the map the frustum holds, in world units of its own half-height at zoom 1. Sixteen is
-// the middle of the well and the four throats, which is the part of this map a player reads a wave
-// on; the two ends are the ends the task asks for — 1.2 is a tower filling the screen, 42 is the whole
-// ninety-six units plus a margin. The first is what lifts a 0.8-unit husk off its thirteen pixels,
+// How much of the map the frustum holds, in world units of its own half-height at zoom 1, and it is the
+// whole plate. It used to be a fixed sixteen — "the middle of the well and the four throats", which is
+// what a player read a wave on while the map was a ring with four roads into a well. Neither the well
+// nor the throats are on this map: there is one road network across the whole plate, and the thing to
+// read at the moment a match opens is all of it. So zoom 1 is the lens `wholeMapView` measures for the
+// plate and the canvas, which makes the wheel's wide end the home view and leaves the player zooming in
+// from the whole map rather than out to it. The narrow end is still 1.2 — a tower filling the screen —
 // and it is a lens the player drives, not a limit the map is built to.
-const CAMERA_HOME_VIEW = 16;
 const CAMERA_MIN_VIEW = 1.2;
 // A ceiling on the wide end, not its value: the value is measured from the plate and the canvas in
 // `measureWholeMapView` below, because a ninety-six unit map on a three-to-one canvas is limited by
@@ -1209,7 +1217,6 @@ const CAMERA_MIN_VIEW = 1.2;
 // old map — fits neither. Sixty is here so a very tall canvas cannot ask for a lens that shows the
 // plate and half the void around it.
 const CAMERA_MAX_VIEW = 60;
-const CAMERA_MIN_ZOOM = CAMERA_MIN_VIEW / CAMERA_HOME_VIEW;
 // How far the stand reaches, and why it is not the sixteen-sixteen it was on the forty-unit map.
 //
 // The camera plane — the plane through the camera, square to the view — crosses the ground
@@ -1280,8 +1287,11 @@ const CAMERA_CLICK_SLOP_PX = 4;
 // key crosses the same part of the map in the same time whether the player is looking at the whole
 // vault or at one enemy, and the two speeds can never drift apart.
 const CAMERA_KEY_PAN_PER_VIEW = 0.55;
-// The frame is nudged down so the well's own centre does not open the match with the thing being
-// defended under the sector caption; the space it moves into is rock with nothing in it.
+// The frame is nudged down so that the thing being defended does not open the match under the sector
+// caption; the space it moves into is the open ground below the road, which is the one part of the
+// plate with nothing on it. `wholeMapView` above divides by one-minus-this, because a biased frame
+// clears the far edge of the plate by that much less than a centred one and the home view has to hold
+// all of it.
 const CAMERA_FRAME_BIAS = 0.1;
 // The margin the corridor measurement is scaled by. The fit has no control left in it — the frustum
 // follows the target — so this only shapes the reading the seam publishes, and it is kept as a number
@@ -1312,20 +1322,31 @@ const defaultCameraRig = { ...cameraRig };
 // stand is tilted, so the map's depth is foreshortened by the sine of the elevation and its width is
 // not: a ninety-six unit square in a three-to-one canvas is limited by its depth, and in a square
 // canvas by its width. Whichever binds, with a tenth of margin, and the ceiling above.
+//
+// The depth is asked for as the frame will actually place it and not as the frustum is centred: the
+// frame bias below takes a slice off the top of the frustum and gives it to the bottom, so a height
+// that clears the plate about the centre clears it by that much less at the top. Dividing by
+// one-minus-the-bias is the whole correction, and without it the home view crops the far edge of the
+// plate by a couple of pixels — which is two pixels of nothing, and two pixels is how a "whole plate
+// in frame" claim quietly stops being true.
 const wholeMapView = (aspect: number): number => {
-  const byDepth = (config.map.depth / 2) * Math.sin(cameraRig.elevation);
+  const byDepth = (config.map.depth / 2) * Math.sin(cameraRig.elevation) / Math.max(0.2, 1 - CAMERA_FRAME_BIAS);
   const byWidth = config.map.width / 2 / Math.max(0.2, aspect);
   return Math.min(CAMERA_MAX_VIEW, Math.max(byDepth, byWidth) * 1.1);
 };
 
 let cameraMaxView = CAMERA_MAX_VIEW;
-const cameraMaxZoom = (): number => cameraMaxView / CAMERA_HOME_VIEW;
+// The lens at zoom 1. It is the same measurement the wheel's wide end uses, which is the point: the
+// home view is the widest view, so `cameraMaxZoom()` is one and the wheel only ever pulls in.
+const homeView = (): number => cameraMaxView;
+const cameraMaxZoom = (): number => cameraMaxView / homeView();
+const cameraMinZoom = (): number => CAMERA_MIN_VIEW / homeView();
 
 // What the frustum holds right now, in its own half-height. Everything about the view is derived from
 // this and from the target, which is the fix for the pan that never panned: the frustum used to be
 // fitted to the corridor every frame, so the target was written, looked at, and then overridden.
 const viewHalfHeight = (): number =>
-  Math.min(cameraMaxView, Math.max(CAMERA_MIN_VIEW, CAMERA_HOME_VIEW * cameraRig.zoom));
+  Math.min(cameraMaxView, Math.max(CAMERA_MIN_VIEW, homeView() * cameraRig.zoom));
 
 // Screen-up is not world -z while the stand is tilted, so the target is projected into the camera's
 // own basis rather than assumed to be the middle of the frame. That projection is also what lets the
@@ -1366,22 +1387,20 @@ const resetCamera = (): void => {
   applyCameraRig();
 };
 
-// How much of the road the frame would hold, and where its middle is. It is a measurement and not a
+// How much of the plate the frame would hold, and where its middle is. It is a measurement and not a
 // control any more — the frustum follows the target now — so it is here for the seam and for the
-// honest answer to "is the road on screen", and it is the only surviving use of the sample points.
+// honest answer to "is the map on screen", and it is the only surviving use of the sample points.
 const measureCorridor = (): { centerX: number; centerY: number; halfWidth: number; halfHeight: number } => {
   let left = Number.POSITIVE_INFINITY;
   let right = Number.NEGATIVE_INFINITY;
   let bottom = Number.POSITIVE_INFINITY;
   let top = Number.NEGATIVE_INFINITY;
   for (const [x, z] of mapPresentation.corridorSamplePoints) {
-    for (const y of [0, WALL_HEIGHTS[0]]) {
-      const view = framePoint.set(x, y, z).applyMatrix4(camera.matrixWorldInverse);
-      left = Math.min(left, view.x);
-      right = Math.max(right, view.x);
-      bottom = Math.min(bottom, view.y);
-      top = Math.max(top, view.y);
-    }
+    const view = framePoint.set(x, 0, z).applyMatrix4(camera.matrixWorldInverse);
+    left = Math.min(left, view.x);
+    right = Math.max(right, view.x);
+    bottom = Math.min(bottom, view.y);
+    top = Math.max(top, view.y);
   }
   return {
     centerX: (left + right) / 2,
@@ -1430,7 +1449,7 @@ const resize = () => {
   cameraMaxView = wholeMapView(width / height);
   // The rig's own zoom is re-clamped rather than reset: a window that grew should not throw away
   // where the player was looking, but a view that no longer fits the plate has to come back in.
-  cameraRig.zoom = Math.min(cameraMaxZoom(), Math.max(CAMERA_MIN_ZOOM, cameraRig.zoom));
+  cameraRig.zoom = Math.min(cameraMaxZoom(), Math.max(cameraMinZoom(), cameraRig.zoom));
   applyCameraRig();
   renderer.setSize(width, height, false);
 };
@@ -1637,11 +1656,10 @@ const syncHud = () => {
 const applySnapshot = (next: MatchSnapshot) => {
   snapshot = next;
 
-  // The three domains read the same snapshot and each owns its own views. The order they are called
-  // in is the order their views were built in before this was split into modules, except for the
-  // core: it used to be projected after the enemy views and now it is projected with the pads, and
-  // nothing in between writes anything the core reads or reads anything the core writes.
-  mapPresentation.applySnapshot(next, elapsed);
+  // The two domains read the same snapshot and each owns its own views. The order they are called
+  // in is the order their views were built in before this was split into modules. The map is not one
+  // of them any more: it has no state that arrives with the snapshot — no pad to fill, no core to
+  // recolour — so there is nothing for it to read here.
   towers.applySnapshot(next, presentationTime());
   enemies.applySnapshot(next);
 
@@ -1703,9 +1721,6 @@ const reportCommandResult = (command: Command, result: CommandResult) => {
     setFeedback('rejected', replayBlockedFeedback, reason);
     return;
   }
-  if (command.type === 'placeTower') {
-    flashPadError(command.padId);
-  }
   setFeedback('rejected', rejectionMessages[reason] ?? `Rejected: ${reason}`, reason);
 };
 
@@ -1756,7 +1771,6 @@ const resetEventPresentations = () => {
   eventFeedEntries.length = 0;
   renderEventFeed();
   eventsDrained = 0;
-  mapPresentation.resetCoreDamage();
   combatFx.clearCombatBursts();
   towers.resetFired();
 };
@@ -2982,10 +2996,6 @@ const applyEventPresentation = (event: SimulationEvent) => {
     if (position !== null && !reducedMotion) {
       combatFx.spawnCombatBurst(position, elapsed);
     }
-    return;
-  }
-  if (event.type === 'coreDamaged') {
-    mapPresentation.flashCoreDamage(elapsed);
   }
 };
 
@@ -3051,6 +3061,11 @@ const projectedPad = new THREE.Vector3();
 // still. Now that the map can be turned, a guess would build a tower in a place the player cannot
 // see, so rock in front of a pad means the click misses. The road and the niche floors are not in
 // the list: they are the ground, eight centimetres above it, and no sight-line runs under them.
+//
+// The list is empty on this map and the placement path around it is left standing. There is nothing
+// marked on a flat plate to build on — placement on open ground is the work after this one — so the ray
+// hits nothing and the click places nothing, which is the honest answer rather than a spot invented to
+// make the palette do something.
 const pickTargets: THREE.Object3D[] = mapPresentation.pickTargets;
 
 const pickPad = (clientX: number, clientY: number): string | null => {
@@ -3081,10 +3096,6 @@ const projectPadToCanvas = (padId: string): { padId: string; x: number; y: numbe
     x: ((projectedPad.x + 1) / 2) * rect.width,
     y: ((1 - projectedPad.y) / 2) * rect.height,
   };
-};
-
-const flashPadError = (padId: string) => {
-  mapPresentation.flashPadError(padId, elapsed);
 };
 
 // Camera gestures, and the one rule that keeps them from eating placements: a pointer that travels
@@ -3202,7 +3213,7 @@ renderer.domElement.addEventListener(
     // the screen to the entire vault, so a cap of a third of a unit of view per flick is the only
     // thing standing between a player and a full crossing in two notches.
     const step = Math.max(-0.12, Math.min(0.12, event.deltaY * 0.0006));
-    cameraRig.zoom = Math.min(cameraMaxZoom(), Math.max(CAMERA_MIN_ZOOM, cameraRig.zoom * Math.exp(step)));
+    cameraRig.zoom = Math.min(cameraMaxZoom(), Math.max(cameraMinZoom(), cameraRig.zoom * Math.exp(step)));
     applyCameraRig();
   },
   { passive: false },
@@ -3336,7 +3347,6 @@ reducedMotionQuery.addEventListener('change', (event) => {
   // to it than a flag: turning reduced motion on mid-match has to do the same thing it does from the
   // start, so the clip stops and the bones go back to the rest pose instead of freezing wherever the
   // last frame left them. Reading the pose from `setTime(0)` before the action stops is what applies it.
-  mapPresentation.setReducedMotion(reducedMotion);
   enemies.setReducedMotion(reducedMotion);
   towers.setReducedMotion(reducedMotion);
 });
@@ -3516,10 +3526,15 @@ window.__ECHOES_DEBUG__ = {
       routeLength: Math.round(mapPresentation.routeLength * 100) / 100,
       routeSegments: mapPresentation.routeSegmentCount,
       bends: config.map.routes.reduce((total, route) => total + Math.max(0, route.points.length - 2), 0),
-      bays: mapPresentation.bayCount,
-      chamberRadius: mapPresentation.chamberRadius,
-      wallBlocks: mapPresentation.wallBlockCount,
-      openCells: Array.from(mapPresentation.openCells).filter((cell) => cell === 1).length,
+      // Four readings that are zero or absent on this map and are kept because the seam is a
+      // contract the scenarios read. The rock is gone, so there are no wall blocks and no raster of
+      // open cells; the niches went with it, so there are no bays and nothing for a pad to sit in.
+      // `chamberRadius` carries the half side of the base square that replaced the well — a stale name
+      // for a square, and the one thing here worth renaming together with the scenarios that read it.
+      bays: 0,
+      chamberRadius: mapPresentation.baseHalf,
+      wallBlocks: 0,
+      openCells: 0,
       frame: {
         left: camera.left,
         right: camera.right,
@@ -3789,10 +3804,9 @@ const renderFrame = (timestamp: number) => {
   // camera the player is driving is not ambient motion.
   applyHeldCameraKeys(frameDelta);
   followKeyLight();
-  // The frame in the order it was drawn before the split: the map, the towers, the enemies, then the
-  // bursts and the shot traces that belong to nobody in particular. The core is drawn with the map now
-  // rather than after the traces, and it shares no state with anything around it.
-  mapPresentation.animate(elapsed, ambientDelta);
+  // The frame in the order it was drawn before the split: the towers, the enemies, then the
+  // bursts and the shot traces that belong to nobody in particular. The map has nothing to animate —
+  // it is a plate, a road and a square, and all three are still — so it is not in the list.
   towers.animate(elapsed, ambientDelta, presentationTime());
   enemies.animate(elapsed, ambientDelta);
   combatFx.animate(elapsed);
