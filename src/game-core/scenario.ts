@@ -168,41 +168,96 @@ export const towerDamageMultiplier = (kills: number): number => {
 export { towerGrowthPointsPerKill };
 
 // ---------------------------------------------------------------------------------------------
-// burrow-vault: a square road along the perimeter of a ninety-six unit map, a throat down each axis
-// to a well in the middle, and forty-four niches that are not copies of each other.
+// The map as the owner drew it: `docs/Map-and-Router.png`, kept in the repository as the source of
+// truth for this geometry. Flat plate, one road network, one base in the middle, and nothing else.
+// The plateau is gone: no raster, no massif, no terraces, no niches, no marked building spots. The
+// whole of the previous map was rock cut away from a channel, and what is left of that idea here is
+// the channel.
 //
-// The map before this one was forty by forty with one ring of half-size 9.4 inside it. Measured, it
-// said four things at once: the four quarters were identical, the sum of every niche's coverage was
-// 49.63 units of road against a lap of 104, a third of the lap was walk no niche could see at all,
-// and the best spot was worth twice the worst. Twelve copies of one decision is not a decision, and
-// the player was choosing between four identical districts.
+// **Where the numbers come from, so they can be checked instead of believed.** The drawing is 1241
+// pixels square and holds four colours: green plate, grey road, dark base, white outside. The plate
+// is the green rectangle at pixels 30..1209 by 31..1210, that is 1180 by 1180 of it, and its centre is
+// (619.5, 620.5) — which is also the centre of the base square, measured the same way. Taking the
+// plate as the ninety-six units the game already has puts one unit at 1180 / 96 = 12.2917 pixels, and
+// every number below is `(pixel - centre) / 12.2917`. The twenty segments were read off the drawing by
+// scanning it for runs of the road colour in both directions, and the road was measured at 58 pixels
+// (4.72 units) and the base at 117 (9.52); the widths in this table are the owner's own — 4.8 and 9 —
+// which is within two pixels of the drawing at this scale and is the design value rather than the
+// measurement of a drawn rectangle.
 //
-// Four numbers carry the whole layout, and all four are chosen so that every road line, every niche
-// centre and every niche edge lands on a cell centre or a cell boundary of the 0.4 raster. A road line
-// through cell centres carves exactly three cells across, which is exactly the 1.2-wide ribbon drawn
-// over it, and a niche edge on a boundary is carved by exactly the cells it is drawn over. That is the
-// whole of what "a niche one cell away from the road" means, and it is the reason the two are states
-// this code can tell apart instead of two intentions.
+// The one thing done to the table beyond the conversion is clamping four ends to the edge of the
+// plate. The drawing runs its four entrances past the green into the white margin, because a road that
+// stops inside the map is a road that goes nowhere; here the plate is 96 by 96 and there is nothing
+// outside it to run over, so the same four ends sit on ±48 and the entrances leave the map exactly at
+// its border. They are marked in the table.
 //
-// The route is given, not searched. A wave leaves its own corner, walks the perimeter past the other
-// three, turns in on the far half of the fourth side without reaching the corner it started from, and
-// goes straight down the axis to the well. Every wave therefore covers three quarters of the ring and
-// one throat, and a wave from one corner never sees the side that corner sits on — which is the
-// property the four identical quarters used to destroy. The route is a lap and not a path to the
-// core: the last point is the well, and `circuit` walks it again from the mouth.
+// Axis `z` grows downwards, the same way it grows down the drawing.
 // ---------------------------------------------------------------------------------------------
 
 const MAP_SIZE = 96;
 
-// The ring is the perimeter, as near to the edge of the map as the raster allows: a road line through
-// cell centres sits on a cell centre, and 45.0 is the largest such value that still leaves three cells
-// carved on the inside and six cells of rock outside. Everything the four routes share is this square.
-const RING_HALF = 45;
-const CORE_CHAMBER_RADIUS = 4;
+export type RoadNetworkDefinition = {
+  roadHalfWidth: number;
+  baseHalf: number;
+  /** Lanes running along x, in the order they were read off the drawing. */
+  horizontal: ReadonlyArray<{ z: number; x0: number; x1: number }>;
+  /** Lanes running along z, likewise. */
+  vertical: ReadonlyArray<{ x: number; z0: number; z1: number }>;
+};
 
-// One quarter turn. Every quarter of the map — the route, the eleven niches and the road they sit on
-// — is this one operation applied to the north-east corner, so the four of them cannot drift apart by
-// a rounding step.
+export const trainingRoadNetwork: RoadNetworkDefinition = {
+  // 4.8 wide, so 2.4 to a side. It was 0.6 — the road grew fourfold and every coverage number the
+  // old map was designed in moves with it.
+  roadHalfWidth: 2.4,
+  // The base is a 9 by 9 square on the origin, which is also where two lanes cross: one along z = 0
+  // and one along x = 0, so the road comes into it from all four sides.
+  baseHalf: 4.5,
+  horizontal: [
+    { z: -40.84, x0: -43.16, x1: -24.04 },
+    { z: -40.84, x0: 24.12, x1: 43.24 },
+    { z: -26.44, x0: -48, x1: 43.24 },        // west entrance, on the edge of the plate
+    { z: -14.4, x0: -23.96, x1: 2.4 },
+    { z: -0.08, x0: -16.72, x1: -4.76 },        // into the base from the west
+    { z: -0.08, x0: 4.84, x1: 16.8 },           // out of the base to the east
+    { z: 14.4, x0: -2.32, x1: 24.04 },
+    { z: 26.4, x0: -43.16, x1: 48 },           // east entrance, on the edge of the plate
+    { z: 40.84, x0: -43.16, x1: -23.96 },
+    { z: 40.84, x0: 24.12, x1: 43.24 },
+  ],
+  vertical: [
+    { x: -40.84, z0: -43.16, z1: -24.04 },
+    { x: -40.84, z0: 24.12, z1: 43.24 },
+    { x: -26.4, z0: -43.16, z1: 48 },           // south entrance, on the edge of the plate
+    { x: -14.4, z0: -2.4, z1: 24.04 },
+    { x: 0, z0: -16.72, z1: -4.76 },            // into the base from the north
+    { x: 0, z0: 4.84, z1: 16.8 },               // out of the base to the south
+    { x: 14.4, z0: -28.76, z1: 2.4 },
+    { x: 26.44, z0: -48, z1: 43.24 },           // north entrance, on the edge of the plate
+    { x: 40.84, z0: -43.16, z1: -24.04 },
+    { x: 40.84, z0: 24.04, z1: 43.24 },
+  ],
+};
+
+// ---------------------------------------------------------------------------------------------
+// Routes and building spots: both of them belong to the next piece of work, and neither is invented
+// here.
+//
+// **The routes are a stub and they are the old ones.** A wave names a route, `normalizeConfig` refuses
+// a wave whose `routeId` is not in the map, and the match therefore cannot start without the four ids
+// `burrow-east`, `burrow-north`, `burrow-west` and `burrow-south`. They are left exactly as they were
+// — the ring around the old plateau, which no longer exists on this plate — because the honest version
+// of "a wave walks the drawn network from its entrance to the base" is the routes task, and a guess
+// here would be a route nobody asked for. The consequence is visible and is named in the report: until
+// the routes land, a wave that starts walks a perimeter that is not on the plate.
+//
+// **There are no building spots.** The plate is flat and open, the drawing marks nothing on it, and the
+// forty-four niches of the previous map are gone with the rock they were cut into. Placement on open
+// ground is the work after this one, so an empty list is the state that matches the picture: with pads
+// declared and nothing drawn, the debug seam would report forty-four places a tower can go and none of
+// them would exist to click.
+// ---------------------------------------------------------------------------------------------
+
+// One quarter turn, so the stub's four routes stay the same shape of thing they were.
 const turn = (point: Vec2): Vec2 => ({ x: -point.z, z: point.x });
 const turned = (point: Vec2, times: number): Vec2 => {
   let out = point;
@@ -212,27 +267,17 @@ const turned = (point: Vec2, times: number): Vec2 => {
   return out;
 };
 
-// The base route, walked from the north-east corner: the whole east side, the whole south side, the
-// whole west side, the near half of the north side, and then straight down the middle to the well.
-// Seven and a half sides of ring at ninety units each is 315, and the throat is 45, so a lap is 360 —
-// 3.46 times the 104 it replaces, and inside the 330..420 the layout was asked for.
-//
-// The turn-inward point is the midpoint of the fourth side rather than any point on it, and that one
-// choice is what makes the map readable: it puts each throat exactly on an axis, so the four throats
-// run in a cross into the well and each route is a quarter turn from the next. A throat off the axis
-// would give the same length and a picture with nothing to say where the waves are.
-const baseRoute: Vec2[] = [
-  { x: RING_HALF, z: RING_HALF },
-  { x: RING_HALF, z: -RING_HALF },
-  { x: -RING_HALF, z: -RING_HALF },
-  { x: -RING_HALF, z: RING_HALF },
-  { x: 0, z: RING_HALF },
+// The stub's route: the ring around the old plateau, four quarter turns of it. See the note above.
+const STUB_ROUTE_HALF = 45;
+const stubRoute: Vec2[] = [
+  { x: STUB_ROUTE_HALF, z: STUB_ROUTE_HALF },
+  { x: STUB_ROUTE_HALF, z: -STUB_ROUTE_HALF },
+  { x: -STUB_ROUTE_HALF, z: -STUB_ROUTE_HALF },
+  { x: -STUB_ROUTE_HALF, z: STUB_ROUTE_HALF },
+  { x: 0, z: STUB_ROUTE_HALF },
   { x: 0, z: 0 },
 ];
 
-// Each base is named for the side of the map it leaves by, so the four ids are four entrances rather
-// than four labels: the north-east base leaves along the east side, the south-west one along the north
-// side, and so on round. `turns` is how many quarter turns from the route above.
 const trainingRoutes: RouteDefinition[] = [
   { id: 'burrow-east', turns: 0 },
   { id: 'burrow-north', turns: 1 },
@@ -241,124 +286,10 @@ const trainingRoutes: RouteDefinition[] = [
 ].map((entry) => ({
   id: entry.id,
   circuit: true,
-  points: baseRoute.map((point) => turned(point, entry.turns)),
+  points: stubRoute.map((point) => turned(point, entry.turns)),
 }));
 
-// Forty-four niches, and the only thing that separates them is how much road they can see.
-//
-// Coverage is the currency this map is designed in, and it is measured the way a tower shoots:
-// against the road, over the whole road at once, because the player does not know which side the wave
-// will come from. A niche's coverage is a chord of the reach — `2 * sqrt(range^2 - setback^2)` — and
-// that single fact decides how spread out the niches have to be. The layout before this one had
-// twelve niches at two distinct values, 5.28 and 2.64, a factor of two, and the player picked one of
-// twelve copies. A factor of five is a different map: it means the worst niche is worth a fifth of
-// the best, which on this raster is only reachable if the deepest niches sit at almost exactly the
-// long tower's reach — four units out — and the closest sit one and a fifth units out. The setback
-// ladder below runs 1.2 to 4.0 in steps of 0.4 because those are the only values a niche centre can
-// take: the ring line sits on 45.0, a niche centre has to sit on a cell centre, and the two together
-// leave 1.2, 1.6, 2.0 and so on and nothing between.
-//
-// The ladder is not decoration, and two of its ends are load-bearing. The best niches are the four
-// where a throat meets the ring: they are 1.2 from two legs at once instead of one, so they see
-// roughly double anything else on the map, and they are the only spots a player can find twice the
-// value for. The worst are the ones at 4.0, deep enough that Frost Relay — the longest reach here —
-// still sees only a sliver of road and Grove Lens, the only tower that shoots at the air, sees none
-// at all. That is a real cost and it is named rather than smoothed over: a player who builds Grove
-// Lens on one of the deep niches has bought a tower that does nothing to the air that arrives from
-// the seventh wave. It is the same trade the previous map had in reverse, and it is a decision
-// instead of a copy.
-//
-// Everything between the ends is filled by walking the road, not by drawing a grid. Twenty-four
-// niches sit along the ring, six per side, spaced 13.2 apart and held clear of the corner and of the
-// axis so that neither the throat-corner niches nor the throat niches collide with them. Sixteen more
-// sit along the throats, four per throat, alternating sides, and the four throat corners close the set
-// at forty-four.
-const NICHE_SETBACKS = [1.2, 1.6, 2, 2, 2.4, 2.4, 2.8, 3.2, 3.6, 4] as const;
-const NICHE_HALF = 1;
-
-// Along the east side of the base quarter, the six ring niches. The bays are two units wide, so two of
-// them need four units between their centres: the 5.6 left at the corner and the 11.8 left at the axis
-// are what keeps this list from colliding with the throat corner and with the first throat niche.
-const RING_SLOTS = [39.4, 26.2, 13, -13, -26.2, -39.4] as const;
-// Down the throat of the base quarter, the four. Eight and a half units apart, and the side alternates
-// so that no two bays ever share a column.
-const THROAT_SLOTS = [38.6, 30.2, 21.8, 13.4] as const;
-// The setback each successive niche takes off the road, in ladder order and starting at `offset`, so
-// that the forty-four walk the whole ladder instead of the first six rungs of it. A quarter that used
-// only its own six would leave 3.2 and 3.6 unused, and the two rungs in the middle are the ones that
-// decide whether Grove Lens still sees the wave it is sold against.
-const setbackFor = (index: number): number =>
-  NICHE_SETBACKS[(index + Math.floor(index / NICHE_SETBACKS.length)) % NICHE_SETBACKS.length];
-
-const baseQuarterPads = (turns: number): Array<{ role: string; position: Vec2 }> => {
-  const pads: Array<{ role: string; position: Vec2 }> = [];
-  RING_SLOTS.forEach((along, index) => {
-    pads.push({
-      role: `ring-${index + 1}`,
-      position: { x: RING_HALF - setbackFor(turns * 7 + index), z: along },
-    });
-  });
-  // The throat corner, one step and a fifth from both the ring side and the throat. The best money on
-  // the map, and the only spot that is close to two legs at once.
-  pads.push({ role: 'gate', position: { x: -NICHE_SETBACKS[0], z: RING_HALF - NICHE_SETBACKS[0] } });
-  THROAT_SLOTS.forEach((down, index) => {
-    const step = setbackFor(turns * 7 + index);
-    pads.push({
-      role: `throat-${index + 1}`,
-      position: { x: (index % 2 === 0 ? -1 : 1) * step, z: down },
-    });
-  });
-  return pads;
-};
-
-// In turn order, so a niche and its name cannot be separated from the rotation that produced it.
-const QUARTERS = ['ne', 'sw', 'nw', 'se'] as const;
-
-const trainingPads: BuildPadDefinition[] = QUARTERS.flatMap((quarter, turns) =>
-  baseQuarterPads(turns).map((pad) => ({
-    id: `niche-${quarter}-${pad.role}`,
-    position: turned(pad.position, turns),
-  })),
-);
-
-// Carving geometry for the presentation layer. It is deliberately not part of `MapDefinition`: the
-// simulation never asks where a wall is, and a field it ignores is a field the core would have to
-// validate for nothing. Bays are given in world coordinates on the same 0.4 grid the road uses, so
-// a bay that touches the road band opens onto it and a bay a cell away keeps a lip of rock between.
-export type BayDefinition = {
-  id: string;
-  padId: string;
-  minX: number;
-  maxX: number;
-  minZ: number;
-  maxZ: number;
-};
-
-export type CorridorDefinition = {
-  roadHalfWidth: number;
-  coreChamber: { x: number; z: number; radius: number };
-  bays: BayDefinition[];
-};
-
-// Every niche is the same size, and it is the size that keeps two promises at once: five cells across
-// is the smallest court that still leaves the marking on its floor clear of the pad standing in it,
-// and a court whose edges land on cell boundaries is carved by exactly the cells it is drawn over —
-// a bay edge through the middle of a cell leaves a sliver of open ground with nothing on it.
-// `NICHE_HALF` is declared with the ladder above, because the ladder is what places the centres and a
-// court size that lived apart from them would be one more number to re-derive by hand.
-
-export const trainingCorridor: CorridorDefinition = {
-  roadHalfWidth: 0.6,
-  coreChamber: { x: 0, z: 0, radius: CORE_CHAMBER_RADIUS },
-  bays: trainingPads.map((pad) => ({
-    id: `bay-${pad.id.slice('niche-'.length)}`,
-    padId: pad.id,
-    minX: pad.position.x - NICHE_HALF,
-    maxX: pad.position.x + NICHE_HALF,
-    minZ: pad.position.z - NICHE_HALF,
-    maxZ: pad.position.z + NICHE_HALF,
-  })),
-};
+const trainingPads: BuildPadDefinition[] = [];
 
 export function createTrainingScenario(): MatchConfig {
   const map: MapDefinition = {
