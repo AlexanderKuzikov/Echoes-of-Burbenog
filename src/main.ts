@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { TICK_RATE, createSimulation, createTrainingScenario } from './game-core/index.ts';
+import { MAP_FILE_REFUSAL_CLASSES, TICK_RATE, createSimulation, createTrainingScenario, trainingPlan } from './game-core/index.ts';
 import type { Command, CommandResult, MatchSnapshot, MatchStatus, SimulationEvent } from './game-core/index.ts';
 import { createMap, createMinimap } from './client/map.ts';
 import { createTowers } from './client/towers.ts';
@@ -186,15 +186,44 @@ type FrameLogEntry = {
 };
 
 type MapGeometryReading = {
+  /**
+   * Half the width of the carriageway in world units, and half the side of the core's cell. Both are
+   * half a cell now, and they are half a cell for the same reason: a road cell is one unit wide and the
+   * core stands in one cell. They stay in the seam under their old names because the seam is a
+   * contract that scenarios read, and a name is cheaper to keep than a set of scenarios to rewrite.
+   */
   roadHalfWidth: number;
+  chamberRadius: number;
   routeLength: number;
   routeSegments: number;
   bends: number;
   bays: number;
-  chamberRadius: number;
   wallBlocks: number;
   openCells: number;
   coreEndsRoute: boolean;
+  /**
+   * The three cell counts, counted from both ends: what the file holds and what the scene painted.
+   * Equal numbers in the two are the proof that the picture is the file, and they are published
+   * separately so the check is a comparison a reader can make rather than a promise.
+   */
+  cells: {
+    grid: { free: number; road: number; occupied: number };
+    painted: { free: number; road: number; occupied: number };
+  };
+  /** The cell the core stands on, in the owner's cell coordinates, and its world position. */
+  coreCell: { x: number; y: number };
+  /**
+   * Every route, with its length in cells and in units and whether it ends on the core cell. A route
+   * that does not end at the core is a route that walks past it, and this is where that shows up.
+   */
+  routes: Array<{
+    routeId: string;
+    cells: number;
+    points: number;
+    lengthInCells: number;
+    lengthInUnits: number;
+    endsAtCoreCell: boolean;
+  }>;
   // The frustum the corridor was fitted into, in world units, plus the stand it was fitted from. A
   // map that is silently cropped by a hardcoded view height is a map the player cannot see, and the
   // numbers are how that gets said out loud instead of by eye.
@@ -229,6 +258,12 @@ type MapGeometryReading = {
     clearOfRoad: boolean;
     coverage: Record<string, number>;
   }>;
+  /**
+   * Which map file this page is running, and the three classes of mistake it could have been refused
+   * for. The seam only exists on a page that loaded, so "loaded" is true by construction here and the
+   * refusals themselves are read from the refusal block on a page that did not.
+   */
+  map: { id: string; name: string; version: number; loaded: true; refusalClasses: readonly string[] };
 };
 
 type DebugState = {
@@ -502,7 +537,34 @@ const createDevDiagnostics = (): DevDiagnostics => {
 
 const devDiagnostics = devDiagnosticsOn ? createDevDiagnostics() : null;
 
-const config = createTrainingScenario();
+// A map file this build cannot read stops the page here, and it says so on the page before it stops.
+//
+// The field is not built yet when the refusal happens and nothing is drawn over it, so the refusal
+// lands on the empty viewport the document already has: the board does not change, it simply never
+// arrives, and the reason is the only thing on screen that is new. It goes into the block that already
+// exists for refusals — the same block the asset registry writes to — because a full reason does not fit
+// on the one-line status chip, and "map refused" on its own leaves a reader with nothing to act on. The
+// throw after that keeps the rest of this module from running against a config that does not exist.
+const config = (() => {
+  try {
+    return createTrainingScenario();
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    sceneReport.hidden = false;
+    // The block's kicker is static text in the document and it says "asset refusal", which would be a
+    // lie here — nothing failed to load an artifact, the map itself was refused. The kicker is set
+    // rather than the document rewritten, because the honest answer is one word on a surface that
+    // already exists.
+    const kicker = sceneReport.querySelector<HTMLElement>('.scene-report-kicker');
+    if (kicker) {
+      kicker.textContent = 'Map refusal';
+    }
+    sceneReportReason.dataset.reason = reason;
+    sceneReportReason.textContent = reason;
+    statusLabel.textContent = `Scene refused · ${reason}`;
+    throw error;
+  }
+})();
 let simulation = createSimulation(config);
 const padDefinitions = new Map(config.map.buildPads.map((pad) => [pad.id, pad]));
 const towerDefinitions = new Map(config.towers.map((tower) => [tower.id, tower]));
@@ -599,33 +661,17 @@ const fillLight = new THREE.PointLight(0x2ac7b5, 3.2, 12, 2);
 fillLight.position.set(4, 3, -4);
 scene.add(fillLight);
 
-// The plate: one flat quad, the whole of the ground, and the only thing the map is drawn on. It was
-// the floor of a channel cut through a massif and it was slate-dark, which was the right colour for a
-// floor in shadow and the wrong one for a field: the map this replaces is a lawn with a grey road
-// across it, and the value that reads as "open ground" on a dark plate reads as "bare rock" on a
-// green one. Everything that stood on this plane before — the massif, the niche floors, the chamber,
-// the pads — is gone with the map, and nothing is drawn over the plate except the road and the base.
-const groundMaterial = withProbeWeight(
-  new THREE.MeshStandardMaterial({
-    color: 0x97ff29,
-    roughness: 0.95,
-    metalness: 0.02,
-  }),
-  'ground',
-);
-const ground = new THREE.Mesh(new THREE.PlaneGeometry(config.map.width, config.map.depth), groundMaterial);
-ground.rotation.x = -Math.PI / 2;
-ground.receiveShadow = true;
-scene.add(ground);
-
-// The road, the base and the plate colour they lie on. Two domains share this file, so the map is the
-// one that owns the ground a match is fought on, and the plate stays here where the lighting already
-// was.
+// The ground a match is fought on: the free cells, the road and the occupied cells, all read from the
+// owner's map file by the map module. There is no plate quad here any more and there was no reason for
+// one to survive — it covered the whole 96 by 96 with one colour, and now the file says which of its
+// cells are that colour and which are something else, so a single quad under the three cell surfaces
+// would be a fourth description of the same ground. The map owns the ground; this file owns the light
+// on it.
 const mapPresentation = createMap(scene, config);
 // The minimap reads the road the board drew and the pads the core declared, and nothing else: a
 // second description of the map in the page is a second one to fall out of step with the first.
 const minimap = minimapCanvas
-  ? createMinimap(minimapCanvas, config, mapPresentation.roadPolylines)
+  ? createMinimap(minimapCanvas, config, mapPresentation.roadRects)
   : null;
 
 // The tower views, the models they borrow from the registry, and the clip each one plays.
@@ -3525,18 +3571,28 @@ window.__ECHOES_DEBUG__ = {
   get mapGeometry(): MapGeometryReading {
     return {
       roadHalfWidth: mapPresentation.roadHalfWidth,
+      chamberRadius: mapPresentation.roadHalfWidth,
       routeLength: Math.round(mapPresentation.routeLength * 100) / 100,
       routeSegments: mapPresentation.routeSegmentCount,
       bends: config.map.routes.reduce((total, route) => total + Math.max(0, route.points.length - 2), 0),
-      // Four readings that are zero or absent on this map and are kept because the seam is a
-      // contract the scenarios read. The rock is gone, so there are no wall blocks and no raster of
-      // open cells; the niches went with it, so there are no bays and nothing for a pad to sit in.
-      // `chamberRadius` carries the half side of the base square that replaced the well — a stale name
-      // for a square, and the one thing here worth renaming together with the scenarios that read it.
+      // Three readings that are zero or absent on this map and are kept because the seam is a
+      // contract the scenarios read. The rock is gone, so there are no wall blocks; the niches went
+      // with it, so there are no bays and nothing for a pad to sit in. `openCells` is the free-cell
+      // count, which is what it always meant — the cells a tower may stand on — and it now has a
+      // source: the grid.
       bays: 0,
-      chamberRadius: mapPresentation.baseHalf,
       wallBlocks: 0,
-      openCells: 0,
+      openCells: mapPresentation.gridCells.free,
+      cells: { grid: mapPresentation.gridCells, painted: mapPresentation.paintedCells },
+      coreCell: mapPresentation.coreCell,
+      routes: mapPresentation.routeReadings,
+      map: {
+        id: config.map.id,
+        name: trainingPlan().grid.name,
+        version: trainingPlan().grid.version,
+        loaded: true,
+        refusalClasses: MAP_FILE_REFUSAL_CLASSES,
+      },
       frame: {
         left: camera.left,
         right: camera.right,
@@ -3588,7 +3644,7 @@ window.__ECHOES_DEBUG__ = {
           onScreen: point.x >= 0 && point.x <= rect.width && point.y >= 0 && point.y <= rect.height,
         };
       }),
-      coreEndsRoute: config.map.routes.some((route) => {
+      coreEndsRoute: config.map.routes.every((route) => {
         const last = route.points[route.points.length - 1];
         return last.x === config.map.corePosition.x && last.z === config.map.corePosition.z;
       }),

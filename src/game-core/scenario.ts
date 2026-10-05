@@ -5,9 +5,14 @@ import type {
   MatchRules,
   RouteDefinition,
   TowerDefinition,
-  Vec2,
 } from './types.ts';
 import { trainingEnemies, trainingWaves } from './contact.ts';
+// The import attribute is required by Node, which runs the session server from this same file, and it
+// is understood by the bundler and by `tsc`. Without it the map loads in the browser and the server
+// refuses to boot, which is a worse split than one extra token.
+import burrowMapFile from '../../content/maps/burrow-01.json' with { type: 'json' };
+import { MapFileError, buildRouteWalk, cellCenter, readMapGrid } from './map-grid.ts';
+import type { MapCell, MapGrid, RouteWalk } from './map-grid.ts';
 
 // Reaches are 2.8, 2.4 and 3.1 on the forty-unit map, which is 2.9% and 2.5% of its width. On a
 // ninety-six unit map those are a torch, not a tower, so all three move out. Pulse Spire is the reach
@@ -168,144 +173,157 @@ export const towerDamageMultiplier = (kills: number): number => {
 export { towerGrowthPointsPerKill };
 
 // ---------------------------------------------------------------------------------------------
-// The map as the owner drew it: `docs/Map-and-Router.png`, kept in the repository as the source of
-// truth for this geometry. Flat plate, one road network, one base in the middle, and nothing else.
-// The plateau is gone: no raster, no massif, no terraces, no niches, no marked building spots. The
-// whole of the previous map was rock cut away from a channel, and what is left of that idea here is
-// the channel.
+// The grid, the spawns, the core, and the routes between them.
 //
-// **Where the numbers come from, so they can be checked instead of believed.** The drawing is 1241
-// pixels square and holds four colours: green plate, grey road, dark base, white outside. The plate
-// is the green rectangle at pixels 30..1209 by 31..1210, that is 1180 by 1180 of it, and its centre is
-// (619.5, 620.5). Taking the plate as the ninety-six units the game already has puts one unit at
-// 1180 / 96 = 12.2917 pixels. The base square measures out at pixels 561..678 by 562..679 — the same
-// centre to the same half pixel, and one pixel further down on the second axis, which is the whole of
-// the reason the table below is a rule and not a pixel reading.
+// **The map is the owner's file and nothing else.** `content/maps/burrow-01.json` is a byte copy of
+// what came out of `NexusMap`, imported at build time rather than fetched: `config` is built
+// synchronously while the page is starting, and an async load of the map would have rebuilt the
+// whole page around it. The price is that a new map needs a production rebuild, which is the deal.
 //
-// **The rule behind the twenty segments, and there is one.** Every end of a segment butts against the
-// edge of whatever it joins: the edge of the carriageway (the extreme 2.4 to a side of the line), the
-// edge of the base (±4.8), or the edge of the plate (±48). No other reading of the ends is available
-// for any of the twenty, and the table below is produced by that rule rather than read off the file
-// pixel by pixel — a pixel reading leaves the export's own noise in the data, up to 0.12 of a unit,
-// because the PNG export offsets the two axes against each other by one pixel. The lane grid is
-// therefore `0, ±14.4, ±26.4, ±40.8` and not the `±40.84 / ±26.44 / -0.08` a reading gives.
+// What was here before is gone with itself: `trainingRoadNetwork` with its twenty hand-entered
+// segments and their half widths, `baseHalf`, and a stub route that walked a ring at ±45 which does
+// not exist on this plate. They were a second map written in code, and a second map is a map that
+// can disagree with the first one. Nothing of that shape comes back.
 //
-// The base is 9.6 by 9.6, which is exactly two road widths, and the drawing agrees: a dark square of
-// 118 pixels, that is 9.60.
+// **The grid is read once and the four numbers below are cells, not world units.** Cell coordinates
+// are whole, they are the ones in the owner's file, and they change on one line when the second layer
+// arrives — spawns, cores and routes belong to the content layer, and the owner builds that separately.
+// Until then there are five numbers to keep honest, and keeping them as cells means the file and the
+// game cannot drift apart on a rounding step.
 //
-// Four ends sit on the edge of the plate. The drawing runs its four entrances past the green into the
-// white margin, because a road that stops inside the map is a road that goes nowhere; here the plate is
-// 96 by 96 and there is nothing outside it to run over, so the same four ends sit on ±48 and the
-// entrances leave the map exactly at its border. They are marked in the table.
+// **The core stands on road, and that is checked.** A core cell that is not a road cell is refused
+// with its own reason rather than put in a field: a creature walking to a core that is not on the
+// carriageway never touches it, and the match would end for a reason nobody could see.
 //
-// Axis `z` grows downwards, the same way it grows down the drawing.
+// **The routes are the shortest walk over road, found here and never written down.** Each one starts
+// at a spawn cell and ends at the core cell, and it ends there: there is no circuit, so a creature
+// that arrives has arrived and a leak is spent. Straight runs of cells are collapsed into one
+// segment each, so the polyline is four to seven points rather than eighty.
 // ---------------------------------------------------------------------------------------------
 
-const MAP_SIZE = 96;
+/**
+ * The grid the match is fought on, read once from the owner's file and kept.
+ *
+ * It is read through a function rather than at module load on purpose. A static read would throw
+ * during the import of this file, which is before the page has any chance to say why — a map file this
+ * build cannot read would take the page down as a blank screen with the reason in the console, and the
+ * whole point of a refusal is that it is read. Here the refusal happens inside `createTrainingScenario`,
+ * where the page catches it, writes it where a player can see it and keeps the field it already had.
+ *
+ * The answer is kept after the first read: the file is read once, and the scene reads the same grid
+ * rather than reading the file a second time and getting a second answer to a question with one.
+ */
+let cachedGrid: MapGrid | null = null;
 
-export type RoadNetworkDefinition = {
-  roadHalfWidth: number;
-  baseHalf: number;
-  /** Lanes running along x, in the order they were read off the drawing. */
-  horizontal: ReadonlyArray<{ z: number; x0: number; x1: number }>;
-  /** Lanes running along z, likewise. */
-  vertical: ReadonlyArray<{ x: number; z0: number; z1: number }>;
-};
-
-export const trainingRoadNetwork: RoadNetworkDefinition = {
-  // 4.8 wide, so 2.4 to a side. It was 0.6 — the road grew fourfold and every coverage number the
-  // old map was designed in moves with it.
-  roadHalfWidth: 2.4,
-  // The base is a 9.6 by 9.6 square on the origin, which is also where two lanes cross: one along
-  // z = 0 and one along x = 0, so the road comes into it from all four sides.
-  baseHalf: 4.8,
-  horizontal: [
-    { z: -40.8, x0: -43.2, x1: -24.0 },
-    { z: -40.8, x0: 24.0, x1: 43.2 },
-    { z: -26.4, x0: -48.0, x1: 43.2 },        // west entrance, on the edge of the plate
-    { z: -14.4, x0: -24.0, x1: 2.4 },
-    { z: 0.0, x0: -16.8, x1: -4.8 },          // into the base from the west
-    { z: 0.0, x0: 4.8, x1: 16.8 },            // out of the base to the east
-    { z: 14.4, x0: -2.4, x1: 24.0 },
-    { z: 26.4, x0: -43.2, x1: 48.0 },         // east entrance, on the edge of the plate
-    { z: 40.8, x0: -43.2, x1: -24.0 },
-    { z: 40.8, x0: 24.0, x1: 43.2 },
-  ],
-  vertical: [
-    { x: -40.8, z0: -43.2, z1: -24.0 },
-    { x: -40.8, z0: 24.0, z1: 43.2 },
-    { x: -26.4, z0: -43.2, z1: 48.0 },         // south entrance, on the edge of the plate
-    { x: -14.4, z0: -2.4, z1: 24.0 },
-    { x: 0.0, z0: -16.8, z1: -4.8 },           // into the base from the north
-    { x: 0.0, z0: 4.8, z1: 16.8 },             // out of the base to the south
-    { x: 14.4, z0: -28.8, z1: 2.4 },
-    { x: 26.4, z0: -48.0, z1: 43.2 },         // north entrance, on the edge of the plate
-    { x: 40.8, z0: -43.2, z1: -24.0 },
-    { x: 40.8, z0: 24.0, z1: 43.2 },
-  ],
-};
-
-// ---------------------------------------------------------------------------------------------
-// Routes and building spots: both of them belong to the next piece of work, and neither is invented
-// here.
-//
-// **The routes are a stub and they are the old ones.** A wave names a route, `normalizeConfig` refuses
-// a wave whose `routeId` is not in the map, and the match therefore cannot start without the four ids
-// `burrow-east`, `burrow-north`, `burrow-west` and `burrow-south`. They are left exactly as they were
-// — the ring around the old plateau, which no longer exists on this plate — because the honest version
-// of "a wave walks the drawn network from its entrance to the base" is the routes task, and a guess
-// here would be a route nobody asked for. The consequence is visible and is named in the report: until
-// the routes land, a wave that starts walks a perimeter that is not on the plate.
-//
-// **There are no building spots.** The plate is flat and open, the drawing marks nothing on it, and the
-// forty-four niches of the previous map are gone with the rock they were cut into. Placement on open
-// ground is the work after this one, so an empty list is the state that matches the picture: with pads
-// declared and nothing drawn, the debug seam would report forty-four places a tower can go and none of
-// them would exist to click.
-// ---------------------------------------------------------------------------------------------
-
-// One quarter turn, so the stub's four routes stay the same shape of thing they were.
-const turn = (point: Vec2): Vec2 => ({ x: -point.z, z: point.x });
-const turned = (point: Vec2, times: number): Vec2 => {
-  let out = point;
-  for (let step = 0; step < times; step += 1) {
-    out = turn(out);
+export const trainingGrid = (): MapGrid => {
+  if (cachedGrid === null) {
+    cachedGrid = readMapGrid(burrowMapFile);
   }
-  return out;
+  return cachedGrid;
 };
 
-// The stub's route: the ring around the old plateau, four quarter turns of it. See the note above.
-const STUB_ROUTE_HALF = 45;
-const stubRoute: Vec2[] = [
-  { x: STUB_ROUTE_HALF, z: STUB_ROUTE_HALF },
-  { x: STUB_ROUTE_HALF, z: -STUB_ROUTE_HALF },
-  { x: -STUB_ROUTE_HALF, z: -STUB_ROUTE_HALF },
-  { x: -STUB_ROUTE_HALF, z: STUB_ROUTE_HALF },
-  { x: 0, z: STUB_ROUTE_HALF },
-  { x: 0, z: 0 },
+/**
+ * The four entrances and the core, in the owner's cell coordinates. Read off the drawing rather than
+ * invented: each entrance is the middle of the road where it leaves the plate, and the core is the
+ * crossing in the middle. Temporary numbers, and they move to the content layer when it exists.
+ */
+export const trainingSpawns: ReadonlyArray<{ routeId: string; cell: MapCell }> = [
+  { routeId: 'burrow-north', cell: { x: 79, y: 0 } },
+  { routeId: 'burrow-south', cell: { x: 15, y: 95 } },
+  { routeId: 'burrow-west', cell: { x: 0, y: 15 } },
+  { routeId: 'burrow-east', cell: { x: 95, y: 79 } },
 ];
 
-const trainingRoutes: RouteDefinition[] = [
-  { id: 'burrow-east', turns: 0 },
-  { id: 'burrow-north', turns: 1 },
-  { id: 'burrow-west', turns: 2 },
-  { id: 'burrow-south', turns: 3 },
-].map((entry) => ({
-  id: entry.id,
-  circuit: true,
-  points: stubRoute.map((point) => turned(point, entry.turns)),
-}));
+export const trainingCoreCell: MapCell = { x: 47, y: 47 };
 
+export type TrainingRouteReading = {
+  routeId: string;
+  spawnCell: MapCell;
+  lengthInCells: number;
+  lengthInUnits: number;
+  cells: number;
+  points: number;
+};
+
+export type TrainingPlan = {
+  grid: MapGrid;
+  routes: ReadonlyArray<{ routeId: string; cell: MapCell; walk: RouteWalk }>;
+  readings: readonly TrainingRouteReading[];
+  routeDefinitions: RouteDefinition[];
+};
+
+/**
+ * The map as a plan: read, checked, and turned into four routes, or a refusal.
+ *
+ * The check and the walk live here and not at module load, so a file this build cannot read is refused
+ * where the page can catch it and say why — see `trainingGrid`. The answer is kept, because the scene
+ * needs the same grid and a second read is a second answer to a question with one right one.
+ */
+let cachedPlan: TrainingPlan | null = null;
+
+export const trainingPlan = (): TrainingPlan => {
+  if (cachedPlan !== null) {
+    return cachedPlan;
+  }
+  const grid = trainingGrid();
+
+  if (grid.kindAt(trainingCoreCell) !== 'road') {
+    throw new MapFileError(
+      'grid-shape',
+      `Core cell ${trainingCoreCell.x}, ${trainingCoreCell.y} of map ${grid.name} carries ${
+        grid.kindAt(trainingCoreCell) ?? 'nothing'
+      } · a core stands on road or the map is refused`,
+    );
+  }
+
+  const routes = trainingSpawns.map(({ routeId, cell }) => {
+    const walk = buildRouteWalk(grid, cell, trainingCoreCell);
+    if (walk === null) {
+      throw new MapFileError(
+        'grid-shape',
+        `Map ${grid.name} has no road walk from spawn ${cell.x}, ${cell.y} to the core at ${trainingCoreCell.x}, ${trainingCoreCell.y}`,
+      );
+    }
+    return { routeId, cell, walk };
+  });
+
+  cachedPlan = {
+    grid,
+    routes,
+    // The whole of what a reader needs to check the routes without running the game: how long each one
+    // is in cells and in units, how many cells it crosses, and how many points its polyline came to.
+    readings: routes.map(({ routeId, cell, walk }) => ({
+      routeId,
+      spawnCell: cell,
+      lengthInCells: walk.lengthInCells,
+      lengthInUnits: walk.lengthInUnits,
+      cells: walk.cells.length,
+      points: walk.points.length,
+    })),
+    routeDefinitions: routes.map(({ routeId, walk }) => ({ id: routeId, points: walk.points })),
+  };
+  return cachedPlan;
+};
+
+// **There are no building spots.** Placement on open ground is the next piece of work, and the plate
+// is flat and open, so an empty list is the state that matches the picture: with pads declared and
+// nothing drawn, the debug seam would report places a tower can go and none of them would exist to
+// click. What the grid does give us is the permission — `free` is where a tower may stand — and that
+// is read from the file rather than decided here.
 const trainingPads: BuildPadDefinition[] = [];
 
 export function createTrainingScenario(): MatchConfig {
+  const plan = trainingPlan();
   const map: MapDefinition = {
-    id: 'burrow-vault',
-    width: MAP_SIZE,
-    depth: MAP_SIZE,
-    corePosition: { x: 0, z: 0 },
+    // The plate is the grid, so its width and depth are the file's own and nothing rounds them.
+    id: plan.grid.name,
+    width: plan.grid.width,
+    depth: plan.grid.height,
+    // The core is the centre of its cell, read through the one conversion in `map-grid.ts`. It is
+    // therefore a half unit off the middle of the plate, because cell 47 of 96 is not cell 48.
+    corePosition: cellCenter(plan.grid, trainingCoreCell),
     coreHealth: 10,
-    routes: trainingRoutes,
+    routes: [...plan.routeDefinitions],
     buildPads: trainingPads,
   };
   // The wallet, and the only numbers in the match that are not about a specific enemy or a specific

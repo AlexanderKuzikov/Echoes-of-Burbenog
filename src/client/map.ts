@@ -1,23 +1,26 @@
 import * as THREE from 'three';
-import { trainingRoadNetwork } from '../game-core/scenario.ts';
+import { cellBounds, trainingCoreCell, trainingPlan } from '../game-core/index.ts';
+import type { CellKind, MapGrid } from '../game-core/index.ts';
 import type { MatchConfig, MatchSnapshot, Vec2 } from '../game-core/index.ts';
 import { withProbeWeight } from './shared.ts';
 
 // ---------------------------------------------------------------------------------------------
-// The road and the base on a flat plate.
+// The map as the owner's file describes it: a grid of cells, and three kinds of surface built from
+// it. Nothing here is a second description of the road. The previous map drew twenty rectangles from
+// a table of hand-entered segments; this one reads the grid and paints what it finds, so the picture
+// and the walk cannot disagree — a creature on the road and the road under it are the same cells.
 //
-// The plate is one plane in `main.ts` and nothing else about the ground is drawn. There is no raster
-// here, no massif, no terraces keyed to depth into rock, no niches with floors and frames, no pads and
-// no chamber: the drawing the geometry was taken from has none of those, and a flat plate leaves
-// nothing to shade by depth and no spot worth marking. What is left is twenty rectangles of one width
-// and one square in the middle, which is two meshes.
+// **One quad per run of cells, not per cell.** Painting 9 216 separate quads would draw a grid of
+// squares with gaps between them, which reads as graph paper rather than as ground with a road across
+// it. Consecutive cells of the same kind in a row are therefore one quad, and the runs are counted so
+// the cost is a number and not a hope: 440 quads of free ground, 288 of road, 160 of occupied. The
+// road then reads as a carriageway because it is a continuous surface, and it is not "a grid of
+// cells" anywhere on the frame.
 //
-// A lane is a rectangle from its first point to its last with the width across it, not a mitred ribbon
-// around a polyline: every lane in the table is axis-aligned and every junction is a crossing, so there
-// is no corner to mitre and a ribbon would round the corners the drawing has square. Where two lanes
-// cross they overlap, because they overlap in the drawing too, and a thousandth of a unit of height
-// separates the two orientations so the crossing is a crossing and not two surfaces arguing over the
-// same depth. At the scale the player sees that step is a hundredth of a pixel.
+// The three surfaces are three materials and not one material with three colours, because they mean
+// three different things: road is walkable and nothing may be built on it, free is buildable and not
+// walkable, occupied is neither. A tile that looked different would say the same thing with a picture
+// instead of with a material, and a picture does not survive the next tone pass.
 // ---------------------------------------------------------------------------------------------
 
 /**
@@ -26,23 +29,53 @@ import { withProbeWeight } from './shared.ts';
  * reach into.
  */
 export type MapPresentation = {
-  roadHalfWidth: number;
-  /** Half the side of the base square, which is all a square has to be described by. */
-  baseHalf: number;
   /**
-   * The drawn length of the whole network, every junction counted once per lane that reaches it. It is
-   * the sum of the twenty segments and not the length of the union they make, because the union of
-   * twenty rectangles is a different sum to compute and this number is a reading, not a rule.
+   * Half the width of the carriageway, in world units. It is half a cell because a road cell is one
+   * unit wide, and it is published because a spot's distance to the road is only meaningful against it
+   * — a pad four units from the road and a pad four cells from it are the same statement here, which is
+   * the first time in this project that has been true.
+   */
+  roadHalfWidth: number;
+  /**
+   * The three cell counts as the scene painted them, counted from the quads it built rather than from
+   * the grid it read. This is the half of the "grid matches the file" check that does not trust the
+   * file: the scene proves it drew what the file said.
+   */
+  paintedCells: { free: number; road: number; occupied: number };
+  /** The same three numbers as the grid holds them, so the two can be compared in one place. */
+  gridCells: { free: number; road: number; occupied: number };
+  /** The cell the core stands on, in the owner's cell coordinates. */
+  coreCell: { x: number; y: number };
+  /**
+   * Every route read back off the finished config, with its length in cells and in units and whether
+   * it ends on the core cell. Read from the polylines rather than from the builder that produced them,
+   * so what a reader checks is what the creatures will actually walk.
+   */
+  routeReadings: Array<{
+    routeId: string;
+    cells: number;
+    points: number;
+    lengthInCells: number;
+    lengthInUnits: number;
+    endsAtCoreCell: boolean;
+  }>;
+  /**
+   * The drawn length of the whole road, in world units, every junction counted once per quad. One
+   * cell is one unit, so this is the number of road cells.
    */
   routeLength: number;
   routeSegmentCount: number;
-  // The road as it is actually drawn, world units, one polyline per lane. The minimap reads this and
-  // nothing else about the map: a second description of the road in the page is a second one to fall
-  // out of step with the first, and the minimap is exactly the surface that would show it.
-  roadPolylines: Array<Array<[number, number]>>;
   /**
-   * The four corners of the plate, which is what the frame reading in the page measures against. It was
-   * the open cells of a cut raster before, and the plate is the whole of the ground now.
+   * The road as the scene painted it: world units, one rectangle per run of road cells. The minimap
+   * reads this and nothing else about the map. A second description of the road in the page is a
+   * second one to fall out of step with the first, and an earlier version of this file had one already:
+   * polylines along the run centres, which drew the horizontal half of every road on the minimap and
+   * dropped the vertical half without anyone noticing. Rectangles are what the board is made of, so
+   * the panel and the board cannot disagree about which cells are road.
+   */
+  roadRects: Array<[minX: number, minZ: number, maxX: number, maxZ: number]>;
+  /**
+   * The four corners of the plate, which is what the frame reading in the page measures against.
    */
   corridorSamplePoints: Array<[number, number]>;
   distanceToRoad: (x: number, z: number) => number;
@@ -60,12 +93,12 @@ type EdgePoint = readonly [x: number, z: number];
 type FlatQuad = readonly [a: EdgePoint, b: EdgePoint, c: EdgePoint, d: EdgePoint];
 type PlacedQuad = { corners: FlatQuad; lift: number };
 
-// The road stands a couple of centimetres off the plate, and the base a thousandth above the road, so
-// that nothing the map draws is coplanar with the ground it lies on.
+// The road stands a couple of centimetres off the plate and the occupied ground a thousandth below it,
+// so that nothing the map draws is coplanar with the ground it lies on.
 const ROAD_Y = 0.02;
 const LIFT = 0.001;
 
-// Flat quads in the plane the road is drawn in: local x is world x, local y is world -z, and local z is
+// Flat quads in the plane the map is drawn in: local x is world x, local y is world -z, and local z is
 // how far the quad stands off the height of the mesh carrying it. The corners are given in world order
 // — low x, low z first — and wound here so that the face turned towards the camera is the front face,
 // which is why the material does not have to be drawn double-sided to be seen from above.
@@ -99,8 +132,7 @@ const flatGeometry = (quads: readonly PlacedQuad[]): THREE.BufferGeometry => {
   return geometry;
 };
 
-// The rectangle a lane covers, from its first point to its last and half a road to either side.
-const laneQuad = (minX: number, minZ: number, maxX: number, maxZ: number): FlatQuad => [
+const cellQuad = (minX: number, minZ: number, maxX: number, maxZ: number): FlatQuad => [
   [minX, minZ],
   [maxX, minZ],
   [maxX, maxZ],
@@ -111,61 +143,99 @@ type RoadSegment = { ax: number; az: number; bx: number; bz: number; length: num
 
 const NO_PICK_TARGETS: THREE.Object3D[] = [];
 
-export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentation => {
-  const network = trainingRoadNetwork;
-  const half = network.roadHalfWidth;
+/**
+ * The runs of one kind of cell, each row read left to right. This is the whole of how a grid becomes a
+ * surface: a run of cells is one quad, and the run's extent comes from the cell bounds in
+ * `map-grid.ts` rather than from arithmetic done here, so the picture cannot sit half a cell off the
+ * walk.
+ */
+const cellRuns = (
+  grid: MapGrid,
+  kind: CellKind,
+): Array<{ minX: number; minZ: number; maxX: number; maxZ: number; cells: number }> => {
+  const runs: Array<{ minX: number; minZ: number; maxX: number; maxZ: number; cells: number }> = [];
+  for (let y = 0; y < grid.height; y += 1) {
+    let x = 0;
+    while (x < grid.width) {
+      if (grid.kindAt({ x, y }) !== kind) {
+        x += 1;
+        continue;
+      }
+      let end = x + 1;
+      while (end < grid.width && grid.kindAt({ x: end, y }) === kind) {
+        end += 1;
+      }
+      // Both ends of the quad are read off cell bounds: the far edge of the last cell of the run is
+      // the near edge of the cell after it, which is the same number.
+      const start = cellBounds(grid, { x, y });
+      const stop = cellBounds(grid, { x: end - 1, y });
+      runs.push({ minX: start[0], minZ: start[1], maxX: stop[2], maxZ: stop[3], cells: end - x });
+      x = end;
+    }
+  }
+  return runs;
+};
 
-  // The road and the base are two rough near-dielectric surfaces on a plate of the same kind, so they
-  // take the same dim share of the environment probe and differ only in what colour they are.
+export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentation => {
+  // The grid the plan was built from, not a read of the file: one answer, and the scene cannot be
+  // showing a different map from the one the creatures walk.
+  const grid = trainingPlan().grid;
+
+  // Three surfaces on a plate of the same kind, so they take the same dim share of the environment
+  // probe and differ only in what colour they are. Free ground is the tone the plate already had: a
+  // field, not bare rock. Road is grey and stands a shade above it. Occupied is darker and lower —
+  // it reads as ground you cannot have, which is exactly what it is.
+  const freeMaterial = withProbeWeight(
+    new THREE.MeshStandardMaterial({ color: 0x97ff29, roughness: 0.95, metalness: 0.02 }),
+    'ground',
+  );
   const roadMaterial = withProbeWeight(
     new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 0.9, metalness: 0.04 }),
     'path',
   );
-  const baseMaterial = withProbeWeight(
+  const occupiedMaterial = withProbeWeight(
     new THREE.MeshStandardMaterial({ color: 0x606165, roughness: 0.94, metalness: 0.02 }),
     'ground',
   );
 
-  const roadQuads: PlacedQuad[] = [
-    ...network.horizontal.map((lane) => ({
-      corners: laneQuad(lane.x0, lane.z - half, lane.x1, lane.z + half),
-      lift: 0,
-    })),
-    ...network.vertical.map((lane) => ({
-      corners: laneQuad(lane.x - half, lane.z0, lane.x + half, lane.z1),
-      lift: LIFT,
-    })),
-  ];
-  const road = new THREE.Mesh(flatGeometry(roadQuads), roadMaterial);
-  road.rotation.x = -Math.PI / 2;
-  road.position.y = ROAD_Y;
-  road.receiveShadow = true;
-  road.name = 'road';
-  scene.add(road);
+  const freeRuns = cellRuns(grid, 'free');
+  const roadRuns = cellRuns(grid, 'road');
+  const occupiedRuns = cellRuns(grid, 'occupied');
 
-  // The base is a flat square over the middle of the plate, and the road crosses under it: two of the
-  // twenty lanes run into it, one along each axis, so it is entered from all four sides.
-  const baseHalf = network.baseHalf;
-  const base = new THREE.Mesh(
-    flatGeometry([
-      { corners: laneQuad(-baseHalf, -baseHalf, baseHalf, baseHalf), lift: 2 * LIFT },
-    ]),
-    baseMaterial,
-  );
-  base.rotation.x = -Math.PI / 2;
-  base.position.y = ROAD_Y;
-  base.receiveShadow = true;
-  base.name = 'base';
-  scene.add(base);
+  const addSurface = (name: string, runs: typeof freeRuns, material: THREE.Material, lift: number): number => {
+    const mesh = new THREE.Mesh(
+      flatGeometry(
+        runs.map((run) => ({
+          corners: cellQuad(run.minX, run.minZ, run.maxX, run.maxZ),
+          lift,
+        })),
+      ),
+      material,
+    );
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.y = ROAD_Y;
+    mesh.receiveShadow = true;
+    mesh.name = name;
+    scene.add(mesh);
+    return runs.reduce((total, run) => total + run.cells, 0);
+  };
 
-  const roadSegments: RoadSegment[] = [
-    ...network.horizontal.map((lane) => ({
-      ax: lane.x0, az: lane.z, bx: lane.x1, bz: lane.z, length: Math.abs(lane.x1 - lane.x0),
-    })),
-    ...network.vertical.map((lane) => ({
-      ax: lane.x, az: lane.z0, bx: lane.x, bz: lane.z1, length: Math.abs(lane.z1 - lane.z0),
-    })),
-  ];
+  const freeCells = addSurface('free-ground', freeRuns, freeMaterial, 0);
+  const roadCells = addSurface('road', roadRuns, roadMaterial, LIFT);
+  const occupiedCells = addSurface('occupied-ground', occupiedRuns, occupiedMaterial, 0);
+
+  // Counted from the quads that were built, not from the grid that was read. The two numbers are
+  // published side by side so a reader can see they agree, and the free plate behind them is not what
+  // makes them agree — it is underneath, and these are the quads on top of it.
+  const paintedCells = { free: freeCells, road: roadCells, occupied: occupiedCells };
+
+  const roadSegments: RoadSegment[] = roadRuns.map((run) => ({
+    ax: run.minX,
+    az: (run.minZ + run.maxZ) / 2,
+    bx: run.maxX,
+    bz: (run.minZ + run.maxZ) / 2,
+    length: run.maxX - run.minX,
+  }));
   const routeLength = roadSegments.reduce((total, segment) => total + segment.length, 0);
 
   const distanceToSegment = (px: number, pz: number, segment: RoadSegment): number => {
@@ -205,18 +275,48 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
     return Math.round(covered * 100) / 100;
   };
 
-  // The plate is the whole of the ground, so its four corners are the whole of what the frame has to
-  // hold: what the reading in the page was measuring before was the open cells of a cut raster, and the
-  // cut is gone with the rock it was cut from.
   const plateHalfX = config.map.width / 2;
   const plateHalfZ = config.map.depth / 2;
+  // The core's cell, taken from the content rather than derived from the core's position. Deriving it
+  // here would be a second copy of the cell arithmetic, and the task that put `cellCenter` in one place
+  // would be undone by inverting it somewhere else; the content already holds the cell, so it is read.
+  const coreCell = { x: trainingCoreCell.x, y: trainingCoreCell.y };
+
+  // The routes as the finished config holds them, measured along their own polylines. The step count is
+  // read from the points rather than remembered from the builder, so a route that lost its end on the
+  // way from the grid to the config would be reported short instead of reported correct.
+  const core = config.map.corePosition;
+  const routeReadings = config.map.routes.map((route) => {
+    let length = 0;
+    for (let index = 1; index < route.points.length; index += 1) {
+      const from = route.points[index - 1];
+      const to = route.points[index];
+      length += Math.hypot(to.x - from.x, to.z - from.z);
+    }
+    const last = route.points[route.points.length - 1];
+    // One cell is one world unit, so the polyline length is the number of cells it crosses. Rounded
+    // because a straight run of whole cells adds up to a whole number and a reader should not be asked
+    // to compare 79.00000000000001 with 79.
+    const steps = Math.round(length);
+    return {
+      routeId: route.id,
+      cells: steps + 1,
+      points: route.points.length,
+      lengthInCells: steps,
+      lengthInUnits: Math.round(length * 100) / 100,
+      endsAtCoreCell: last !== undefined && last.x === core.x && last.z === core.z,
+    };
+  });
 
   return {
-    roadHalfWidth: half,
-    baseHalf,
+    roadHalfWidth: 0.5,
+    paintedCells,
+    gridCells: { free: grid.counts.free, road: grid.counts.road, occupied: grid.counts.occupied },
+    coreCell,
+    routeReadings,
     routeLength,
     routeSegmentCount: roadSegments.length,
-    roadPolylines: roadSegments.map((segment) => [[segment.ax, segment.az], [segment.bx, segment.bz]]),
+    roadRects: roadRuns.map((run) => [run.minX, run.minZ, run.maxX, run.maxZ]),
     corridorSamplePoints: [
       [-plateHalfX, -plateHalfZ],
       [plateHalfX, -plateHalfZ],
@@ -235,11 +335,11 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
 //
 // It is a 2D canvas and not a second Three.js view, and that is the decision. A second camera would
 // have to be fitted, kept in step with the first and would cost a second full render of a map that is
-// already fifty-seven thousand cells; this draws about ninety strokes and reads the same snapshot
-// the frame it sits inside is reading. It holds no state of its own: every mark on it is either a
-// fact about the map, which comes from `config` and from the road polylines above, or a fact about
-// this instant, which comes out of the snapshot handed in. A minimap with its own copy of the wave is
-// a minimap that is wrong a frame after the board is right.
+// already nine thousand cells; this draws about a hundred strokes and reads the same snapshot the
+// frame it sits inside is reading. It holds no state of its own: every mark on it is either a fact
+// about the map, which comes from `config` and from the road polylines above, or a fact about this
+// instant, which comes out of the snapshot handed in. A minimap with its own copy of the wave is a
+// minimap that is wrong a frame after the board is right.
 //
 // The one thing it adds that the board does not have is the frame rectangle — where the camera is
 // looking, at what scale. Without it a click moves the view somewhere the player cannot see, and on a
@@ -268,11 +368,10 @@ const MINIMAP_FRAME = 'rgba(233, 245, 242, 0.7)';
 export const createMinimap = (
   canvas: HTMLCanvasElement,
   config: MatchConfig,
-  roadPolylines: ReadonlyArray<ReadonlyArray<readonly [number, number]>>,
+  roadRects: ReadonlyArray<readonly [minX: number, minZ: number, maxX: number, maxZ: number]>,
 ): MinimapPresentation => {
   const context = canvas.getContext('2d');
   const half = Math.max(config.map.width, config.map.depth) / 2;
-  const baseHalf = trainingRoadNetwork.baseHalf;
   let backing = 0;
   let plate = 0;
 
@@ -302,17 +401,7 @@ export const createMinimap = (
   const toX = (x: number): number => (x + half) * unit();
   const toY = (z: number): number => (z + half) * unit();
 
-  const polyline = (points: ReadonlyArray<readonly [number, number]>): void => {
-    if (points.length === 0) {
-      return;
-    }
-    context!.beginPath();
-    context!.moveTo(toX(points[0][0]), toY(points[0][1]));
-    for (let index = 1; index < points.length; index += 1) {
-      context!.lineTo(toX(points[index][0]), toY(points[index][1]));
-    }
-    context!.stroke();
-  };
+  
 
   const dot = (x: number, z: number, radius: number, fill: string): void => {
     context!.beginPath();
@@ -332,28 +421,30 @@ export const createMinimap = (
       context.fillStyle = MINIMAP_PLATE;
       context.fillRect(0, 0, plate, plate);
 
-      // The road is drawn twice: a wide dark pass for the channel and a narrow lit pass down its
-      // middle, which is the same read the board gives — a lit line in a dark trench — at two pixels
-      // wide. One pass at one width reads as a hairline, and a hairline on a map is a wire.
-      context.lineCap = 'round';
-      context.lineJoin = 'round';
-      for (const [width, color] of [[Math.max(3, size * 1.6), MINIMAP_ROAD], [Math.max(1, size * 0.5), MINIMAP_ROAD_CORE]] as const) {
+      // The road is drawn as the rectangles the board is made of: a wide dark pass for the channel and
+      // a narrow lit pass down its middle, which is the same read the board gives — a lit line in a dark
+      // trench — at two pixels wide. One pass at one width reads as a hairline, and a hairline on a map is
+      // a wire. The passes are drawn as strokes along each rectangle's own edges rather than its centre
+      // line, so a run that is one cell wide reads as a road and not as the wire it used to be.
+      context.lineCap = 'butt';
+      context.lineJoin = 'miter';
+      for (const [grow, color] of [[Math.max(3, size * 1.6), MINIMAP_ROAD], [Math.max(1, size * 0.5), MINIMAP_ROAD_CORE]] as const) {
         context.strokeStyle = color;
-        context.lineWidth = width;
-        for (const points of roadPolylines) {
-          polyline(points);
+        context.lineWidth = grow;
+        for (const [minX, minZ, maxX, maxZ] of roadRects) {
+          context.strokeRect(toX(minX), toY(minZ), (maxX - minX) * unit(), (maxZ - minZ) * unit());
         }
       }
 
-      // The base is the one thing on the plate the road leads to, and it is a square here for the same
-      // reason it is a square there.
-      context.strokeStyle = MINIMAP_BASE;
-      context.lineWidth = Math.max(1, size * 0.35);
-      context.strokeRect(
-        toX(-baseHalf),
-        toY(-baseHalf),
-        baseHalf * 2 * unit(),
-        baseHalf * 2 * unit(),
+      // The core is the one thing on the plate the road leads to. It was a square read from a base
+      // half-side that this map no longer has; it is a point now, because that is what it is — one cell
+      // with a world position, drawn at the size a cell is on this panel.
+      context.fillStyle = MINIMAP_BASE;
+      context.fillRect(
+        toX(config.map.corePosition.x) - Math.max(1.5, size * 0.8),
+        toY(config.map.corePosition.z) - Math.max(1.5, size * 0.8),
+        Math.max(3, size * 1.6),
+        Math.max(3, size * 1.6),
       );
 
       // Hostiles last and in the only warm colour on the plate, because they are the one thing on it
