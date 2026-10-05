@@ -1,8 +1,20 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { MAP_FILE_REFUSAL_CLASSES, TICK_RATE, createSimulation, createTrainingScenario, trainingPlan } from './game-core/index.ts';
-import type { Command, CommandResult, MatchSnapshot, MatchStatus, SimulationEvent } from './game-core/index.ts';
+import {
+  MAP_FILE_REFUSAL_CLASSES,
+  TICK_RATE,
+  TOWER_FOOTPRINT_CELLS,
+  cellForSpotId,
+  checkSpot,
+  createSimulation,
+  createTrainingScenario,
+  spotCenter,
+  spotIdForCell,
+  trainingGrid,
+  trainingPlan,
+} from './game-core/index.ts';
+import type { CellKind, Command, CommandResult, MapCell, MatchSnapshot, MatchStatus, SimulationEvent } from './game-core/index.ts';
 import { createMap, createMinimap } from './client/map.ts';
 import { createTowers } from './client/towers.ts';
 import type { LoadedModel, TowerClipReading, TowerModelReading } from './client/towers.ts';
@@ -249,15 +261,77 @@ type MapGeometryReading = {
   // What a click on each pad would do from where the camera stands right now, and what stands in the
   // way when it would not. Honest picking means some angles can hide a niche, and the point of
   // measuring it is that the answer is a number instead of a shrug.
+  /**
+   * How a click resolves, sampled at the spots worth checking rather than at all two thousand.
+   *
+   * It used to be one entry per pad, and that was affordable at a dozen and is not at 2 192: a real
+   * read would project and ray-test every place on the plate several times a second. So this names what
+   * it sampled and how, and `spotProbe` below answers for any single spot on demand — the seam keeps a
+   * way to ask about a specific cell without the page paying for the whole board every frame.
+   */
   picks: Array<{ padId: string; pickable: boolean; blocker: string | null; onScreen: boolean }>;
+  /** Which spots `picks` holds, so a reader knows the sample is a sample and not the board. */
+  picksSampled: number;
+  picksTotal: number;
+/**
+ * The cell a click at a given canvas position resolves to, and the square that would hold it.
+ *
+ * A click is a claim about where the cursor is, and the property that has to survive 100%, 125% and
+ * 150% system scale is exactly that claim — so it is askable at any point without dispatching a command
+ * and without changing the board. The seam asks it; a real click sets the same answer in `lastPick`.
+ */
+  cellAtCanvas: (canvasX: number, canvasY: number) => {
+    cell: { x: number; y: number } | null;
+    /** What the map file says is at that cell: `free`, `road`, `occupied` or null off the plate. */
+    kind: CellKind | null;
+    spotId: string | null;
+    anchor: { x: number; y: number } | null;
+  };
+  /** A sample of spots with both coverage readings, so a reader sees the shape of the board cheaply. */
   pads: Array<{
     padId: string;
     x: number;
     z: number;
     roadDistance: number;
     clearOfRoad: boolean;
+    /** Road cells the spot covers per tower — the whole plate's road, the number that reads largest. */
     coverage: Record<string, number>;
+    /** Route cells the spot covers per tower — the cells creatures actually walk. */
+    routeCoverage: Record<string, number>;
   }>;
+  /**
+   * The whole board's placement currency in one reading, so the numbers do not have to be sampled to be
+   * believed: how many spots exist, how many reach any road, and the worst and best coverage per tower.
+   * Computed once when the map is read rather than per frame — it is a property of the plate.
+   */
+  spotSurvey: {
+    total: number;
+    /** How many anchors have all sixteen cells free, which is the number that matters for the board. */
+    buildable: number;
+    perTower: Array<{
+      towerId: string;
+      range: number;
+      spotsCoveringAnyRoad: number;
+      spotsCoveringAnyRoute: number;
+      worstRoad: number;
+      bestRoad: number;
+      worstRoute: number;
+      bestRoute: number;
+      /** best/worst over the spots that cover something, so the ratio is of real places and not of zero. */
+      spread: number;
+    }>;
+    /** Every spot name reads back as its own cell, over the whole set — the round-trip, counted. */
+    namesRoundTrip: number;
+  };
+  /** One spot, asked for by name, for a caller that wants a fact about a specific cell. */
+  spotProbe: (padId: string) => {
+    padId: string;
+    cell: { x: number; y: number } | null;
+    buildable: boolean;
+    coverage: Record<string, number>;
+    routeCoverage: Record<string, number>;
+    roadDistance: number;
+  } | null;
   /**
    * Which map file this page is running, and the three classes of mistake it could have been refused
    * for. The seam only exists on a page that loaded, so "loaded" is true by construction here and the
@@ -281,6 +355,17 @@ type DebugState = {
   dispatch: (command: Command) => CommandResult | null;
   readonly selectedTowerId: string;
   readonly feedback: { state: FeedbackState; message: string; reason: string | null };
+  /**
+   * The last click resolved to a cell, by number, with the square that held it. A click is a claim about
+   * where the cursor is, and the property that has to hold at 100%, 125% and 150% system scale is that
+   * claim — so it is readable on its own, without building a tower to see it.
+   */
+  readonly lastPick: {
+    screen: { x: number; y: number };
+    cell: { x: number; y: number } | null;
+    spotId: string | null;
+    anchor: { x: number; y: number } | null;
+  } | null;
   readonly objectCount: number;
   readonly rendered: RenderCounters;
   readonly towerPositions: Array<{ x: number; z: number }>;
@@ -565,11 +650,11 @@ const config = (() => {
     throw error;
   }
 })();
-let simulation = createSimulation(config);
-const padDefinitions = new Map(config.map.buildPads.map((pad) => [pad.id, pad]));
 const towerDefinitions = new Map(config.towers.map((tower) => [tower.id, tower]));
 const enemyDefinitions = new Map(config.enemies.map((enemy) => [enemy.id, enemy]));
 const waveCount = config.waves.length;
+// The presentation clock, stated once and handed to every domain as a number: a second copy of it
+// inside two modules is a class of defect this project has already paid for once.
 const STEP_SECONDS = 1 / TICK_RATE;
 const reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
 let reducedMotion = reducedMotionQuery.matches;
@@ -579,6 +664,12 @@ let replayIndex = 0;
 let terminalReported = false;
 const commandLog: CommandLogEntry[] = [];
 const matchReports: MatchReport[] = [];
+let simulation = createSimulation(config);
+const padDefinitions = new Map(config.map.buildPads.map((pad) => [pad.id, pad]));
+// The grid the map is made of, read once from the plan the config was built from. `spotCenter` and
+// `checkSpot` both need it, and both are pure functions of it, so there is nothing here to keep in step:
+// it is the same object the scene paints and the routes were walked over.
+const grid = trainingGrid();
 
 const renderer = new THREE.WebGLRenderer({
   antialias: true,
@@ -668,6 +759,98 @@ scene.add(fillLight);
 // would be a fourth description of the same ground. The map owns the ground; this file owns the light
 // on it.
 const mapPresentation = createMap(scene, config);
+
+// The survey and the sample are declared here rather than beside the config because they read the map
+// the scene just built — the spots and the coverage are properties of what was drawn, so asking before
+// it exists would mean asking a different question.
+const spotSurvey = (() => {
+  const perTower = config.towers.map((tower) => {
+    let coveringRoad = 0;
+    let coveringRoute = 0;
+    let worstRoad = Number.POSITIVE_INFINITY;
+    let bestRoad = 0;
+    let worstRoute = Number.POSITIVE_INFINITY;
+    let bestRoute = 0;
+    for (const cell of mapPresentation.spots) {
+      const position = spotCenter(grid, cell);
+      const road = mapPresentation.roadCoverage(position.x, position.z, tower.range);
+      const route = mapPresentation.routeCoverage(position.x, position.z, tower.range);
+      if (road > 0) {
+        coveringRoad += 1;
+        bestRoad = Math.max(bestRoad, road);
+        worstRoad = Math.min(worstRoad, road);
+      }
+      if (route > 0) {
+        coveringRoute += 1;
+        bestRoute = Math.max(bestRoute, route);
+        worstRoute = Math.min(worstRoute, route);
+      }
+    }
+    // The spread is over the spots that cover something. A worst of zero would make the ratio infinite,
+    // and that would be a statement about the plate having ground no tower can reach rather than about
+    // placement mattering — so how much of the board is blind is named in its own two numbers instead.
+    const spread = Number.isFinite(worstRoute) && worstRoute > 0
+      ? Math.round((bestRoute / worstRoute) * 100) / 100
+      : 0;
+    return {
+      towerId: tower.id,
+      range: tower.range,
+      spotsCoveringAnyRoad: coveringRoad,
+      spotsCoveringAnyRoute: coveringRoute,
+      worstRoad: Number.isFinite(worstRoad) ? worstRoad : 0,
+      bestRoad,
+      worstRoute: Number.isFinite(worstRoute) ? worstRoute : 0,
+      bestRoute,
+      spread,
+    };
+  });
+  // The round-trip over the whole set rather than over the sample: every spot name has to read back as
+  // its own cell, because a save stores that name, and a name that cannot be read back is a save that
+  // replays onto ground the player never chose.
+  let namesRoundTrip = 0;
+  for (const cell of mapPresentation.spots) {
+    const back = cellForSpotId(spotIdForCell(cell));
+    if (back !== null && back.x === cell.x && back.y === cell.y) {
+      namesRoundTrip += 1;
+    }
+  }
+  return {
+    total: mapPresentation.spots.length,
+    buildable: mapPresentation.spots.length,
+    perTower,
+    namesRoundTrip,
+  };
+})();
+
+// The spots the per-frame readings hold. A sample, and named as one: the whole board is 2 192 places
+// and projecting each one several times a second is not a seam, it is a second renderer. So this takes
+// the best and worst by route coverage per tower plus an even stride across the plate, which is enough
+// to see the shape, and any specific cell is one real click or one `spotProbe` call away.
+const spotSample: ReadonlyArray<MapCell> = (() => {
+  const chosen = new Set<string>();
+  for (const tower of config.towers) {
+    const scored = mapPresentation.spots
+      .map((cell) => {
+        const position = spotCenter(grid, cell);
+        return {
+          key: `${cell.x},${cell.y}`,
+          route: mapPresentation.routeCoverage(position.x, position.z, tower.range),
+        };
+      })
+      .sort((left, right) => right.route - left.route || left.key.localeCompare(right.key));
+    for (const entry of scored.slice(0, 6)) chosen.add(entry.key);
+    for (const entry of scored.slice(-4)) chosen.add(entry.key);
+  }
+  for (let index = 0; index < mapPresentation.spots.length; index += 89) {
+    const cell = mapPresentation.spots[index];
+    if (cell) chosen.add(`${cell.x},${cell.y}`);
+  }
+  return [...chosen].map((key) => {
+    const parts = key.split(',').map(Number);
+    return { x: parts[0] as number, y: parts[1] as number };
+  });
+})();
+
 // The minimap reads the road the board drew and the pads the core declared, and nothing else: a
 // second description of the map in the page is a second one to fall out of step with the first.
 const minimap = minimapCanvas
@@ -1137,10 +1320,18 @@ const bootAssets = async () => {
 };
 
 const rejectionMessages: Record<string, string> = {
-  'pad-occupied': 'Pad already occupied',
+  'pad-occupied': 'A tower already stands here',
   'not-enough-gold': 'Not enough aether',
-  'unknown-pad': 'Unknown build pad',
+  'unknown-pad': 'Unknown build spot',
   'unknown-tower': 'Unknown module',
+  // The three ways free ground can refuse a tower, and they are three sentences because they are three
+  // different facts about the ground rather than three ways of saying "no". What a player does next is
+  // different in each case: move off the road, move off the taken ground, or move a cell to get the
+  // whole four-by-four clear.
+  'spot-on-road': 'The road carries the wave · a tower cannot stand on it',
+  'spot-on-occupied': 'This ground is already taken · a tower cannot stand on it',
+  'spot-off-plate': 'That is off the map',
+  'spot-square-blocked': 'A tower needs four by four clear cells',
   'match-finished': 'Match already finished',
   'wave-already-active': 'Wave already active',
   // The core answers the manual start with this and nothing else. Waves run on a clock now, so there
@@ -1759,7 +1950,7 @@ const reportCommandResult = (command: Command, result: CommandResult) => {
       return;
     }
     const name = towerDefinitions.get(command.towerId)?.name ?? command.towerId;
-    setFeedback('accepted', `${name} built on ${command.padId}`);
+    setFeedback('accepted', `${name} built on cell ${spotCellLabel(command.padId)}`);
     return;
   }
   const reason = result.reason ?? 'rejected';
@@ -1769,7 +1960,20 @@ const reportCommandResult = (command: Command, result: CommandResult) => {
     setFeedback('rejected', replayBlockedFeedback, reason);
     return;
   }
-  setFeedback('rejected', rejectionMessages[reason] ?? `Rejected: ${reason}`, reason);
+  const message = rejectionMessages[reason];
+  // A blocked square says how many of its sixteen cells are spoken for, because "the square is not
+  // free" is not something a player can act on and "four of them are taken" is. The count comes from
+  // the core that refused, not from a second reading of the map here.
+  const counted = message !== undefined && result.detail !== undefined
+    ? `${message} · ${result.detail} of ${TOWER_FOOTPRINT_CELLS * TOWER_FOOTPRINT_CELLS} taken`
+    : message;
+  setFeedback('rejected', counted ?? `Rejected: ${reason}`, reason);
+};
+
+/** A spot name as the player reads a cell: the coordinates, not the internal prefix. */
+const spotCellLabel = (padId: string): string => {
+  const cell = cellForSpotId(padId);
+  return cell === null ? padId : `${cell.x}, ${cell.y}`;
 };
 
 // What the two room verbs did, in words. Only the room decides either, so the accepted sentence is a
@@ -3103,20 +3307,22 @@ const padRaycaster = new THREE.Raycaster();
 const pointerNdc = new THREE.Vector2();
 const projectedPad = new THREE.Vector3();
 
-// Picking is a raycast against the pads and the rock together, and the nearest hit decides. The
-// earlier version hit the pads and, failing that, took the nearest pad within a fixed radius of a
-// point on the ground — which is a guess that only agreed with the picture while the camera stood
-// still. Now that the map can be turned, a guess would build a tower in a place the player cannot
-// see, so rock in front of a pad means the click misses. The road and the niche floors are not in
-// the list: they are the ground, eight centimetres above it, and no sight-line runs under them.
+// Picking a cell, not a mesh.
 //
-// The list is empty on this map and the placement path around it is left standing. There is nothing
-// marked on a flat plate to build on — placement on open ground is the work after this one — so the ray
-// hits nothing and the click places nothing, which is the honest answer rather than a spot invented to
-// make the palette do something.
-const pickTargets: THREE.Object3D[] = mapPresentation.pickTargets;
+// The board has 2 192 spots and the map answers "what is at this cell" exactly, so the pick is the
+// same arithmetic run backwards: a ray from the camera meets the plate, the meeting point becomes a
+// cell, and the cell becomes a spot name. There is no mesh to hit and no radius to guess with, which
+// is the whole reason this is a different implementation rather than the old picker with a new list —
+// a guess only agrees with the picture while the camera stands still, and this camera is turned by
+// hand.
+//
+// The plane is the ground the player aims at, not the road's centimetre of lift: a click resolves to
+// the cell whose ground the cursor is over, which is the same cell the picture shows at that point.
+const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -mapPresentation.groundHeight);
+const groundHit = new THREE.Vector3();
 
-const pickPad = (clientX: number, clientY: number): string | null => {
+/** The cell under the cursor, or null when the click misses the plate or lands off its edge. */
+const pickCell = (clientX: number, clientY: number): MapCell | null => {
   const rect = renderer.domElement.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) {
     return null;
@@ -3124,9 +3330,35 @@ const pickPad = (clientX: number, clientY: number): string | null => {
   pointerNdc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
   pointerNdc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
   padRaycaster.setFromCamera(pointerNdc, camera);
-  const [nearest] = padRaycaster.intersectObjects(pickTargets, false);
-  const padId = nearest?.object.userData.padId;
-  return typeof padId === 'string' ? padId : null;
+  const met = padRaycaster.ray.intersectPlane(groundPlane, groundHit);
+  return met === null ? null : mapPresentation.cellAtWorld(met.x, met.z);
+};
+
+/**
+ * Which spot a click names.
+ *
+ * A tower occupies four by four cells and stands in the middle of them, so a click inside a square
+ * should build in that square — not in the square that starts at the cell the cursor happens to be
+ * over. The two differ: the cell under the cursor is the anchor's cell or one of its neighbours, and
+ * resolving by anchor alone would put a tower a cell or two from where the player aimed, which on a
+ * plate covered in buildable ground means aiming at a spot and being refused for standing half in the
+ * road.
+ *
+ * Squares overlap, so a cell can sit inside more than one of them. The map decided which one owns it,
+ * once, when it read the grid — this asks that decision rather than making a second one, and a second
+ * one is how a picker and a picture stop agreeing about the same ground.
+ *
+ * A cell inside no declared square is named by its own anchor. That is not a special case — it is the
+ * same name the cell would have had, and the core refuses it with the reason: road, ground already
+ * taken, or a square that is not all free. Three different answers, from the cells rather than from a
+ * list of places.
+ */
+const pickPad = (clientX: number, clientY: number): string | null => {
+  const cell = pickCell(clientX, clientY);
+  if (cell === null) {
+    return null;
+  }
+  return spotIdForCell(mapPresentation.spotAtCell(cell) ?? cell);
 };
 
 const projectPadToCanvas = (padId: string): { padId: string; x: number; y: number } | null => {
@@ -3350,6 +3582,18 @@ const applyHeldCameraKeys = (deltaSeconds: number): void => {
   applyCameraRig();
 };
 
+// The last cell a click resolved to, and how it got there. Published because the picker's answer is a
+// claim about where the cursor is, and a claim about input has to be checkable by number: the seam can
+// say "this click named cell 47, 44" without the page having to build something for the claim to be
+// visible. It is a reading of the last click and holds no state of its own beyond that.
+let lastPick: {
+  screen: { x: number; y: number };
+  cell: { x: number; y: number } | null;
+  spotId: string | null;
+  /** The square that held the cell, or null when the cell is inside no declared square. */
+  anchor: { x: number; y: number } | null;
+} | null = null;
+
 // A pad click is the only way a player starts anything: a wave starts on its own clock, in the core.
 // There is no second path and no mode that builds locally.
 const attemptPlacement = (padId: string) => {
@@ -3363,7 +3607,17 @@ renderer.domElement.addEventListener('click', (event) => {
     cameraGestureMoved = false;
     return;
   }
-  const padId = pickPad(event.clientX, event.clientY);
+  // The cell is read before the pick, so a click that resolves to nothing — off the plate, or a miss —
+  // still records which cell the cursor was over rather than nothing at all. A reading that says null
+  // because the click missed cannot be told apart from a reading that was never taken.
+  const cell = pickCell(event.clientX, event.clientY);
+  const padId = cell === null ? null : pickPad(event.clientX, event.clientY);
+  lastPick = {
+    screen: { x: event.clientX, y: event.clientY },
+    cell,
+    spotId: padId,
+    anchor: cell === null ? null : mapPresentation.spotAtCell(cell),
+  };
   if (padId) {
     attemptPlacement(padId);
   }
@@ -3627,43 +3881,87 @@ window.__ECHOES_DEBUG__ = {
         enemies: snapshot.enemies.length,
         towers: snapshot.towers.length,
       },
-      picks: config.map.buildPads.map((pad) => {
-        const point = projectPadToCanvas(pad.id);
+      // A click names the cell it lands on, so "pickable" is decided by asking the picker whether a
+      // click at that spot's own screen position comes back with that spot's own name. It is the same
+      // question the real click asks, asked of the same function — not a second opinion about what is
+      // visible, which is how a picker and a picture drift apart.
+      picks: spotSample.map((spot) => {
+        const padId = spotIdForCell(spot);
+        const point = projectPadToCanvas(padId);
         const rect = renderer.domElement.getBoundingClientRect();
         if (!point) {
-          return { padId: pad.id, pickable: false, blocker: 'off-screen', onScreen: false };
+          return { padId, pickable: false, blocker: 'off-screen', onScreen: false };
         }
-        pointerNdc.set((point.x / rect.width) * 2 - 1, -((point.y / rect.height) * 2 - 1));
-        padRaycaster.setFromCamera(pointerNdc, camera);
-        const [nearest] = padRaycaster.intersectObjects(pickTargets, false);
-        const hitPadId = nearest?.object.userData.padId;
+        const onScreen = point.x >= 0 && point.x <= rect.width && point.y >= 0 && point.y <= rect.height;
+        const hitPadId = onScreen ? pickPad(rect.left + point.x, rect.top + point.y) : null;
         return {
-          padId: pad.id,
-          pickable: hitPadId === pad.id,
-          blocker: hitPadId === pad.id ? null : nearest?.object.name || 'nothing',
-          onScreen: point.x >= 0 && point.x <= rect.width && point.y >= 0 && point.y <= rect.height,
+          padId,
+          pickable: hitPadId === padId,
+          blocker: hitPadId === padId ? null : hitPadId ?? 'off-screen',
+          onScreen,
         };
       }),
+      picksSampled: spotSample.length,
+      picksTotal: mapPresentation.spots.length,
       coreEndsRoute: config.map.routes.every((route) => {
         const last = route.points[route.points.length - 1];
         return last.x === config.map.corePosition.x && last.z === config.map.corePosition.z;
       }),
-      pads: config.map.buildPads.map((pad) => {
-        const roadDistance = Math.round(mapPresentation.distanceToRoad(pad.position.x, pad.position.z) * 100) / 100;
+      pads: spotSample.map((spot) => {
+        const position = spotCenter(trainingGrid(), spot);
         const coverage: Record<string, number> = {};
+        const routeCoverage: Record<string, number> = {};
         for (const tower of config.towers) {
-          coverage[tower.id] = mapPresentation.corridorCoverage(pad.position.x, pad.position.z, tower.range);
+          coverage[tower.id] = mapPresentation.roadCoverage(position.x, position.z, tower.range);
+          routeCoverage[tower.id] = mapPresentation.routeCoverage(position.x, position.z, tower.range);
         }
+        const roadDistance = Math.round(mapPresentation.distanceToRoad(position.x, position.z) * 100) / 100;
         return {
-          padId: pad.id,
-          x: pad.position.x,
-          z: pad.position.z,
+          padId: spotIdForCell(spot),
+          x: position.x,
+          z: position.z,
           roadDistance,
           clearOfRoad: roadDistance > mapPresentation.roadHalfWidth + 0.5,
           coverage,
+          routeCoverage,
         };
       }),
+      spotSurvey,
+      cellAtCanvas: (canvasX: number, canvasY: number) => {
+        const rect = renderer.domElement.getBoundingClientRect();
+        const cell = pickCell(rect.left + canvasX, rect.top + canvasY);
+        return {
+          cell,
+          kind: cell === null ? null : grid.kindAt(cell),
+          spotId: cell === null ? null : spotIdForCell(mapPresentation.spotAtCell(cell) ?? cell),
+          anchor: cell === null ? null : mapPresentation.spotAtCell(cell),
+        };
+      },
+      spotProbe: (padId: string) => {
+        const cell = cellForSpotId(padId);
+        if (cell === null) {
+          return null;
+        }
+        const position = spotCenter(trainingGrid(), cell);
+        const coverage: Record<string, number> = {};
+        const routeCoverage: Record<string, number> = {};
+        for (const tower of config.towers) {
+          coverage[tower.id] = mapPresentation.roadCoverage(position.x, position.z, tower.range);
+          routeCoverage[tower.id] = mapPresentation.routeCoverage(position.x, position.z, tower.range);
+        }
+        return {
+          padId,
+          cell,
+          buildable: checkSpot(trainingGrid(), cell).allowed,
+          coverage,
+          routeCoverage,
+          roadDistance: Math.round(mapPresentation.distanceToRoad(position.x, position.z) * 100) / 100,
+        };
+      },
     };
+  },
+  get lastPick() {
+    return lastPick === null ? null : { ...lastPick, cell: lastPick.cell && { ...lastPick.cell }, anchor: lastPick.anchor && { ...lastPick.anchor } };
   },
   get eventCounts() {
     return { ...eventCounts };

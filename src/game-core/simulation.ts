@@ -1,4 +1,6 @@
 import { nextRandom, normalizeSeed } from './rng.ts';
+import { cellForSpotId, checkSpot, spotCells } from './map-grid.ts';
+import type { MapCell } from './map-grid.ts';
 import {
   towerDamageMultiplier,
   towerGrowthLevel,
@@ -136,7 +138,18 @@ type InternalState = {
   rngState: number;
   lastWaveRoll: number | null;
   leaksThisWave: number;
-  pads: Record<string, string | null>;
+  /**
+   * Only occupied spots, and no entry for an empty one — see `MatchSnapshot.pads` for why absence is
+   * the empty value here. The board has thousands of spots, so a full record would cost a frame's
+   * worth of bytes to carry the news that nothing stands on most of them.
+   */
+  pads: Record<string, string>;
+  /**
+   * The cells towers stand on, keyed by cell index. Not on the snapshot — nothing outside this file reads
+   * it, and it is fully reconstructible from the towers — but it is the answer to "is this square clear",
+   * which is a question about cells rather than about spots, and the squares overlap.
+   */
+  claimedCells: Set<number>;
   towers: TowerState[];
   enemies: EnemyState[];
 };
@@ -368,10 +381,9 @@ export class Simulation {
 
   public constructor(config: MatchConfig) {
     this.config = normalizeConfig(config);
-    const pads: Record<string, string | null> = {};
-    for (const pad of this.config.map.buildPads) {
-      pads[pad.id] = null;
-    }
+    // Nothing pre-filled: a key appears here when a tower is built on that spot and stays after, so
+    // the state starts as an empty record rather than as two thousand nulls.
+    const pads: Record<string, string> = {};
     this.state = {
       status: 'preparation',
       tick: 0,
@@ -389,6 +401,7 @@ export class Simulation {
       lastWaveRoll: null,
       leaksThisWave: 0,
       pads,
+      claimedCells: new Set<number>(),
       towers: [],
       enemies: [],
     };
@@ -581,15 +594,83 @@ export class Simulation {
     this.events.push({ type: 'victory', waveIndex: this.state.waveIndex });
   }
 
+  /**
+   * Where a tower may stand, and what stops it when it may not.
+   *
+   * On a map with a cell grid the answer comes off the cells and nowhere else: the spot name reads
+   * back as its cell, and that cell's kind and the fifteen around it are what decide. `road` and
+   * `occupied` are the anchor's own kind, and they are two different refusals because they are two
+   * different facts about the ground — one is the road the wave walks, the other is ground the map
+   * has already spent. A square that is free but not *all* free is a third, and it carries how many
+   * of the sixteen are spoken for, because "this spot is not free" is not something a player can act
+   * on and "four of its cells are taken" is.
+   *
+   * Without a grid the declared pads are the whole rule, and the refusal is the flat `unknown-pad` it
+   * always was — that is the pure-check shape, where the pads were named by hand and there are no
+   * cells to read.
+   */
+  private refuseSpot(padId: string): CommandResult {
+    const cells = this.config.map.cells;
+    if (!cells) {
+      return { accepted: false, reason: 'unknown-pad' };
+    }
+    const anchor = cellForSpotId(padId);
+    if (anchor === null) {
+      return { accepted: false, reason: 'unknown-pad' };
+    }
+    const check = checkSpot(cells, anchor);
+    if (!check.allowed) {
+      return { accepted: false, reason: check.refusal, detail: check.blocked };
+    }
+    // Free by the map's own account, so the only thing left is this match: the player has already built
+    // on this exact spot.
+    return { accepted: false, reason: 'pad-occupied' };
+  }
+
+  /**
+   * How many of a spot's sixteen cells this match has already given to a tower.
+   *
+   * The map says a square is free when nothing has ever been built on it; it cannot say anything about
+   * towers, because towers are not in the file. Without this the squares would overlap freely — the board
+   * has 2 192 of them over 4 760 free cells, so most of them do — and a player could stand two towers on
+   * the same sixteen cells and be told nothing was wrong. It is also what makes the refusal countable: a
+   * square with three of its cells under towers says three, which is the difference between "move a
+   * little" and "move anywhere".
+   */
+  private claimedCellsOf(anchor: MapCell): number {
+    const cells = this.config.map.cells;
+    if (!cells) {
+      return 0;
+    }
+    let claimed = 0;
+    for (const cell of spotCells(anchor)) {
+      if (this.state.claimedCells.has(cell.y * cells.width + cell.x)) {
+        claimed += 1;
+      }
+    }
+    return claimed;
+  }
+
   private placeTower(padId: string, towerId: string): CommandResult {
     if (this.state.status === 'victory' || this.state.status === 'defeat') {
       return { accepted: false, reason: 'match-finished' };
     }
-    if (!this.config.pads.has(padId)) {
-      return { accepted: false, reason: 'unknown-pad' };
-    }
-    if (this.state.pads[padId] !== null) {
+    // The spot itself, asked first: "a tower is already here" is true whatever the ground under it says.
+    if (this.state.pads[padId] !== undefined) {
       return { accepted: false, reason: 'pad-occupied' };
+    }
+
+    const cells = this.config.map.cells;
+    const anchor = cells === undefined ? null : cellForSpotId(padId);
+    // Then the sixteen cells, counted against what this match has already built on. The two checks are
+    // separate sentences on purpose: a square with a neighbour's tower across it is not the same problem
+    // as a square with a tower on it, and it is the first that needs a number to act on.
+    const claimed = anchor === null ? 0 : this.claimedCellsOf(anchor);
+    if (claimed > 0) {
+      return { accepted: false, reason: 'spot-square-blocked', detail: claimed };
+    }
+    if (!this.config.pads.has(padId)) {
+      return this.refuseSpot(padId);
     }
     const definition = this.config.towers.get(towerId);
     if (!definition) {
@@ -603,6 +684,13 @@ export class Simulation {
     this.nextEntityId += 1;
     this.state.gold -= definition.cost;
     this.state.pads[padId] = towerId;
+    // The cells are taken here, where the tower is. A spot that does not exist by the map's account
+    // cannot reach this line, so nothing is claimed for it.
+    if (anchor !== null) {
+      for (const cell of spotCells(anchor)) {
+        this.state.claimedCells.add(cell.y * (cells as NonNullable<typeof cells>).width + cell.x);
+      }
+    }
     this.state.towers.push({ entityId, padId, towerId, cooldownTicks: 0, kills: 0 });
     this.events.push({ type: 'towerPlaced', padId, towerId, gold: this.state.gold });
     return { accepted: true };

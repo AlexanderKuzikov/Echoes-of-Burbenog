@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import { cellBounds, trainingCoreCell, trainingPlan } from '../game-core/index.ts';
-import type { CellKind, MapGrid } from '../game-core/index.ts';
+import { cellBounds, findSpots, spotCells, trainingCoreCell, trainingPlan } from '../game-core/index.ts';
+import type { CellKind, MapCell, MapGrid } from '../game-core/index.ts';
 import type { MatchConfig, MatchSnapshot, Vec2 } from '../game-core/index.ts';
 import { withProbeWeight } from './shared.ts';
 
@@ -81,11 +81,43 @@ export type MapPresentation = {
   distanceToRoad: (x: number, z: number) => number;
   corridorCoverage: (x: number, z: number, range: number) => number;
   /**
-   * Empty, and empty on purpose. Placement on open ground is the work after this one, so there is no
-   * marked spot on the plate to hit and the ray the page casts finds nothing. The page keeps the whole
-   * placement path around it; this is the part that says there is nothing to click.
+   * The plate as a picking plane: a point in world units and the cell it lands on.
+   *
+   * Spots are not meshes. There are 2 192 of them, a mesh each would be a scene of two thousand
+   * objects whose only content is "the ground is here", and the pick would then answer a question
+   * about geometry the map already answers exactly in the grid. So the ray meets the plane, the hit
+   * point becomes a cell, and the cell becomes a spot name — the same arithmetic the map file is
+   * built from, run backwards.
+   *
+   * `height` is the plane the point lands on, published rather than assumed: the road stands a
+   * centimetre above the free ground and a click resolves against the ground a player aimed at, not
+   * against whichever surface happens to be drawn last.
    */
-  pickTargets: THREE.Object3D[];
+  groundHeight: number;
+  cellAtWorld: (x: number, z: number) => MapCell | null;
+  /** The spots that exist, by anchor cell. Read once from the grid, published so the page never re-asks. */
+  spots: ReadonlyArray<MapCell>;
+  /**
+   * The square a cell belongs to, or null when it belongs to none.
+   *
+   * Squares overlap, so a cell can sit inside several and the answer has to be one place rather than
+   * whichever the search met first. It is built once here as a lookup: as a scan it cost three
+   * milliseconds a call over two thousand spots, and the seam asks it on every read — which is a
+   * hundred milliseconds a frame spent re-deciding a constant.
+   */
+  spotAtCell: (cell: MapCell) => MapCell | null;
+  /**
+   * Coverage of the *route* — the road cells creatures actually walk — from a spot, per tower.
+   *
+   * Measured against route cells rather than all road because those are two different numbers and only
+   * one of them decides anything: the network holds 2 416 road cells and the four routes use 317 of
+   * them, 13.1%. A spot can stand beside a carriageway the waves never take, look wonderful on the road
+   * figure and hit nothing all match. Both are reported by the seam; this is the one that is a fact
+   * about the fight.
+   */
+  routeCoverage: (x: number, z: number, range: number) => number;
+  /** The same, against every road cell on the plate. The other number, kept because both were asked for. */
+  roadCoverage: (x: number, z: number, range: number) => number;
   padCount: () => number;
 };
 
@@ -140,8 +172,6 @@ const cellQuad = (minX: number, minZ: number, maxX: number, maxZ: number): FlatQ
 ];
 
 type RoadSegment = { ax: number; az: number; bx: number; bz: number; length: number };
-
-const NO_PICK_TARGETS: THREE.Object3D[] = [];
 
 /**
  * The runs of one kind of cell, each row read left to right. This is the whole of how a grid becomes a
@@ -308,6 +338,55 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
     };
   });
 
+  // Every spot on the plate, read once off the grid the scene is already painting. Two thousand
+  // anchors is a fact about the map rather than a list to keep in step with one, so it is asked of the
+  // grid and published whole; the client's per-frame work is a lookup, not a rescan.
+  const spots = findSpots(grid);
+
+  // Which square each cell belongs to. `findSpots` walks the plate row by row, so the first square to
+  // claim a cell is the one with the lowest row and then the lowest column — the rule is the walk order,
+  // not a separate comparison that could disagree with it.
+  const spotByCell = new Map<number, MapCell>();
+  for (const spot of spots) {
+    for (const cell of spotCells(spot)) {
+      const key = cell.y * grid.width + cell.x;
+      if (!spotByCell.has(key)) {
+        spotByCell.set(key, spot);
+      }
+    }
+  }
+
+  // Route cells as cell centres, gathered once: the road runs describe the *drawn* carriageway, which is
+  // every road cell on the plate, while coverage against the wave is about the 317 the creatures walk.
+  // Both sets are built once here so neither measure costs anything at call time.
+  const roadCellPoints = roadCellsOf(grid);
+  const routeCellPoints = routeCellsOf(grid, trainingPlan().routes.map((route) => route.walk.cells));
+
+  const countWithin = (px: number, pz: number, range: number, cells: ReadonlyArray<readonly [number, number]>): number => {
+    const r2 = range * range;
+    let covered = 0;
+    for (const [cx, cz] of cells) {
+      const dx = cx - px;
+      const dz = cz - pz;
+      if (dx * dx + dz * dz <= r2) {
+        covered += 1;
+      }
+    }
+    return covered;
+  };
+
+  // Cell arithmetic inverted from `cellCenter`, and only there: one conversion decides where a cell is
+  // in the world and this is the other end of the same pair, so a click cannot land on a cell that the
+  // map would not draw.
+  const cellAtWorld = (x: number, z: number): MapCell | null => {
+    const cellX = Math.floor(x + grid.width / 2);
+    const cellY = Math.floor(z + grid.height / 2);
+    if (cellX < 0 || cellY < 0 || cellX >= grid.width || cellY >= grid.height) {
+      return null;
+    }
+    return { x: cellX, y: cellY };
+  };
+
   return {
     roadHalfWidth: 0.5,
     paintedCells,
@@ -325,9 +404,52 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
     ],
     distanceToRoad,
     corridorCoverage,
-    pickTargets: NO_PICK_TARGETS,
-    padCount: () => 0,
+    groundHeight: ROAD_Y,
+    cellAtWorld,
+    spots,
+    // One cell to one square, decided by the same rule as the picking code and built in one pass: a
+    // square claims all sixteen of its cells, and the lowest square wins a contested one. The order is
+    // the spot list's, which is row-major from `findSpots`, so "first writer wins" *is* "lowest square
+    // wins" and the two statements are the same statement.
+    spotAtCell: (cell: MapCell): MapCell | null => spotByCell.get(cell.y * grid.width + cell.x) ?? null,
+    routeCoverage: (x, z, range) => countWithin(x, z, range, routeCellPoints),
+    roadCoverage: (x, z, range) => countWithin(x, z, range, roadCellPoints),
+    padCount: () => spots.length,
   };
+};
+
+/**
+ * The centre of every road cell on the plate, in world units. Built from the grid rather than from the
+ * drawn quads so it agrees with the file by construction, and built once because coverage is asked for
+ * two thousand spots per seam read and a scan of 9 216 cells each time would cost more than the answer.
+ */
+const roadCellsOf = (grid: MapGrid): Array<readonly [number, number]> => {
+  const points: Array<readonly [number, number]> = [];
+  for (let y = 0; y < grid.height; y += 1) {
+    for (let x = 0; x < grid.width; x += 1) {
+      if (grid.kindAt({ x, y }) === 'road') {
+        points.push([x + 0.5 - grid.width / 2, y + 0.5 - grid.height / 2]);
+      }
+    }
+  }
+  return points;
+};
+
+/** The same, for the cells the four routes actually cross. See `routeCoverage` for why it is separate. */
+const routeCellsOf = (
+  grid: MapGrid,
+  walks: ReadonlyArray<ReadonlyArray<MapCell>>,
+): Array<readonly [number, number]> => {
+  const points = new Map<string, readonly [number, number]>();
+  for (const walk of walks) {
+    for (const cell of walk) {
+      points.set(
+        `${cell.x},${cell.y}`,
+        [cell.x + 0.5 - grid.width / 2, cell.y + 0.5 - grid.height / 2],
+      );
+    }
+  }
+  return [...points.values()];
 };
 
 // ---------------------------------------------------------------------------------------------

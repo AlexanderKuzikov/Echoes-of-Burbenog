@@ -21,6 +21,13 @@ export type Command =
 export type CommandResult = {
   accepted: boolean;
   reason?: string;
+  /**
+   * How much of the square a `spot-square-blocked` refusal is talking about: the number of the sixteen
+   * cells that are not free. Carried because "this spot is not free" is not something a player can act
+   * on, and "four of its cells are already taken" is. Absent on every other reason, so a caller that
+   * reads it is reading a refusal that has a count to give.
+   */
+  detail?: number;
 };
 
 export type TowerDefinition = {
@@ -80,6 +87,22 @@ export type BuildPadDefinition = {
   position: Vec2;
 };
 
+/**
+ * The cell model of the map, when the map has one.
+ *
+ * It is optional rather than required so that a scenario can be written as a handful of named places
+ * without inventing a grid for it — the pure checks in `scripts/check-simulation.ts` do exactly that,
+ * and forcing a grid on them would mean every such scenario carries a plate it does not use. When it
+ * is present the placement rule is read off the cells and the declared pads are only their positions;
+ * when it is absent the declared pads are the whole of where a tower may go.
+ */
+export type MapCells = {
+  width: number;
+  height: number;
+  /** The kind at a cell, or null off the plate. The grid's own reader, not a second copy of the map. */
+  kindAt: (cell: { x: number; y: number }) => 'free' | 'road' | 'occupied' | null;
+};
+
 export type RouteDefinition = {
   id: string;
   points: Vec2[];
@@ -100,6 +123,8 @@ export type MapDefinition = {
   coreHealth: number;
   routes: RouteDefinition[];
   buildPads: BuildPadDefinition[];
+  /** The owner's cell grid, when this map has one. See `MapCells`. */
+  cells?: MapCells;
 };
 
 export type MatchRules = {
@@ -183,7 +208,19 @@ export type MatchSnapshot = {
   rngState: number;
   lastWaveRoll: number | null;
   leaksThisWave: number;
-  pads: Record<string, string | null>;
+  /**
+   * Only the spots that have something standing on them, and nothing for the rest.
+   *
+   * This was a record of every pad with `null` for the empty ones, which was affordable at a dozen
+   * pads and is not at two thousand: the board holds 2 192 spots, and a record that named all of them
+   * would add about sixty kilobytes to every frame at twenty frames a second, to say that nothing has
+   * been built yet. Absence is the empty value here, so the reading is "a key means a tower stands
+   * there" — the same fact the record used to say with an explicit `null`, said by not being there.
+   *
+   * A save stores this record, so the shape is part of what a stored run is; a client reading an older
+   * key set still reads it correctly, because every key it holds still means a tower.
+   */
+  pads: Record<string, string>;
   towers: TowerSnapshot[];
   enemies: EnemySnapshot[];
 };

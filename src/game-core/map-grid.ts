@@ -67,6 +67,18 @@ export type MapGrid = {
   counts: Record<CellKind, number>;
 };
 
+/**
+ * The one thing the spot rules ask of a map: what is at a cell. Narrower than `MapGrid` on purpose,
+ * because placement only reads kinds and a caller holding a whole grid should not have to be a whole
+ * grid to ask a question about four cells. A `MapGrid` satisfies it, and so does the minimal reader
+ * a caller builds for itself.
+ */
+export type SpotReader = {
+  width: number;
+  height: number;
+  kindAt: (cell: MapCell) => CellKind | null;
+};
+
 // A Map rather than an object literal: a file carrying the symbol `constructor` is an unknown symbol
 // like any other, and a plain lookup table would answer `constructor` for it.
 const KIND_BY_SYMBOL = new Map<string, CellKind>([
@@ -166,18 +178,165 @@ export const readMapGrid = (raw: unknown): MapGrid => {
 // The only cell-to-world conversion in the project. The plate runs from -width/2 to +width/2, so the
 // centre of cell (x, y) sits half a unit in from the near edge of that cell. One function, so a plate
 // that ever grows a different size has one place to change.
-export const cellCenter = (grid: MapGrid, cell: MapCell): Vec2 => ({
+export const cellCenter = (grid: SpotReader, cell: MapCell): Vec2 => ({
   x: cell.x - grid.width / 2 + 0.5,
   z: cell.y - grid.height / 2 + 0.5,
 });
 
 /** The corners of a cell in world units, taken from `cellCenter` so there is no second conversion. */
-export const cellBounds = (grid: MapGrid, cell: MapCell): readonly [number, number, number, number] => {
+export const cellBounds = (grid: SpotReader, cell: MapCell): readonly [number, number, number, number] => {
   const centre = cellCenter(grid, cell);
   return [centre.x - 0.5, centre.z - 0.5, centre.x + 0.5, centre.z + 0.5];
 };
 
 export const sameCell = (a: MapCell, b: MapCell): boolean => a.x === b.x && a.y === b.y;
+
+// ---------------------------------------------------------------------------------------------
+// Spots: where a tower stands.
+//
+// **A spot is a 4×4 square of cells, and all sixteen have to be free.** Not "mostly free" and not
+// "the cell you clicked is free": a tower standing partly on the carriageway is a tower the road
+// walks through, and a tower standing on rock is a tower hanging off the map. So the square is the
+// test, and the click only chooses which square.
+//
+// **The clicked cell is the square's minimum-x, minimum-y corner** — the anchor. Not its centre,
+// because a four-wide square has no centre cell and "nearest cell to the click" would make the spot
+// a function of sub-cell pointer position, which is the picking bug this project has already paid for
+// once at 125% system scale. The anchor is the cell, and the tower stands 1.5 units in from it: the
+// centre of four cells is half a cell past the centre of the second one.
+//
+// **The name is the cell.** `spot-47-12` is cell (47, 12) and reads back as exactly that, with no
+// table and no counter: a name handed out by a counter survives an edit to the map file and then
+// points at the wrong square, and a save that stored such a name would replay onto ground the player
+// never chose. The prefix carries no numbers, so splitting on it is unambiguous for any cell on a
+// plate under a thousand across, and `cellForSpotId` refuses rather than guesses on anything else.
+// ---------------------------------------------------------------------------------------------
+
+/** A tower stands on four cells by four. Sixteen cells, and every one of them has to be free. */
+export const TOWER_FOOTPRINT_CELLS = 4;
+
+const SPOT_PREFIX = 'spot-';
+
+/** The name of the spot anchored at a cell. Derived from the cell, so it reads back as that cell. */
+export const spotIdForCell = (cell: MapCell): string => `${SPOT_PREFIX}${cell.x}-${cell.y}`;
+
+/** The cell a spot name reads back as, or null when the name is not a spot name of this build. */
+export const cellForSpotId = (spotId: string): MapCell | null => {
+  if (!spotId.startsWith(SPOT_PREFIX)) {
+    return null;
+  }
+  const rest = spotId.slice(SPOT_PREFIX.length);
+  const dash = rest.indexOf('-');
+  if (dash <= 0 || dash === rest.length - 1) {
+    return null;
+  }
+  const x = Number(rest.slice(0, dash));
+  const y = Number(rest.slice(dash + 1));
+  // `Number` accepts things a spot name never holds, so both halves are checked as whole positive
+  // digits rather than trusted: "1e2-3" and " 4-5" would otherwise name cells that exist.
+  const digits = (part: string): boolean => part.length > 0 && /^[0-9]+$/.test(part);
+  if (!digits(rest.slice(0, dash)) || !digits(rest.slice(dash + 1))) {
+    return null;
+  }
+  if (!Number.isInteger(x) || !Number.isInteger(y)) {
+    return null;
+  }
+  return { x, y };
+};
+
+/**
+ * The sixteen cells a spot anchored at `cell` stands on, in the same order every time: four rows of
+ * four, each row left to right. The order is stated because a caller that reads "how many of these are
+ * free" should not have to care, and because a stable order means the first blocking cell a refusal
+ * names is the same cell every run of the same match.
+ */
+export const spotCells = (cell: MapCell): MapCell[] => {
+  const cells: MapCell[] = [];
+  for (let dy = 0; dy < TOWER_FOOTPRINT_CELLS; dy += 1) {
+    for (let dx = 0; dx < TOWER_FOOTPRINT_CELLS; dx += 1) {
+      cells.push({ x: cell.x + dx, y: cell.y + dy });
+    }
+  }
+  return cells;
+};
+
+/** Where a tower stands in world units for a spot anchored at a cell: the middle of its four cells. */
+export const spotCenter = (grid: SpotReader, cell: MapCell): Vec2 => {
+  const anchor = cellCenter(grid, cell);
+  const half = (TOWER_FOOTPRINT_CELLS - 1) / 2;
+  return { x: anchor.x + half, z: anchor.z + half };
+};
+
+/**
+ * Why a spot cannot exist, as a class and not as a sentence. Three causes, and they are three
+ * different facts about the map rather than three ways of saying "no": the clicked cell is part of the
+ * road, the clicked cell is ground the map has taken, or the clicked cell is free but the sixteen
+ * around it are not all free. A square that runs off the plate is a fourth, because a spot whose
+ * sixteenth cell is not on the map is not a spot that was blocked by anything.
+ *
+ * Refused rather than reported as a boolean, and the reason is the spot id: the caller holds a name
+ * and a name can be wrong in more ways than one, so what comes back has to say which way it was wrong.
+ */
+export type SpotRefusal =
+  | 'spot-on-road'
+  | 'spot-on-occupied'
+  | 'spot-off-plate'
+  | 'spot-square-blocked';
+
+export type SpotCheck =
+  | { allowed: true; cell: MapCell; cells: MapCell[] }
+  | { allowed: false; refusal: SpotRefusal; cell: MapCell | null; blocked?: number };
+
+/**
+ * Whether a spot can exist at a cell, and if not, which of the four reasons stopped it. The anchor's
+ * own kind is asked first, because the anchor is the cell the player pointed at and it is the reason
+ * they will read; the other fifteen are counted so a caller can say how much of the square is spoken
+ * for rather than only that something is.
+ */
+export const checkSpot = (grid: SpotReader, cell: MapCell): SpotCheck => {
+  const anchorKind = grid.kindAt(cell);
+  if (anchorKind === null) {
+    return { allowed: false, refusal: 'spot-off-plate', cell: null };
+  }
+  // No count on these two, and that is the point of `blocked` being optional: the anchor is road or
+  // occupied, so the fact that decides it is one cell rather than a tally of the square around it, and
+  // a zero here would read as "nothing of the square is blocked" rather than "this count does not apply".
+  if (anchorKind === 'road') {
+    return { allowed: false, refusal: 'spot-on-road', cell };
+  }
+  if (anchorKind === 'occupied') {
+    return { allowed: false, refusal: 'spot-on-occupied', cell };
+  }
+  const cells = spotCells(cell);
+  let blocked = 0;
+  for (const spotCell of cells) {
+    if (grid.kindAt(spotCell) !== 'free') {
+      blocked += 1;
+    }
+  }
+  if (blocked > 0) {
+    return { allowed: false, refusal: 'spot-square-blocked', cell, blocked };
+  }
+  return { allowed: true, cell, cells };
+};
+
+/**
+ * Every cell on the plate where a spot can exist. The whole set, not a chosen handful of it: the
+ * board is the free ground, and a map that declared forty spots and left two thousand legal squares
+ * unmentioned would be a map whose places are a list again. Read once per plate and kept by the
+ * caller, because it costs one pass over 9 216 cells and callers ask for it every frame.
+ */
+export const findSpots = (grid: SpotReader): MapCell[] => {
+  const cells: MapCell[] = [];
+  for (let y = 0; y + TOWER_FOOTPRINT_CELLS <= grid.height; y += 1) {
+    for (let x = 0; x + TOWER_FOOTPRINT_CELLS <= grid.width; x += 1) {
+      if (checkSpot(grid, { x, y }).allowed) {
+        cells.push({ x, y });
+      }
+    }
+  }
+  return cells;
+};
 
 // ---------------------------------------------------------------------------------------------
 // The route.

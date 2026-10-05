@@ -11,7 +11,15 @@ import { trainingEnemies, trainingWaves } from './contact.ts';
 // is understood by the bundler and by `tsc`. Without it the map loads in the browser and the server
 // refuses to boot, which is a worse split than one extra token.
 import burrowMapFile from '../../content/maps/burrow-01.json' with { type: 'json' };
-import { MapFileError, buildRouteWalk, cellCenter, readMapGrid } from './map-grid.ts';
+import {
+  MapFileError,
+  buildRouteWalk,
+  cellCenter,
+  findSpots,
+  readMapGrid,
+  spotCenter,
+  spotIdForCell,
+} from './map-grid.ts';
 import type { MapCell, MapGrid, RouteWalk } from './map-grid.ts';
 
 // Reaches are 2.8, 2.4 and 3.1 on the forty-unit map, which is 2.9% and 2.5% of its width. On a
@@ -305,12 +313,21 @@ export const trainingPlan = (): TrainingPlan => {
   return cachedPlan;
 };
 
-// **There are no building spots.** Placement on open ground is the next piece of work, and the plate
-// is flat and open, so an empty list is the state that matches the picture: with pads declared and
-// nothing drawn, the debug seam would report places a tower can go and none of them would exist to
-// click. What the grid does give us is the permission — `free` is where a tower may stand — and that
-// is read from the file rather than decided here.
-const trainingPads: BuildPadDefinition[] = [];
+// **Spots come out of the free cells, and there is no list here to keep in step with one.** The plate
+// is flat, so every free cell is ground a tower may stand on and the whole question is whether the
+// four by four around it is clear. `findSpots` asks that once per cell and returns the anchors; the
+// pad list below is that answer, given positions and ids, and nothing decides anything.
+//
+// That is the change from the empty list this replaces. An empty list was honest about a plate with
+// no marked places, and it also meant the debug seam reported places a tower can go while the click
+// hit nothing. Deriving them makes the board the ground the file describes: green is buildable, grey
+// is walkable, dark is neither, and the ids are their own coordinates.
+const trainingPads: BuildPadDefinition[] = findSpots(trainingGrid()).map((cell) => ({
+  id: spotIdForCell(cell),
+  // The middle of the square, not the anchor: a tower drawn on the corner cell of the ground it
+  // occupies reads as a quarter off, and the four-by-four is the thing the player aimed at.
+  position: spotCenter(trainingGrid(), cell),
+}));
 
 export function createTrainingScenario(): MatchConfig {
   const plan = trainingPlan();
@@ -325,6 +342,10 @@ export function createTrainingScenario(): MatchConfig {
     coreHealth: 10,
     routes: [...plan.routeDefinitions],
     buildPads: trainingPads,
+    // The grid itself, so the core can answer "why may I not build here" off the cells rather than off
+    // a list of places. It is handed over as the plan already holds it, not re-read: a second read is a
+    // second answer to a question with one right one, and the map is the same object either way.
+    cells: plan.grid,
   };
   // The wallet, and the only numbers in the match that are not about a specific enemy or a specific
   // wave. Kill rewards live with the roster in `contact.ts` and the wave schedule lives there too; what
