@@ -63,8 +63,8 @@
                  a long refusal walked its pill left over the sector name. A row divides what is there. -->
             <div class="scene-top">
               <div class="scene-caption">
-                <span class="caption-kicker">Sector 01 · Burrow Vault</span>
-                <strong>Schematic combat preview</strong>
+                <span class="caption-kicker">Sector 01 · Burrow 01</span>
+                <strong>Cell map · 96 × 96</strong>
                 <span>Own visual language / reference-inspired readability</span>
               </div>
               <div class="wave-chip">
@@ -81,7 +81,7 @@
             <ul class="combat-log" data-testid="event-feed" aria-label="Combat log"></ul>
             <div class="map-legend" aria-label="Map legend">
               <span><i class="legend-mark legend-mark--path"></i>Route</span>
-              <span><i class="legend-mark legend-mark--build"></i>Build pad</span>
+              <span><i class="legend-mark legend-mark--build"></i>Tower spot</span>
               <span><i class="legend-mark legend-mark--threat"></i>Threat</span>
               <span data-testid="camera-hint">Left drag turns · wheel zooms · right drag pans · WASD walks · R resets</span>
             </div>
@@ -91,7 +91,7 @@
               <span data-testid="selection-card-detail">Range 4.05 · Damage 18</span>
             </div>
           </div>
-          <aside class="viewport-rail" aria-label="Vault map and legend">
+          <aside class="viewport-rail" aria-label="Map of the burrow and legend">
             <!-- The minimap is here and not over the board. A 242-pixel panel in the corner of the scene
                  was standing on five of the forty-four niches, one of them among the four with the best
                  coverage on the map, and a niche the player cannot click is a niche the player cannot
@@ -104,9 +104,9 @@
                 width="220"
                 height="220"
                 role="img"
-                aria-label="Minimap of the whole vault: the road, the niches, built towers, living hostiles and the well. Click it to move the camera there."
+                aria-label="Minimap of the whole burrow: the road, the free ground, built towers, living hostiles and the core. Click it to move the camera there."
               ></canvas>
-              <span class="minimap-caption">Vault</span>
+              <span class="minimap-caption">Burrow 01</span>
             </div>
           </aside>
         </section>
@@ -115,7 +115,7 @@
           <section class="dock-section build-section">
             <div class="dock-heading">
               <span>Build palette</span>
-              <small>Choose a schematic module</small>
+              <small>Choose a tower</small>
             </div>
             <div class="build-list">
               <button class="build-card is-selected" type="button" data-tower-id="pulse-spire" aria-pressed="true">
@@ -135,11 +135,11 @@
           <section class="dock-section status-section">
             <span class="status-kicker">Tactical status</span>
             <strong data-testid="selection-status">Pulse Spire ready</strong>
-            <span class="status-detail" data-testid="command-feedback" data-feedback="idle">Left click a build pad to place</span>
+            <span class="status-detail" data-testid="command-feedback" data-feedback="idle">Left click free ground to place a tower</span>
           </section>
           <section class="dock-section objective-section">
             <span class="status-kicker">Current objective</span>
-            <strong>Hold the ring</strong>
+            <strong>Hold the core</strong>
             <span class="status-detail" data-testid="objective-detail">Waves land on their own · build while the clock runs</span>
           </section>
           <section class="dock-section wave-section">

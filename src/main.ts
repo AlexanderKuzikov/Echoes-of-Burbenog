@@ -3657,7 +3657,7 @@ syncSelection();
 // The speed control is painted by the same function that repaints it on a press, so the state the page
 // opens with is the state the product says it is in and not a value left in the markup.
 syncSpeed();
-setFeedback('idle', 'Left click a build pad to place');
+setFeedback('idle', 'Left click free ground to place a tower');
 applySnapshot(snapshot);
 // The page opens on the entry screen rather than in a preparation: the slot is looked at, never
 // loaded, and the match behind the overlay is a fresh preparation of tick 0 that the player has not
