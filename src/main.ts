@@ -35,7 +35,7 @@ import type {
   SessionFrame,
   VersionStamp,
 } from './protocol/index.ts';
-import { ASSET_MANIFEST_URL, AssetContractError, createAssetRegistry, parseAssetManifest, resolveModelUrl } from './asset-registry.ts';
+import { ASSET_MANIFEST_URL, AssetContractError, createAssetRegistry, instancedEntries, parseAssetManifest, resolveModelUrl } from './asset-registry.ts';
 import type {
   AssetChecks,
   AssetRegistry,
@@ -1052,8 +1052,10 @@ const bootAssets = async () => {
     }
     // One refused model must not take the rest of the registry down with it: the refusal names
     // the model, the accepted ones are still swapped in, and the scene keeps its placeholders.
+    // A terrain record is in the registry and in the totals above it, but it is not fetched: the
+    // client has no place to put a prop yet, and a model it cannot light has no loaded form.
     const settled = await Promise.all(
-      manifest.models.map((entry) =>
+      instancedEntries(manifest).map((entry) =>
         assetRegistry
           .load<LoadedModel>(entry, () => loadModel(entry))
           .then((model) => ({ model }))

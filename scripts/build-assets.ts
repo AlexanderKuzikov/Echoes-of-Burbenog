@@ -19,7 +19,13 @@ import type {
   NodeReading,
   RegistryModelReading,
 } from '../src/asset-budgets.ts';
-import { parseAssetManifest } from '../src/asset-registry.ts';
+import {
+  TERRAIN_SLOT_COUNT,
+  TERRAIN_TRIANGLE_LIMIT,
+  instancedEntries,
+  isTerrainRecord,
+  parseAssetManifest,
+} from '../src/asset-registry.ts';
 import type { AssetManifest, ModelManifestEntry } from '../src/asset-registry.ts';
 
 // Own zero-dependency glTF 2.0 binary generator. Models live in this file as text,
@@ -1586,6 +1592,100 @@ const runSelfTest = (
   );
 };
 
+// The manifest contract, probed through the parser the browser loads the file with. Every rule gets
+// a red run, including the ones this generator never trips on its own, because a rule with no probe
+// is a rule that survives a later edit until an exporter finds it. Each probe asserts the message and
+// not only the refusal: a reason that does not name the value it found is the defect this contract
+// was grown to end, and it has to be caught here rather than in an exporter's report.
+//
+// The terrain records are hand-built, since nothing in this pipeline produces them yet. One is well
+// formed and has to pass, or a set of probes that only refuse things would say nothing about the
+// case the contract exists for.
+const runContractRedChecks = (published: readonly ManifestEntry[]): void => {
+  const lit = published.find((entry) => entry.id === 'pulse-spire') ?? published[0];
+  const terrain = { id: 'land.forest.01', file: 'land.forest.01.glb', bytes: 4096, contentHash: 'sha256:probe', triangles: 1200 };
+  const valid = { slot: 7, kind: 'rock', footprint: 2, solid: true };
+  const withBlock = (land: unknown, extra: Json = {}): unknown => ({ version: 1, models: [{ ...terrain, land, ...extra }] });
+  const withoutBlock = (extra: Json = {}): unknown => ({ version: 1, models: [{ ...terrain, ...extra }] });
+  const withTower = (extra: Json): unknown => ({ version: 1, models: [{ ...lit, ...extra }] });
+  // A file that omits the field omits the key, and a key holding `undefined` is a different file:
+  // the probe has to be the one an exporter would actually send.
+  const dropEmissiveNode = (entry: ManifestEntry): Json => {
+    const copy = { ...entry } as Json;
+    delete copy.emissiveNode;
+    return copy;
+  };
+
+  const accepted = parseAssetManifest(withBlock(valid));
+  assert.equal(accepted.models.length, 1, 'a well-formed terrain record must be accepted');
+  const record = accepted.models[0];
+  assert(isTerrainRecord(record), 'a land.* record has to come back as a terrain record');
+  assert.deepEqual(record.land, valid, 'the land block has to survive the parse unchanged');
+  assert.equal(instancedEntries(accepted).length, 0, 'the client must not fetch a terrain record it cannot place');
+  const litProp = parseAssetManifest(withBlock(valid, { emissiveNode: 'core' }));
+  assert.equal(litProp.models.length, 1, 'a terrain prop that has a lit node may name it');
+  assert.equal(isTerrainRecord(litProp.models[0]), true, 'naming a lit node must not turn a terrain record into a tower');
+  assert.equal(instancedEntries(parseAssetManifest(withTower({}))).length, 1, 'a tower record is still the client\'s to load');
+
+  expectFailure(
+    () => parseAssetManifest(withoutBlock()),
+    /model registry entry 0 land\.forest\.01 is a terrain model and must carry a land block, found none/,
+    'terrain record without its land block',
+  );
+  expectFailure(
+    () => parseAssetManifest(withTower({ land: { slot: 7, kind: 'rock', footprint: 1, solid: true } })),
+    /model registry entry 0 pulse-spire must not carry a land block, and it claims slot 7 kind rock/,
+    'land block on a record the client lights',
+  );
+  expectFailure(
+    () => parseAssetManifest(withBlock({ ...valid, kind: 'mushroom' })),
+    /models\[0\]\.land\.kind "mushroom" is not one of tree, bush, rock, debris, ruin, bone/,
+    'terrain kind outside the list',
+  );
+  for (const slot of [0, 41, 2.5, '7']) {
+    expectFailure(
+      () => parseAssetManifest(withBlock({ ...valid, slot })),
+      new RegExp(`models\\[0\\]\\.land\\.slot .* must be a whole number in 1\\.\\.${TERRAIN_SLOT_COUNT}`),
+      `terrain slot ${String(slot)} outside 1..${TERRAIN_SLOT_COUNT}`,
+    );
+  }
+  expectFailure(
+    () => parseAssetManifest(withBlock({ ...valid, footprint: 3 })),
+    /models\[0\]\.land\.footprint 3 is neither 1 nor 2/,
+    'terrain footprint of 3',
+  );
+  expectFailure(
+    () => parseAssetManifest(withBlock({ ...valid, kind: 'bush', solid: true })),
+    /models\[0\]\.land\.solid true is not a bush: it is low/,
+    'a bush that claims to be solid',
+  );
+  expectFailure(
+    () => parseAssetManifest(withBlock({ ...valid, solid: false })),
+    /models\[0\]\.land\.solid false is not a rock: it stops both/,
+    'a rock that claims not to be solid',
+  );
+  expectFailure(
+    () => parseAssetManifest(withBlock({ ...valid, solid: 'yes' })),
+    /models\[0\]\.land\.solid "yes" must be true or false/,
+    'solid that arrived as text',
+  );
+  expectFailure(
+    () => parseAssetManifest(withBlock(7)),
+    /models\[0\]\.land must be an object with slot, kind, footprint and solid, found 7/,
+    'land block that is not an object',
+  );
+  expectFailure(
+    () => parseAssetManifest(withBlock(valid, { triangles: TERRAIN_TRIANGLE_LIMIT + 1 })),
+    new RegExp(`claims ${TERRAIN_TRIANGLE_LIMIT + 1} triangles, a terrain model allows ${TERRAIN_TRIANGLE_LIMIT}`),
+    'terrain record over the triangle cap',
+  );
+  expectFailure(
+    () => parseAssetManifest({ version: 1, models: [dropEmissiveNode(lit)] }),
+    /model registry entry 0 pulse-spire must name an emissiveNode, found none: only terrain models may go without one/,
+    'tower record without a lit node',
+  );
+};
+
 const parseManifest = (raw: string): { version: number; models: ManifestEntry[] } => {
   const parsed = JSON.parse(raw) as Json;
   const version = asNumber(parsed.version, 'manifest version');
@@ -1647,6 +1747,13 @@ const readAccepted = (): ManifestEntry[] => {
   }
   const entries: ManifestEntry[] = [];
   for (const entry of parsed.models) {
+    // The registry contract takes a terrain record and this generator does not publish one yet.
+    // `verifyGlb` looks a lit node up by name, so it would refuse the file over the one node the
+    // contract lets a terrain record omit — a reason nobody could act on. Refused here by name
+    // instead, and the refusal goes away with the task that puts terrain on the map.
+    if (isTerrainRecord(entry)) {
+      fail(`accepted export: ${entry.id} is a terrain record, and this generator publishes towers and creatures only`);
+    }
     const bytes = readFileSync(join(ACCEPTED_DIR, entry.file));
     verifyGlb(bytes, entry);
     // Only the counts are gated here. The geometry bounds stay the client's job, because the generator
@@ -1737,6 +1844,7 @@ const main = (): void => {
     // list: an accepted artifact that took the id would otherwise be verified with bytes it never
     // had, and the eleven red checks would stop meaning what they mean.
     runSelfTest(MODELS[0], own[0], built.get(own[0].id) as ModelBuild, entries);
+    runContractRedChecks(entries);
   }
   for (const entry of entries) {
     console.log(`published ${entry.id}: ${entry.file} ${entry.bytes} bytes, ${entry.triangles} triangles, ${entry.contentHash}`);

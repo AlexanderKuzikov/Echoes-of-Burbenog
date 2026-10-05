@@ -28,7 +28,7 @@ import {
   describeFailures,
   sumRegistry,
 } from '../src/asset-budgets.ts';
-import { parseAssetManifest } from '../src/asset-registry.ts';
+import { isTerrainRecord, parseAssetManifest } from '../src/asset-registry.ts';
 import type { AssetManifest, ModelManifestEntry } from '../src/asset-registry.ts';
 
 const PROJECT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -455,6 +455,12 @@ const main = (): void => {
 
   const readings: ModelReading[] = [];
   for (const entry of manifest.models) {
+    // This run accepts the export of towers and creatures, and a measurement here is a measurement
+    // of a lit node: the terrain sets arrive from another producer and are checked by the pipeline
+    // that publishes them. A record this script does not measure must not be measured as one.
+    if (isTerrainRecord(entry)) {
+      continue;
+    }
     const bytes = readFileSync(join(SOURCE_DIR, entry.file));
     if (bytes.length !== entry.bytes) {
       fail(`${entry.file}: ${bytes.length} bytes on disk but the manifest claims ${entry.bytes}`);
