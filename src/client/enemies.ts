@@ -41,12 +41,18 @@ export type EnemyModelReading = {
   bodyEmissive: number;
 };
 
-// The ground line: the surface of the road ribbon the enemy stands on, in the same world the route
-// and the massif are built in. It is published rather than copied because two modules with their own
-// copy of a ground height is how a burst ends up floating. Both readers add their own height on top
-// — the kill ring 0.08 above it, a shot impact 0.3 up a body — so this one number means one thing:
-// where the feet are. A creature is modelled with its feet on y = 0 and reads this as its floor.
+// The ground line: how far above the road a creature's feet stand, in world units. It is a clearance
+// and not a height, because the road itself moves — the skin sinks it — and a clearance is the part
+// that does not. The road's own height arrives as a parameter to `createEnemies`, read from the same
+// three heights the ground was painted from, so a creature's feet and the road under it cannot be
+// two numbers that happen to agree. Both readers add this one on top — the kill ring 0.08 above it, a
+// shot impact 0.3 up a body — so it means one thing: where the feet are. A creature is modelled with
+// its feet on y = 0 and reads this as its floor.
 export const ENEMY_BASE_Y = 0.08;
+
+// The road height to stand on when nobody says otherwise. It is the pre-skin value rather than zero so
+// that a caller which has no map — the look sheet in `tools/` — sees the ground it always saw.
+const DEFAULT_ROAD_Y = 0.02;
 
 // The multiplier a creature model is measured in, and the one fact that separates an imported model
 // from the form it replaces. Every creature in the accepted export is authored in world units: the
@@ -654,7 +660,15 @@ type EnemyEntry = EnemyView & {
   release: () => void;
 };
 
-export const createEnemies = (scene: THREE.Scene, modelStore: ReadonlyMap<string, LoadedModel>): EnemyPresentation => {
+export const createEnemies = (
+  scene: THREE.Scene,
+  modelStore: ReadonlyMap<string, LoadedModel>,
+  roadY: number = DEFAULT_ROAD_Y,
+): EnemyPresentation => {
+  // Where a creature's feet land: the road's own height plus the clearance above. One expression, used by
+  // every view, because the two numbers are one fact and the day they were two is the day a creature
+  // stood a third of a cell above the road or below it.
+  const groundY = roadY + ENEMY_BASE_Y;
   const enemyViews = new Map<number, EnemyEntry>();
   let enemyBobOffset = 0;
   let reducedMotion = false;
@@ -882,7 +896,7 @@ export const createEnemies = (scene: THREE.Scene, modelStore: ReadonlyMap<string
         }
         entry.travelX = enemy.x;
         entry.travelZ = enemy.z;
-        entry.group.position.set(enemy.x, ENEMY_BASE_Y, enemy.z);
+        entry.group.position.set(enemy.x, groundY, enemy.z);
         const healthRatio = enemy.maxHealth > 0 ? Math.max(0, Math.min(1, enemy.health / enemy.maxHealth)) : 0;
         entry.healthFill.scale.x = Math.max(healthRatio, 0.001);
         entry.healthFill.position.x = (-entry.look.barWidth / 2) * (1 - healthRatio);
@@ -912,7 +926,7 @@ export const createEnemies = (scene: THREE.Scene, modelStore: ReadonlyMap<string
         // rates, and the per-slot offset keeps a crowd out of lockstep.
         const phase = elapsed * view.look.motion.bobRate + enemySlot * 0.7;
         const bob = reducedMotion ? 0 : Math.sin(phase) * view.look.motion.bob;
-        view.group.position.y = ENEMY_BASE_Y + bob;
+        view.group.position.y = groundY + bob;
         view.rig.rotation.z = reducedMotion ? 0 : Math.sin(elapsed * view.look.motion.swayRate + enemySlot * 1.1) * view.look.motion.sway;
         view.rig.rotation.y = reducedMotion
           ? 0

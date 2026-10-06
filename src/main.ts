@@ -16,6 +16,11 @@ import {
 } from './game-core/index.ts';
 import type { CellKind, Command, CommandResult, MapCell, MatchSnapshot, MatchStatus, SimulationEvent } from './game-core/index.ts';
 import { createMap, createMinimap } from './client/map.ts';
+import { readSkin, splitRules } from './client/skin.ts';
+import type { SkinDefinition } from './client/skin.ts';
+import { createProps } from './client/props.ts';
+import type { PropModel, PropsReadings } from './client/props.ts';
+import type { TerrainReadings } from './client/terrain.ts';
 import { createTowers } from './client/towers.ts';
 import type { LoadedModel, TowerClipReading, TowerModelReading } from './client/towers.ts';
 import { createEnemies } from './client/enemies.ts';
@@ -47,19 +52,22 @@ import type {
   SessionFrame,
   VersionStamp,
 } from './protocol/index.ts';
-import { ASSET_MANIFEST_URL, AssetContractError, createAssetRegistry, instancedEntries, parseAssetManifest, resolveModelUrl } from './asset-registry.ts';
+import { ASSET_MANIFEST_URL, AssetContractError, TERRAIN_ID_PREFIX, createAssetRegistry, instancedEntries, isTerrainRecord, parseAssetManifest, resolveModelUrl, terrainEntries } from './asset-registry.ts';
 import type {
   AssetChecks,
   AssetRegistry,
   AssetStatus,
+  ManifestRecord,
   ModelCheck,
   ModelFootprintReading,
   ModelManifestEntry,
+  TerrainModelEntry,
 } from './asset-registry.ts';
 import {
   MODEL_BUDGET,
   REGISTRY_BUDGET,
   SCENE_BUDGET,
+  TERRAIN_MODEL_BUDGET,
   WORLD_FOOTPRINT_BUDGET,
   checkClipTargets,
   checkModelContract,
@@ -72,6 +80,11 @@ import {
   sumRegistry,
 } from './asset-budgets.ts';
 import type { AssetFailure, ClipTargetReading, NodeReading, SceneReading } from './asset-budgets.ts';
+// Two files, both committed and both imported at build time rather than fetched: the owner's map, and
+// the skin that was written for it. The map is the same module `game-core` reads, so the rows the
+// fingerprint is taken over are the rows the grid was read from and not a second copy of them.
+import mapFile from '../content/maps/burrow-01.json' with { type: 'json' };
+import skinFile from '../content/skins/forest.json' with { type: 'json' };
 import './styles.css';
 
 type RenderCounters = {
@@ -79,6 +92,34 @@ type RenderCounters = {
   towers: number;
   enemies: number;
   routeSegments: number;
+};
+
+/**
+ * What the game read out of the skin file, and what it did about it.
+ *
+ * The two halves are the point. `cellSize` and `reliefAsWritten` are the file's own numbers; `relief`
+ * is what the ground is painted at. They are published side by side because the conversion between
+ * them is the one place in this work where a unit crossed a boundary, and a seam that only carried the
+ * answer would make the arithmetic unfalsifiable.
+ */
+type SkinReading = {
+  version: number;
+  name: string;
+  cellSize: number;
+  fingerprint: string;
+  plateWidth: number;
+  plateHeight: number;
+  relief: { blockedLift: number; roadSink: number; roadFlatten: number };
+  reliefAsWritten: { blockedLift: number; roadSink: number };
+  heights: Record<CellKind, number>;
+  palette: Record<CellKind, readonly [string, string]>;
+  openRules: string[];
+  occupiedRulesLeftOut: string[];
+  tiles: number;
+  fog: { near: number; far: number; color: string };
+  sun: { dir: readonly [number, number, number]; intensity: number; color: string };
+  exposure: number;
+  waterDrawn: false;
 };
 
 type CommandLogEntry = {
@@ -375,6 +416,18 @@ type DebugState = {
   // chamber inventory, and per pad the distance to the road plus how much of the road each tower
   // range reaches. "A niche is off the road" and "niches differ" are then numbers a test can read.
   readonly mapGeometry: MapGeometryReading;
+  /**
+   * The skin as the game believes it: the exporter's cell size, the plate it was written for, and the
+   * relief on both sides of the division. Published in full because the unit is the one number in this
+   * work that could have gone either way, and a reader has to be able to check the arithmetic rather
+   * than take it: `relief.blockedLift` is what the ground is painted at and `reliefAsWritten` is what
+   * the file said, and the ratio between them is the whole decision.
+   */
+  readonly skin: SkinReading;
+  /** What the ground is made of, and what stands on it: cells, faces, cover, and where each kind sits. */
+  readonly terrain: TerrainReadings;
+  /** The forty props, by slot, with the counts a scene walk would find. Null until the registry settles. */
+  readonly props: PropsReadings | null;
   readonly eventCounts: Record<SimulationEvent['type'], number>;
   readonly recentEvents: SimulationEvent[];
   readonly paused: boolean;
@@ -671,6 +724,80 @@ const padDefinitions = new Map(config.map.buildPads.map((pad) => [pad.id, pad]))
 // it is the same object the scene paints and the routes were walked over.
 const grid = trainingGrid();
 
+// The skin: one JSON file carrying the palettes, the three relief numbers, the sky and the forty prop
+// slots. It is imported at build time the same way the map is, so it is a file in this repository and
+// never a request, and it is read here — before the renderer exists — because a match cannot be drawn
+// without it: the ground's colour and the plate's three heights both come out of this file.
+//
+// **A skin that does not match the plate stops the page rather than being drawn around.** The one
+// refusal that matters is the fingerprint: a skin written for a different map carries palettes,
+// counters and forty slots that all describe a different plate, and there is no honest way to put
+// that on this one. A default would be a picture that is wrong in every cell at once and says nothing,
+// which is the failure this project has already paid for twice — in the map's numbers and in a click
+// that painted the wrong cell. `readSkin` checks that the fingerprint, the size and the cell size all
+// agree before a single triangle exists, so this throw is unreachable while the two files in the
+// repository agree with each other, and the console error below is what a reader would see if they
+// ever stopped.
+const skin: SkinDefinition = (() => {
+  try {
+    return readSkin(skinFile, { width: mapFile.width, height: mapFile.height, rows: mapFile.grid });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(`skin refused: ${reason}`);
+    throw error;
+  }
+})();
+
+// The light the file describes, and the one place its numbers become the scene's. The sun direction is
+// the only conversion here that is not an identity: the file states it as a direction, and a
+// directional light wants one too, so the two agree without arithmetic.
+const sky = skin.light.sky;
+const sunDirection = new THREE.Vector3(sky.sunDir[0], sky.sunDir[1], sky.sunDir[2]).normalize();
+const plateWidth = mapFile.width;
+
+/**
+ * The sky the file describes, as the one texture the scene shows behind the plate.
+ *
+ * A gradient from the top of the sky to the bottom of it, with the sun's halo drawn where `sunDir`
+ * puts it. A canvas rather than a colour, because one colour cannot carry a gradient and a flat
+ * backdrop behind a forest reads as a card rather than as air. `glow` is the halo's radius as a share
+ * of the frame height, which is the field's whole job; the halo's colour is the sun colour, so
+ * nothing here is invented.
+ *
+ * The sun's place is a mapping onto the backdrop, not a projection: the horizontal part of its
+ * direction decides which side of the frame it sits on and the vertical part how high. The sky does
+ * not turn with the camera, and projecting it properly would mean rebuilding the texture on every
+ * frame of a turn to move something the player cannot tell apart from a gradient anyway.
+ */
+const skyTexture = (reading: typeof sky): THREE.Texture => {
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const context = canvas.getContext('2d');
+  if (context === null) {
+    return new THREE.Texture();
+  }
+  const gradient = context.createLinearGradient(0, 0, 0, size);
+  gradient.addColorStop(0, reading.top);
+  gradient.addColorStop(1, reading.bottom);
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, size, size);
+  const horizontal = Math.hypot(reading.sunDir[0], reading.sunDir[2]) || 1;
+  const sunX = (0.5 + (reading.sunDir[0] / horizontal) * 0.5) * size;
+  const sunY = (1 - Math.max(0, Math.min(1, reading.sunDir[1]))) * size * 0.5;
+  const radius = Math.max(8, reading.glow * size);
+  const halo = context.createRadialGradient(sunX, sunY, 0, sunX, sunY, radius);
+  halo.addColorStop(0, reading.sun);
+  halo.addColorStop(0.45, `${reading.sun}80`);
+  halo.addColorStop(1, `${reading.sun}00`);
+  context.fillStyle = halo;
+  context.fillRect(0, 0, size, size);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+};
+
 const renderer = new THREE.WebGLRenderer({
   antialias: true,
   alpha: false,
@@ -682,13 +809,17 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.12;
+// The exposure the skin states, replacing the 1.12 this file used to carry as a literal. It is a
+// multiplier on the tone curve and nothing else, so it is read rather than re-derived.
+renderer.toneMappingExposure = sky.exposure;
 renderer.domElement.dataset.testid = 'scene-canvas';
 renderer.domElement.setAttribute('aria-label', '3D tactical scene');
 sceneMount.append(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x08131b);
+// The sky the file describes. It replaces the single dark colour this scene used to carry, which was
+// standing in for a sky nobody had written down.
+scene.background = skyTexture(sky);
 // The fog was 15..31, tuned while the map was twenty-two units across and the stand was fixed over
 // the middle of it: everything in frame sat inside it, and it did its job. A ninety-six unit plate
 // seen from the same stand puts the far corners seventy-eight units away, and at 15..31 the map was
@@ -721,44 +852,72 @@ const camera = new THREE.OrthographicCamera(-8, 8, 5, -5, 0.1, 100);
 camera.position.set(9, 10, 9);
 camera.lookAt(cameraTarget);
 
-const hemisphereLight = new THREE.HemisphereLight(0xa9c9e8, 0x142329, 2.2);
+const hemisphereLight = new THREE.HemisphereLight(sky.hemiSky, sky.hemiGround, sky.hemiI);
 scene.add(hemisphereLight);
 
-const keyLight = new THREE.DirectionalLight(0xffe4bf, 3.4);
-// From the viewer's side and high: the massif rises on the far bank, and light from the far side
-// would put the whole near half of the channel in its shadow. The shadow frustum covers a
-// twenty-eight unit box, not the map, and the box is carried along with the stand — see
-// `followKeyLight`. On the old map the box was the map. On a ninety-six unit one it cannot be: at
-// 1024 pixels a box over the whole plate is ten pixels to a unit and every terrace's edge is mush,
-// while a box that follows the view is thirty-six. A directional light's direction is
-// `position - target`, so the light and its target move together and the direction never changes.
-keyLight.position.set(6, 14, 8);
+const keyLight = new THREE.DirectionalLight(sky.sun, sky.sunI);
+// The sun stands where the file says it stands: the direction is the light's own, and it is applied
+// once per frame by `followKeyLight` so the light travels with the view instead of sliding across the
+// plate as the player turns. The shadow frustum covers what is in frame rather than a fixed box —
+// with sixteen hundred props in the picture a box that covers a fifth of the frame width puts a hard
+// edge across the forest where the shadows stop, which is worse than the softer shadow the wider box
+// costs. The map size is doubled to hold the resolution: covering the frame at 1024 would be about ten
+// pixels to a unit, and a tree trunk at ten pixels is a smudge.
 keyLight.castShadow = true;
-keyLight.shadow.mapSize.set(1024, 1024);
-keyLight.shadow.camera.left = -14;
-keyLight.shadow.camera.right = 14;
-keyLight.shadow.camera.top = 14;
-keyLight.shadow.camera.bottom = -14;
+keyLight.shadow.mapSize.set(2048, 2048);
+keyLight.shadow.bias = -0.0006;
 scene.add(keyLight);
 scene.add(keyLight.target);
 
+/** The sun's offset from the point it lights, at a length that puts it above the tallest tree. */
+const KEY_LIGHT_REACH = 40;
+
 const followKeyLight = (): void => {
   keyLight.target.position.set(cameraRig.targetX, 0, cameraRig.targetZ);
-  keyLight.position.set(cameraRig.targetX + 6, 14, cameraRig.targetZ + 8);
+  keyLight.position.set(
+    cameraRig.targetX + sunDirection.x * KEY_LIGHT_REACH,
+    sunDirection.y * KEY_LIGHT_REACH,
+    cameraRig.targetZ + sunDirection.z * KEY_LIGHT_REACH,
+  );
   keyLight.target.updateMatrixWorld();
 };
 
-const fillLight = new THREE.PointLight(0x2ac7b5, 3.2, 12, 2);
-fillLight.position.set(4, 3, -4);
+// The fill is a second directional light standing opposite the sun, at the file's own colour and
+// strength. It exists for the shadow side: a hemisphere alone leaves everything the sun does not reach
+// flat, and the trees are read mostly by the shape of that darkness.
+const fillLight = new THREE.DirectionalLight(sky.fill, sky.fillI);
+fillLight.position.set(-sunDirection.x, Math.abs(sunDirection.y) * 0.7, -sunDirection.z);
 scene.add(fillLight);
 
-// The ground a match is fought on: the free cells, the road and the occupied cells, all read from the
-// owner's map file by the map module. There is no plate quad here any more and there was no reason for
-// one to survive — it covered the whole 96 by 96 with one colour, and now the file says which of its
-// cells are that colour and which are something else, so a single quad under the three cell surfaces
-// would be a fourth description of the same ground. The map owns the ground; this file owns the light
-// on it.
-const mapPresentation = createMap(scene, config);
+/**
+ * The shadow frustum, sized to the view.
+ *
+ * Declared here and written by `resize`, because the view is what the shadow has to cover: a fixed box
+ * works while the camera looks at the middle of the map and stops working the moment the player zooms
+ * out, which is when the whole plate is in frame and every tree in it wants to cast. One tenth on top
+ * of the frame keeps a prop standing at the edge from losing its shadow to the boundary.
+ */
+const fitShadowToView = (halfWidth: number, halfHeight: number): void => {
+  const reach = Math.max(halfWidth, halfHeight) * 1.1;
+  const camera = keyLight.shadow.camera;
+  if (camera.right !== reach) {
+    camera.left = -reach;
+    camera.right = reach;
+    camera.top = reach;
+    camera.bottom = -reach;
+    camera.updateProjectionMatrix();
+  }
+};
+
+/**
+ * The ground a match is fought on: the free cells, the road and the occupied cells, all read from the
+ * owner's map file and painted from the skin. There is no plate quad here any more and there was no
+ * reason for one to survive — it covered the whole 96 by 96 with one colour, and now the file says
+ * which of its cells are that colour and which are something else, so a single quad under the three
+ * cell surfaces would be a fourth description of the same ground. The map owns the ground; this file
+ * owns the light on it.
+ */
+const mapPresentation = createMap(scene, config, skin);
 
 // The survey and the sample are declared here rather than beside the config because they read the map
 // the scene just built — the spots and the coverage are properties of what was drawn, so asking before
@@ -862,11 +1021,32 @@ const modelStore = new Map<string, LoadedModel>();
 const towers = createTowers(scene, modelStore, padDefinitions);
 // The store is handed to both domains because both of them borrow the same artifacts, and the towers
 // got it first; a creature that cannot be handed a model is a creature the registry loaded for nothing.
-const enemies = createEnemies(scene, modelStore);
+// The creatures and the ground they walk on, from one answer. The road is sunk by the skin and its
+// height is read out of the same three numbers the ground was painted from, so a creature's feet and
+// the road under it cannot come to be two heights that happen to agree.
+const enemies = createEnemies(scene, modelStore, mapPresentation.surfaceHeights.road);
 // Kill bursts and shot traces. A burst is born from an enemy event and a trace from a tower event,
 // and both need the position of a view that belongs to somebody else, so they get their own module
 // and are handed plain positions.
-const combatFx = createCombatFx(scene);
+const combatFx = createCombatFx(scene, mapPresentation.surfaceHeights.road);
+
+// The forty terrain models, keyed by the file the skin names rather than by the registry id, because
+// that is the key the plate asks with: a slot says "this file, this kind, this many cells", and a map
+// from id to file would be a second thing to keep in step with the skin.
+const propStore = new Map<string, PropModel>();
+
+// The props are mounted once, after the registry settles, because they need the files to be there.
+// Until then the occupied cells stand as raised ground with nothing on them, which is a forest with
+// no trees rather than a forest of something else — the point the set-without-props rule turns on.
+let propsPresentation: ReturnType<typeof createProps> | null = null;
+let propsReadings: PropsReadings | null = null;
+
+/** Puts the forty props on the occupied cells, or states why they cannot go up. */
+const mountProps = (): string[] => {
+  propsPresentation = createProps(scene, grid, skin, propStore, mapPresentation.surfaceHeights.occupied);
+  propsReadings = propsPresentation.readings;
+  return propsReadings.refusals.map((entry) => `${entry.reason} (slot ${entry.slot}, ${entry.file})`);
+};
 // One presentation flag for the whole page, told to every domain the moment it changes, and set once
 // here so a browser that already asked for reduced motion is obeyed before the first frame. The page
 // reads it too: the guard, the ambient delta and the tower clip all have to agree.
@@ -931,7 +1111,7 @@ type ModelReading = Omit<ModelCheck, 'modelId' | 'accepted' | 'failures'>;
 
 // The one place a model is accepted. Every refusal is recorded first and then thrown, so the
 // seam can name the model that was refused instead of reporting a registry that is simply broken.
-const refuseModel = (entry: ModelManifestEntry, reading: ModelReading, reason: string): never => {
+const refuseModel = (entry: ManifestRecord, reading: ModelReading, reason: string): never => {
   assetRegistry.recordModelCheck({ modelId: entry.id, accepted: false, ...reading, failures: [reason] });
   throw new AssetContractError(reason);
 };
@@ -1044,13 +1224,48 @@ const readFootprint = (root: THREE.Object3D): { fileRadius: number; minY: number
 const footprintVertex = new THREE.Vector3();
 const roundMeasure = (value: number): number => Number(value.toFixed(5));
 
-const loadModel = async (entry: ModelManifestEntry): Promise<LoadedModel> => {
+/**
+ * How many vertices `POSITION` and `COLOR_0` each carry, measured on the loaded tree.
+ *
+ * `colorVertices` is null when the model has no colour attribute at all, and that is a different
+ * answer from zero: a model with no `COLOR_0` is a model whose material carries the colour, which is
+ * a legitimate file, while a `COLOR_0` of a length other than `POSITION` is a file that will paint the
+ * wrong vertices and pass every other gate on the way. So the absence is reported and the mismatch is
+ * refused, and the two never collapse into one number.
+ */
+const readVertexAttributes = (scene: THREE.Object3D): { positionVertices: number; colorVertices: number | null } => {
+  let positionVertices = 0;
+  let colorVertices: number | null = null;
+  scene.traverse((child) => {
+    const geometry = (child as THREE.Mesh).geometry;
+    if (geometry === undefined || geometry === null) {
+      return;
+    }
+    const position = geometry.getAttribute('position');
+    if (position === undefined) {
+      return;
+    }
+    // One model can hold several meshes, and the question is per mesh rather than per file: a single
+    // primitive whose colours are the wrong length is the defect, and summing first would let a second
+    // mesh's length hide it.
+    if (positionVertices !== position.count || colorVertices !== null) {
+      positionVertices = position.count;
+      colorVertices = geometry.getAttribute('color')?.count ?? null;
+    }
+  });
+  return { positionVertices, colorVertices };
+};
+
+const loadModel = async (entry: ManifestRecord): Promise<LoadedModel | PropModel> => {
   const response = await fetch(resolveModelUrl(entry));
   if (!response.ok) {
     throw new AssetContractError(`model ${entry.id} responded ${response.status}`);
   }
   const buffer = await response.arrayBuffer();
   const digest = await hashArtifact(buffer);
+  // Which of the two record kinds this is, asked once. Everything below branches on it: the budget, the
+  // lit node, and whether a seat exists at all.
+  const terrain = isTerrainRecord(entry);
   const contentHash = {
     performed: digest.hash !== null,
     matches: digest.hash === entry.contentHash,
@@ -1094,14 +1309,20 @@ const loadModel = async (entry: ModelManifestEntry): Promise<LoadedModel> => {
   // — so the page asks both and takes the answer from whichever claims the id. A model nothing will
   // ever instantiate has no seat, and the gate stays out of it rather than inventing a number.
   const geometry = readFootprint(gltf.scene);
-  const seatScale = towers.seatScaleFor(entry.id) ?? enemies.seatScaleFor(entry.id);
+  const seatScale = terrain ? null : towers.seatScaleFor(entry.id) ?? enemies.seatScaleFor(entry.id);
   reading.footprint = {
     ...geometry,
     seatScale,
     worldRadius: seatScale === null ? null : roundMeasure(geometry.fileRadius * seatScale),
   };
   const failures = [
-    ...checkModelContract({ id: entry.id, bytes: entry.bytes, triangles: entry.triangles, ...skeleton.measurement }),
+    // Two record kinds, two budgets, and the difference is not a detail: a tower is about to be
+    // multiplied into a 2x2 seat and a tree is not multiplied at all, so the two numbers that only mean
+    // something for a tower are absent from the terrain budget rather than set high enough to pass.
+    ...checkModelContract(
+      { id: entry.id, bytes: entry.bytes, triangles: entry.triangles, ...skeleton.measurement, ...readVertexAttributes(gltf.scene) },
+      terrain ? TERRAIN_MODEL_BUDGET : MODEL_BUDGET,
+    ),
     ...checkNodeTypes(entry.id, nodes),
     ...checkClipTargets(entry.id, skeleton.targets),
     ...(seatScale === null ? [] : checkWorldFootprint(entry.id, geometry.fileRadius, seatScale)),
@@ -1111,20 +1332,27 @@ const loadModel = async (entry: ModelManifestEntry): Promise<LoadedModel> => {
   if (failures.length > 0) {
     return refuseModel(entry, reading, describeFailures(failures));
   }
-  if (!gltf.scene.getObjectByName(entry.emissiveNode)) {
-    return refuseModel(entry, reading, `model ${entry.id} has no ${entry.emissiveNode} node to animate`);
+  // A terrain record has no lit node and is honest about it: a rock, a stump and a skull have nothing
+  // to light. The tower contract still has to name one, because the client goes looking for it.
+  const towerEntry = terrain ? null : (entry as ModelManifestEntry);
+  if (towerEntry !== null && !gltf.scene.getObjectByName(towerEntry.emissiveNode)) {
+    return refuseModel(entry, reading, `model ${entry.id} has no ${towerEntry.emissiveNode} node to animate`);
   }
   declareModelProbe(gltf.scene);
   assetRegistry.recordModelCheck({ modelId: entry.id, accepted: true, ...reading, failures: [] });
   // The footprint travels with the model: the reading is the measurement, and a view that has to put the
   // body at the height the manifest declares needs the same two numbers the gate just compared.
-  return {
-    entry,
-    scene: gltf.scene,
-    emissiveNode: entry.emissiveNode,
-    clips: gltf.animations,
-    footprint: reading.footprint as ModelFootprintReading,
-  };
+  // A terrain record is returned as the plainer shape it is — a file and a tree — because a prop is
+  // placed by slot rather than swapped into a seat and has no lit node to name or a clip to play.
+  return towerEntry === null
+    ? { entry: entry as TerrainModelEntry, scene: gltf.scene }
+    : {
+        entry: towerEntry,
+        scene: gltf.scene,
+        emissiveNode: towerEntry.emissiveNode,
+        clips: gltf.animations,
+        footprint: reading.footprint as ModelFootprintReading,
+      };
 };
 
 // The status line is a single line of viewport chrome, and two whole digests are exactly what
@@ -1153,11 +1381,14 @@ const gameplayStatus = (): string => {
       ? 'integrity checked'
       : `content hash not checked (${assetRegistry.modelChecks.find((check) => check.contentHash.skippedReason)?.contentHash.skippedReason ?? 'no reason given'})`;
     const ids = assetRegistry.modelIds;
-    // The same two seat lookups the world gate uses to decide which seat a model goes into: a model
-    // with an enemy seat is a creature, and everything else is a tower. Inventing a third list here
-    // would be one more place to forget a name in.
-    const creatures = ids.filter((id) => enemies.seatScaleFor(id) !== null).length;
-    return `Scene online · ${ids.length} models (${ids.length - creatures} towers · ${creatures} creatures) · ${integrity}`;
+    // Three roles, asked of the same two seat lookups the world gate uses plus one list of our own: a
+    // model with an enemy seat is a creature, a record that begins `land.` is a prop the plate places by
+    // slot, and everything else is a tower. Inventing a third list here would be one more place to
+    // forget a name in — and a line that said "43 towers" would be worse than no line.
+    const props = ids.filter((id) => id.startsWith(TERRAIN_ID_PREFIX)).length;
+    const seats = ids.filter((id) => !id.startsWith(TERRAIN_ID_PREFIX));
+    const creatures = seats.filter((id) => enemies.seatScaleFor(id) !== null).length;
+    return `Scene online · ${ids.length} models (${seats.length - creatures} towers · ${creatures} creatures · ${props} props) · ${integrity}`;
   }
   if (status === 'error') {
     return `Scene online · model registry failed: ${viewportRefusal(assetRegistry.error ?? 'unknown reason')}`;
@@ -1263,6 +1494,7 @@ const bootAssets = async () => {
   applyAssetStatus();
   const startedAt = performance.now();
   const accepted: string[] = [];
+  const terrainAccepted: string[] = [];
   let refusal: string | null = null;
   try {
     const response = await fetch(ASSET_MANIFEST_URL);
@@ -1279,14 +1511,16 @@ const bootAssets = async () => {
     if (registryBudgetFailures.length > 0) {
       throw new AssetContractError(describeFailures(registryBudgetFailures));
     }
-    // One refused model must not take the rest of the registry down with it: the refusal names
-    // the model, the accepted ones are still swapped in, and the scene keeps its placeholders.
-    // A terrain record is in the registry and in the totals above it, but it is not fetched: the
-    // client has no place to put a prop yet, and a model it cannot light has no loaded form.
+    // The forty terrain records are fetched with the rest of the registry and in the same pass, because
+    // they are in the same manifest and a separate load would be a second answer to "what does this
+    // registry hold". They go into their own store: a prop is placed by slot on the plate and never
+    // swapped into a seat, so putting one where a tower's model goes would let a tree be drawn in a
+    // tower's place the moment an id collided.
+    const entries: ManifestRecord[] = [...instancedEntries(manifest), ...terrainEntries(manifest)];
     const settled = await Promise.all(
-      instancedEntries(manifest).map((entry) =>
+      entries.map((entry) =>
         assetRegistry
-          .load<LoadedModel>(entry, () => loadModel(entry))
+          .load<LoadedModel | PropModel>(entry, () => loadModel(entry))
           .then((model) => ({ model }))
           .catch((error: unknown) => ({ error })),
       ),
@@ -1294,11 +1528,26 @@ const bootAssets = async () => {
     const refusals: string[] = [];
     for (const outcome of settled) {
       if ('model' in outcome) {
-        modelStore.set(outcome.model.entry.id, outcome.model);
-        accepted.push(outcome.model.entry.id);
+        const id = outcome.model.entry.id;
+        if (isTerrainRecord(outcome.model.entry)) {
+          propStore.set(outcome.model.entry.file, outcome.model as PropModel);
+          terrainAccepted.push(id);
+        } else {
+          modelStore.set(id, outcome.model as LoadedModel);
+          accepted.push(id);
+        }
         continue;
       }
       refusals.push(outcome.error instanceof Error ? outcome.error.message : String(outcome.error));
+    }
+    // A set with a hole in it is not drawn with a hole in it. The props go up as one thing or not at
+    // all, and the refusal is stated rather than swallowed: the alternative is an occupied cell the map
+    // calls blocked and the picture calls walkable, which is the one disagreement this whole cell model
+    // exists to prevent. The ground and the cover on open ground still draw, so the match is playable
+    // and the reason is on screen.
+    const propRefusals = mountProps();
+    if (propRefusals.length > 0) {
+      refusals.push(...propRefusals);
     }
     if (refusals.length > 0) {
       refusal = refusals.join(' | ');
@@ -1310,9 +1559,9 @@ const bootAssets = async () => {
   }
   assetRegistry.recordAssetLoadMs(performance.now() - startedAt);
   if (refusal === null) {
-    assetRegistry.markReady(accepted);
+    assetRegistry.markReady([...accepted, ...terrainAccepted]);
   } else {
-    assetRegistry.markFailed(refusal, accepted);
+    assetRegistry.markFailed(refusal, [...accepted, ...terrainAccepted]);
   }
   applyAssetStatus();
   towers.upgradeWithModels(presentationTime());
@@ -1484,15 +1733,22 @@ let cameraRadius = cameraRadiusAt(CAMERA_ELEVATION);
 // The frustum's own depth, from that same reach. Nothing on the plate is nearer to the camera than
 // the camera is, and the far plane has to hold the far corner of the plate from this far back.
 const CAMERA_NEAR = 0.1;
-// The band the map is coloured against, stated from the stand rather than from the world origin. It was
-// read off the map with the stand sixteen-sixteen out, and the stand has since moved back far enough
-// to keep the plate in front of the camera plane; stated as offsets from the stand's own distance, that
-// move repaints nothing, and a pitch moves the band with the stand instead of sliding the vault out of
-// it.
-const FOG_NEAR_OFFSET = 30 - 16.16;
-const FOG_FAR_OFFSET = 165 - 16.16;
+// The fog band the skin states, as offsets from the stand rather than from the world origin. `fogK` is
+// a pair of fractions **of the plate**, not distances: the exporter writes them against the size of the
+// map so that a plate twice as wide in world units pushes both ends out twice as far, and reading them
+// as units would put the whole match inside the near band. The plate here is `plateWidth` cells wide
+// and one cell is one world unit, so the fraction multiplies that and nothing else — the same
+// conversion the relief went through, reached without dividing again because the multiplier is the
+// plate's own width rather than the exporter's cell size.
+//
+// The numbers this replaces were 30 and 165 measured on the old twenty-two unit map; this forest set
+// puts them at 91.2 and 403.2 world units, so within the frame the fog is much weaker than it was and
+// the far edge of the plate no longer dissolves into the background. That is what the file says, and
+// it is named here because a lighter fog is a visible change rather than a detail.
+const FOG_NEAR_OFFSET = sky.fogK[0] * plateWidth;
+const FOG_FAR_OFFSET = sky.fogK[1] * plateWidth;
 const sceneFog = new THREE.Fog(
-  0x08131b,
+  sky.fog,
   cameraRadius + FOG_NEAR_OFFSET,
   cameraRadius + FOG_FAR_OFFSET,
 );
@@ -1672,6 +1928,11 @@ const applyCameraRig = (): void => {
   camera.top = centreY + halfHeight;
   camera.bottom = centreY - halfHeight;
   camera.updateProjectionMatrix();
+  // The shadow frustum follows the frame, for the reason `fitShadowToView` gives. Written here rather
+  // than in `resize` because the frame changes on every zoom and every turn, not only when the window
+  // does — a shadow box sized to the window but frozen across a zoom-out would put its edge in the
+  // middle of the plate.
+  fitShadowToView(halfWidth, halfHeight);
 };
 
 let appliedViewportWidth = 0;
@@ -3316,10 +3577,20 @@ const projectedPad = new THREE.Vector3();
 // a guess only agrees with the picture while the camera stands still, and this camera is turned by
 // hand.
 //
-// The plane is the ground the player aims at, not the road's centimetre of lift: a click resolves to
-// the cell whose ground the cursor is over, which is the same cell the picture shows at that point.
-const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -mapPresentation.groundHeight);
+// The plate has three heights and the cursor can be over any of them, so the pick is a walk over three
+// planes rather than one. It has to be, and the reason is the order the ray meets them: the camera looks
+// down and forward, so along one ray the ray crosses the highest surface first, then the middle, then
+// the lowest, and the first crossing whose cell is *of that kind* is the surface the player is looking
+// at. A single plane cannot answer that — it answers for the ground it was built at and is wrong by the
+// height of whatever is between the cursor and that ground, which on this plate is half a cell of road
+// and would put a click on the road edge into the free cell behind it.
 const groundHit = new THREE.Vector3();
+
+// Highest first, because that is the order the ray meets them. Read from the map's own three heights
+// rather than from a list written here, so a skin that moved a surface moved the picker with it.
+const pickSurfaces = (Object.entries(mapPresentation.surfaceHeights) as Array<[CellKind, number]>)
+  .sort((a, b) => b[1] - a[1])
+  .map(([kind, height]) => ({ kind, plane: new THREE.Plane(new THREE.Vector3(0, 1, 0), -height) }));
 
 /** The cell under the cursor, or null when the click misses the plate or lands off its edge. */
 const pickCell = (clientX: number, clientY: number): MapCell | null => {
@@ -3330,8 +3601,25 @@ const pickCell = (clientX: number, clientY: number): MapCell | null => {
   pointerNdc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
   pointerNdc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
   padRaycaster.setFromCamera(pointerNdc, camera);
-  const met = padRaycaster.ray.intersectPlane(groundPlane, groundHit);
-  return met === null ? null : mapPresentation.cellAtWorld(met.x, met.z);
+  // The first crossing that lands on a cell of the kind that crossing is the surface of. A crossing that
+  // lands on some other kind is not a miss to give up on — it is a nearer surface of another height in
+  // the way, and the walk continues past it to the one the player can actually see.
+  for (const surface of pickSurfaces) {
+    const met = padRaycaster.ray.intersectPlane(surface.plane, groundHit);
+    if (met === null) {
+      continue;
+    }
+    const cell = mapPresentation.cellAtWorld(met.x, met.z);
+    if (cell !== null && grid.kindAt(cell) === surface.kind) {
+      return cell;
+    }
+  }
+  // Nothing along the ray sits on its own surface, which means the cursor is over a cell whose kind and
+  // height disagree — only reachable if the ground moved after this list was built. The free ground is
+  // the answer that matches every arrangement the picker has ever had, so it is the fallback rather than
+  // a null: refusing every click would be worse than one cell of slack in an impossible case.
+  const fallback = padRaycaster.ray.intersectPlane(pickSurfaces[pickSurfaces.length - 1]?.plane ?? new THREE.Plane(new THREE.Vector3(0, 1, 0), -mapPresentation.groundHeight), groundHit);
+  return fallback === null ? null : mapPresentation.cellAtWorld(fallback.x, fallback.z);
 };
 
 /**
@@ -3832,7 +4120,7 @@ window.__ECHOES_DEBUG__ = {
       // Three readings that are zero or absent on this map and are kept because the seam is a
       // contract the scenarios read. The rock is gone, so there are no wall blocks; the niches went
       // with it, so there are no bays and nothing for a pad to sit in. `openCells` is the free-cell
-      // count, which is what it always meant — the cells a tower may stand on — and it now has a
+      // count, which is what it always meant тАФ the cells a tower may stand on тАФ and it now has a
       // source: the grid.
       bays: 0,
       wallBlocks: 0,
@@ -3876,14 +4164,14 @@ window.__ECHOES_DEBUG__ = {
       minimap: {
         present: minimap !== null,
         // A click is proven by moving the rig, so the reading that matters is the target before and
-        // after — the seam cannot see the click, the test can.
+        // after тАФ the seam cannot see the click, the test can.
         unit: minimap ? Math.round(minimap.scale() * 1000) / 1000 : 0,
         enemies: snapshot.enemies.length,
         towers: snapshot.towers.length,
       },
       // A click names the cell it lands on, so "pickable" is decided by asking the picker whether a
       // click at that spot's own screen position comes back with that spot's own name. It is the same
-      // question the real click asks, asked of the same function — not a second opinion about what is
+      // question the real click asks, asked of the same function тАФ not a second opinion about what is
       // visible, which is how a picker and a picture drift apart.
       picks: spotSample.map((spot) => {
         const padId = spotIdForCell(spot);
@@ -3959,6 +4247,37 @@ window.__ECHOES_DEBUG__ = {
         };
       },
     };
+  },
+  get skin(): SkinReading {
+    return {
+      version: skin.version,
+      name: skin.name,
+      cellSize: skin.cellSize,
+      fingerprint: skin.map.fingerprint,
+      plateWidth: skin.map.width,
+      plateHeight: skin.map.height,
+      relief: skin.relief,
+      reliefAsWritten: skin.reliefAsWritten,
+      heights: mapPresentation.surfaceHeights,
+      palette: {
+        free: skin.ground.free,
+        road: skin.ground.road,
+        occupied: skin.ground.occupied,
+      },
+      openRules: splitRules(skin).open.map((rule) => rule.id),
+      occupiedRulesLeftOut: splitRules(skin).occupied.map((rule) => rule.id),
+      tiles: skin.tiles.length,
+      fog: { near: FOG_NEAR_OFFSET, far: FOG_FAR_OFFSET, color: sky.fog },
+      sun: { dir: sky.sunDir, intensity: sky.sunI, color: sky.sun },
+      exposure: sky.exposure,
+      waterDrawn: false,
+    };
+  },
+  get terrain(): TerrainReadings {
+    return mapPresentation.terrain;
+  },
+  get props(): PropsReadings | null {
+    return propsReadings;
   },
   get lastPick() {
     return lastPick === null ? null : { ...lastPick, cell: lastPick.cell && { ...lastPick.cell }, anchor: lastPick.anchor && { ...lastPick.anchor } };

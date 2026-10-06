@@ -2,7 +2,9 @@ import * as THREE from 'three';
 import { cellBounds, findSpots, spotCells, trainingCoreCell, trainingPlan } from '../game-core/index.ts';
 import type { CellKind, MapCell, MapGrid } from '../game-core/index.ts';
 import type { MatchConfig, MatchSnapshot, Vec2 } from '../game-core/index.ts';
-import { withProbeWeight } from './shared.ts';
+import { createTerrain } from './terrain.ts';
+import type { SurfaceHeights, TerrainReadings } from './terrain.ts';
+import type { SkinDefinition } from './skin.ts';
 
 // ---------------------------------------------------------------------------------------------
 // The map as the owner's file describes it: a grid of cells, and three kinds of surface built from
@@ -10,17 +12,14 @@ import { withProbeWeight } from './shared.ts';
 // a table of hand-entered segments; this one reads the grid and paints what it finds, so the picture
 // and the walk cannot disagree — a creature on the road and the road under it are the same cells.
 //
-// **One quad per run of cells, not per cell.** Painting 9 216 separate quads would draw a grid of
-// squares with gaps between them, which reads as graph paper rather than as ground with a road across
-// it. Consecutive cells of the same kind in a row are therefore one quad, and the runs are counted so
-// the cost is a number and not a hope: 440 quads of free ground, 288 of road, 160 of occupied. The
-// road then reads as a carriageway because it is a continuous surface, and it is not "a grid of
-// cells" anywhere on the frame.
-//
-// The three surfaces are three materials and not one material with three colours, because they mean
-// three different things: road is walkable and nothing may be built on it, free is buildable and not
-// walkable, occupied is neither. A tile that looked different would say the same thing with a picture
-// instead of with a material, and a picture does not survive the next tone pass.
+// **The ground itself is drawn by `terrain.ts`, from the skin file.** The three surfaces are still
+// three kinds of ground and still mean three different things — road is walkable and nothing may be
+// built on it, free is buildable and not walkable, occupied is neither — but their colour and their
+// height come from the skin rather than from three literals in this file: `roadFlatten` and
+// `roadSink` sink the carriageway, `blockedLift` raises the ground a creature cannot walk on, and a
+// point click resolves against has to be the height that ground actually stands at. What stays here
+// is everything that is arithmetic about cells rather than paint: the runs the minimap strokes, the
+// distance to the road, the coverage, the spots and the cell-to-world conversion.
 // ---------------------------------------------------------------------------------------------
 
 /**
@@ -89,11 +88,19 @@ export type MapPresentation = {
    * point becomes a cell, and the cell becomes a spot name — the same arithmetic the map file is
    * built from, run backwards.
    *
-   * `height` is the plane the point lands on, published rather than assumed: the road stands a
-   * centimetre above the free ground and a click resolves against the ground a player aimed at, not
-   * against whichever surface happens to be drawn last.
+   * `groundHeight` is the height the free ground stands at, published rather than assumed: the road
+   * is sunk below it by the skin's own number, and a click that resolved against whichever surface
+   * happens to be drawn last would build a tower a third of a cell from where the player pointed.
    */
   groundHeight: number;
+  /**
+   * Where each kind of cell stands, in world units. Three numbers rather than one because the skin
+   * gives the plate three heights, and picking, the creatures' feet and the props all have to agree
+   * about them — the same three facts read by three consumers from one source.
+   */
+  surfaceHeights: SurfaceHeights;
+  /** What the ground is made of: cells painted, faces between heights, and the cover standing on it. */
+  terrain: TerrainReadings;
   cellAtWorld: (x: number, z: number) => MapCell | null;
   /** The spots that exist, by anchor cell. Read once from the grid, published so the page never re-asks. */
   spots: ReadonlyArray<MapCell>;
@@ -121,55 +128,10 @@ export type MapPresentation = {
   padCount: () => number;
 };
 
-type EdgePoint = readonly [x: number, z: number];
-type FlatQuad = readonly [a: EdgePoint, b: EdgePoint, c: EdgePoint, d: EdgePoint];
-type PlacedQuad = { corners: FlatQuad; lift: number };
-
-// The road stands a couple of centimetres off the plate and the occupied ground a thousandth below it,
-// so that nothing the map draws is coplanar with the ground it lies on.
-const ROAD_Y = 0.02;
-const LIFT = 0.001;
-
-// Flat quads in the plane the map is drawn in: local x is world x, local y is world -z, and local z is
-// how far the quad stands off the height of the mesh carrying it. The corners are given in world order
-// — low x, low z first — and wound here so that the face turned towards the camera is the front face,
-// which is why the material does not have to be drawn double-sided to be seen from above.
-const flatGeometry = (quads: readonly PlacedQuad[]): THREE.BufferGeometry => {
-  const positions = new Float32Array(quads.length * 6 * 3);
-  const normals = new Float32Array(quads.length * 6 * 3);
-  const uvs = new Float32Array(quads.length * 6 * 2);
-  let cursor = 0;
-  const put = ([x, z]: EdgePoint, lift: number): void => {
-    positions[cursor * 3] = x;
-    positions[cursor * 3 + 1] = -z;
-    positions[cursor * 3 + 2] = lift;
-    normals[cursor * 3 + 2] = 1;
-    uvs[cursor * 2] = x;
-    uvs[cursor * 2 + 1] = z;
-    cursor += 1;
-  };
-  for (const { corners, lift } of quads) {
-    const [a, b, c, d] = corners;
-    put(a, lift);
-    put(c, lift);
-    put(b, lift);
-    put(a, lift);
-    put(d, lift);
-    put(c, lift);
-  }
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-  geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-  return geometry;
-};
-
-const cellQuad = (minX: number, minZ: number, maxX: number, maxZ: number): FlatQuad => [
-  [minX, minZ],
-  [maxX, minZ],
-  [maxX, maxZ],
-  [minX, maxZ],
-];
+// The plate the free ground stands at. Everything else is measured off it: the road sinks below it by
+// the skin's `roadSink` and the occupied ground stands above it by `blockedLift`, so this one number
+// is the datum the three heights and every creature that walks on them are read from.
+const PLATE_Y = 0.02;
 
 type RoadSegment = { ax: number; az: number; bx: number; bz: number; length: number };
 
@@ -206,58 +168,32 @@ const cellRuns = (
   return runs;
 };
 
-export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentation => {
+export const createMap = (scene: THREE.Scene, config: MatchConfig, skin: SkinDefinition): MapPresentation => {
   // The grid the plan was built from, not a read of the file: one answer, and the scene cannot be
   // showing a different map from the one the creatures walk.
   const grid = trainingPlan().grid;
 
-  // Three surfaces on a plate of the same kind, so they take the same dim share of the environment
-  // probe and differ only in what colour they are. Free ground is the tone the plate already had: a
-  // field, not bare rock. Road is grey and stands a shade above it. Occupied is darker and lower —
-  // it reads as ground you cannot have, which is exactly what it is.
-  const freeMaterial = withProbeWeight(
-    new THREE.MeshStandardMaterial({ color: 0x97ff29, roughness: 0.95, metalness: 0.02 }),
-    'ground',
-  );
-  const roadMaterial = withProbeWeight(
-    new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 0.9, metalness: 0.04 }),
-    'path',
-  );
-  const occupiedMaterial = withProbeWeight(
-    new THREE.MeshStandardMaterial({ color: 0x606165, roughness: 0.94, metalness: 0.02 }),
-    'ground',
-  );
+  // The ground, in the skin's own colours and at the skin's own three heights. It is one call into
+  // `terrain.ts` because everything about it is paint and height, and this module's business is the
+  // arithmetic over cells — but the three heights come back out of it, because a creature's feet and a
+  // click both have to be resolved against the ground that is actually there.
+  const terrain = createTerrain(scene, grid, skin, PLATE_Y);
 
   const freeRuns = cellRuns(grid, 'free');
   const roadRuns = cellRuns(grid, 'road');
   const occupiedRuns = cellRuns(grid, 'occupied');
 
-  const addSurface = (name: string, runs: typeof freeRuns, material: THREE.Material, lift: number): number => {
-    const mesh = new THREE.Mesh(
-      flatGeometry(
-        runs.map((run) => ({
-          corners: cellQuad(run.minX, run.minZ, run.maxX, run.maxZ),
-          lift,
-        })),
-      ),
-      material,
-    );
-    mesh.rotation.x = -Math.PI / 2;
-    mesh.position.y = ROAD_Y;
-    mesh.receiveShadow = true;
-    mesh.name = name;
-    scene.add(mesh);
-    return runs.reduce((total, run) => total + run.cells, 0);
+  // Counted from the runs the scene drew its other arithmetic over, not from the grid it read. The two
+  // numbers are published side by side so a reader can see they agree, and the terrain's own painted
+  // count sits next to them: three counts of the same plate, taken three ways, and no reason to prefer
+  // one.
+  const paintedCells = {
+    free: terrain.readings.ground.cells.free,
+    road: terrain.readings.ground.cells.road,
+    occupied: terrain.readings.ground.cells.occupied,
   };
-
-  const freeCells = addSurface('free-ground', freeRuns, freeMaterial, 0);
-  const roadCells = addSurface('road', roadRuns, roadMaterial, LIFT);
-  const occupiedCells = addSurface('occupied-ground', occupiedRuns, occupiedMaterial, 0);
-
-  // Counted from the quads that were built, not from the grid that was read. The two numbers are
-  // published side by side so a reader can see they agree, and the free plate behind them is not what
-  // makes them agree — it is underneath, and these are the quads on top of it.
-  const paintedCells = { free: freeCells, road: roadCells, occupied: occupiedCells };
+  void freeRuns;
+  void occupiedRuns;
 
   const roadSegments: RoadSegment[] = roadRuns.map((run) => ({
     ax: run.minX,
@@ -404,7 +340,9 @@ export const createMap = (scene: THREE.Scene, config: MatchConfig): MapPresentat
     ],
     distanceToRoad,
     corridorCoverage,
-    groundHeight: ROAD_Y,
+    groundHeight: PLATE_Y,
+    surfaceHeights: terrain.heights,
+    terrain: terrain.readings,
     cellAtWorld,
     spots,
     // One cell to one square, decided by the same rule as the picking code and built in one pass: a

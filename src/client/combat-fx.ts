@@ -40,7 +40,12 @@ export type CombatFxPresentation = {
   tracesFired: () => number;
 };
 
-export const createCombatFx = (scene: THREE.Scene): CombatFxPresentation => {
+// The kill ring is born on the ground the creature stood on rather than at a fixed height, and the road
+// it is drawn on is handed in from the same three heights the ground was painted from. It takes the
+// same clearance the creatures take, so the two cannot disagree about where the road is — and the road
+// moves with the skin, so a ring drawn at a fixed height would lift off the ground the moment the plate
+// was repainted.
+export const createCombatFx = (scene: THREE.Scene, roadY: number): CombatFxPresentation => {
   const combatBursts: CombatBurst[] = [];
   const combatBurstGeometry = new THREE.RingGeometry(0.22, 0.34, 18);
   const combatBurstColor = new THREE.Color(0x9ff0c9);
@@ -79,7 +84,7 @@ export const createCombatFx = (scene: THREE.Scene): CombatFxPresentation => {
       }),
     );
     mesh.rotation.x = -Math.PI / 2;
-    mesh.position.set(position.x, ENEMY_BASE_Y + 0.08, position.z);
+    mesh.position.set(position.x, roadY + ENEMY_BASE_Y + 0.08, position.z);
     scene.add(mesh);
     combatBursts.push({ mesh, started: elapsed, duration: combatBurstSeconds });
     while (combatBursts.length > MAX_COMBAT_BURSTS) {

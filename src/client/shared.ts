@@ -14,6 +14,9 @@ import * as THREE from 'three';
 export const PROBE_WEIGHTS = {
   ground: 0.1,
   path: 0.15,
+  // Terrain props take a little more of the probe than the ground they stand on: they are the only
+  // thing on the plate with a silhouette, so they are the only thing worth a soft light landing on.
+  prop: 0.2,
   padBase: 0.2,
   towerBase: 0.25,
   towerStem: 0.35,
@@ -95,3 +98,32 @@ export const disposeInstance = (object: THREE.Object3D) => {
     }
   });
 };
+
+// ---------------------------------------------------------------------------------------------
+// A number that belongs to a cell and to nothing else.
+//
+// The ground cover and the props are placed once and never moved, so their placement cannot be a
+// random walk: a stream would make the forest depend on the order the scene happened to build in,
+// and two runs of the same map would stand differently with no way to tell why. So the scatter is
+// read out of the cell itself — the same cell always yields the same four numbers, in any order, on
+// any machine — and `salt` is what lets one cell hold a tree, a bush and two tufts without them
+// landing on top of each other.
+//
+// Integer mixing rather than a floating one, because a hash that loses precision above 2^24 starts
+// giving the same answer for neighbouring cells, and neighbouring cells are precisely the ones whose
+// answers must differ.
+// ---------------------------------------------------------------------------------------------
+
+const mix = (value: number): number => {
+  let mixed = Math.imul(value ^ (value >>> 16), 0x7feb352d);
+  mixed = Math.imul(mixed ^ (mixed >>> 15), 0x846ca68b);
+  return (mixed ^ (mixed >>> 16)) >>> 0;
+};
+
+/** A stable number in `[0, 1)` for one cell and one salt. The same call always answers the same. */
+export const cellNoise = (x: number, y: number, salt: number): number =>
+  mix(Math.imul(x + 1, 0x9e3779b1) ^ Math.imul(y + 1, 0x85ebca77) ^ Math.imul(salt + 1, 0xc2b2ae3d)) / 0x100000000;
+
+/** How many things a cell carries, drawn from the cell rather than from a counter that ran. */
+export const cellCount = (x: number, y: number, salt: number, atMost: number): number =>
+  Math.min(atMost, Math.floor(cellNoise(x, y, salt) * atMost));;
