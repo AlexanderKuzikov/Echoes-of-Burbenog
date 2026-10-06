@@ -7,6 +7,7 @@
 // decides what to refuse.
 
 import type { ClipTargetReading, RegistryReading, SceneReading } from './asset-budgets.ts';
+import { TERRAIN_MODEL_BUDGET } from './asset-budgets.ts';
 
 const ASSET_BASE_URL = '/models/';
 export const ASSET_MANIFEST_URL = `${ASSET_BASE_URL}manifest.json`;
@@ -18,7 +19,7 @@ const ASSET_MANIFEST_VERSION = 1;
 // the two apart, so it is enforced from both sides: a prefixed record without the block is refused,
 // and so is a block on a record that is not terrain. With only one half of that, the boundary would
 // be a convention — a prop could claim a slot that nothing places it in while the slot stayed empty.
-const TERRAIN_ID_PREFIX = 'land.';
+export const TERRAIN_ID_PREFIX = 'land.';
 
 // How many slots a terrain set fills. It is a fact about the grid the skin file describes and not
 // about the model, so the registry refuses numbers outside the range a slot can have and keeps no
@@ -39,9 +40,11 @@ const BLOCKING_KINDS: readonly TerrainKind[] = ['tree', 'rock', 'ruin'];
 
 // Forty terrain models on one grid share the scene budget with everything else on it, so a terrain
 // record is capped far below what a tower may spend on itself. The cap is a rule about the record
-// kind and not a budget measured on a loaded artifact, so it lives next to the contract that reads
-// it: a terrain file over the cap is refused while the registry is parsed, before a byte is fetched.
-export const TERRAIN_TRIANGLE_LIMIT = 1500;
+// kind and not a budget measured on a loaded artifact, so it lives with the budget that measures the
+// artifact: a terrain file over the cap is refused while the registry is parsed, before a byte is
+// fetched. The number itself is in `asset-budgets.ts`, which is the one place a limit is written
+// down — re-exported under the name the parser reads so the message and the budget cannot disagree.
+export const TERRAIN_TRIANGLE_LIMIT = TERRAIN_MODEL_BUDGET.triangles;
 
 export type AssetStatus = 'loading' | 'ready' | 'error';
 
@@ -340,11 +343,17 @@ export const parseAssetManifest = (raw: unknown): AssetManifest => {
 export const isTerrainRecord = (record: ManifestRecord): record is TerrainModelEntry =>
   record.id.startsWith(TERRAIN_ID_PREFIX);
 
-// The records the client instantiates, in file order. A terrain record is in the registry, is counted
-// against the registry budget and carries its placement, but nothing in the client places it yet, and
-// fetching one would be refused for the very thing it is honestly allowed not to have.
+// The records the client puts into a seat, in file order: a tower or a creature. A terrain record is
+// not here — it is placed on the plate by slot rather than by id, and it arrives through the other
+// list below so the two cannot be confused for one another.
 export const instancedEntries = (manifest: AssetManifest): ModelManifestEntry[] =>
   manifest.models.filter((record): record is ModelManifestEntry => !isTerrainRecord(record));
+
+// The records the plate places, by slot. Every one of the forty is expected: a set that cannot fill
+// them cannot draw occupied cells, and the refusal belongs here rather than in a caller that would
+// have to notice a short list.
+export const terrainEntries = (manifest: AssetManifest): TerrainModelEntry[] =>
+  manifest.models.filter((record): record is TerrainModelEntry => isTerrainRecord(record));
 
 // The manifest is the only place that knows which file backs a model, so the client never spells
 // out a model path and a registry change does not touch the code.
@@ -427,10 +436,10 @@ export const createAssetRegistry = () => {
       status = 'error';
       error = reason;
     },
-    // One load per file, no matter how many towers ask for it, so a second view of the same
-    // model never triggers a second request or a second set of GPU resources. Typed on the record
-    // the client instantiates, because that is the only kind of entry this path may be handed.
-    load<T>(entry: ModelManifestEntry, loader: () => Promise<T>): Promise<T> {
+    // One load per file, no matter how many towers or props ask for it, so a second view of the same
+    // model never triggers a second request or a second set of GPU resources. Typed on the record of
+    // either kind, because this path is handed a terrain record as well and both come back as a tree.
+    load<T>(entry: ManifestRecord, loader: () => Promise<T>): Promise<T> {
       const cached = inFlight.get(entry.file);
       if (cached) {
         return cached as Promise<T>;

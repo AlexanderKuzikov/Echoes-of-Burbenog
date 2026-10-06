@@ -1,0 +1,605 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "id": "land.forest.01",
+      "file": "land-forest-01.glb",
+      "bytes": 50304,
+      "contentHash": "sha256:2a769bacd36abb91c65aa32ffe6c792a97b62d0c39ef92940e2d1aa99e171433",
+      "triangles": 390,
+      "land": {
+        "slot": 1,
+        "kind": "tree",
+        "footprint": 1,
+        "solid": true
+      },
+      "height": 6.95557,
+      "radius": 1.00643
+    },
+    {
+      "id": "land.forest.02",
+      "file": "land-forest-02.glb",
+      "bytes": 63408,
+      "contentHash": "sha256:26ebf1aaafe7ac332f5083a69923c17878ee75ea188c04839dbdc91e53c66daa",
+      "triangles": 494,
+      "land": {
+        "slot": 2,
+        "kind": "tree",
+        "footprint": 1,
+        "solid": true
+      },
+      "height": 6.42869,
+      "radius": 1.16743
+    },
+    {
+      "id": "land.forest.03",
+      "file": "land-forest-03.glb",
+      "bytes": 69732,
+      "contentHash": "sha256:4244c16b995d512374c54cbb8b86f205f944adace4230583ae2164229e0ceb45",
+      "triangles": 544,
+      "land": {
+        "slot": 3,
+        "kind": "tree",
+        "footprint": 1,
+        "solid": true
+      },
+      "height": 5.34365,
+      "radius": 1.50332
+    },
+    {
+      "id": "land.forest.04",
+      "file": "land-forest-04.glb",
+      "bytes": 65928,
+      "contentHash": "sha256:6995f2c80a2d6b9a9b45c2ecab98a47554a23d8855a13835df6b19ffc926a61a",
+      "triangles": 514,
+      "land": {
+        "slot": 4,
+        "kind": "tree",
+        "footprint": 1,
+        "solid": true
+      },
+      "height": 6.3,
+      "radius": 0.84679
+    },
+    {
+      "id": "land.forest.05",
+      "file": "land-forest-05.glb",
+      "bytes": 59136,
+      "contentHash": "sha256:c12f811528cc6183bb87a244a0a380bbdc8c8016216db65c7bee4050697039fe",
+      "triangles": 460,
+      "land": {
+        "slot": 5,
+        "kind": "tree",
+        "footprint": 1,
+        "solid": true
+      },
+      "height": 6.90913,
+      "radius": 0.912
+    },
+    {
+      "id": "land.forest.06",
+      "file": "land-forest-06.glb",
+      "bytes": 57752,
+      "contentHash": "sha256:2d0a7fdae2bfebbbd5900f0f18803ee34f99a06ac47e6ba01ba3c486e6ee714e",
+      "triangles": 449,
+      "land": {
+        "slot": 6,
+        "kind": "tree",
+        "footprint": 1,
+        "solid": true
+      },
+      "height": 5.00034,
+      "radius": 1.35407
+    },
+    {
+      "id": "land.forest.07",
+      "file": "land-forest-07.glb",
+      "bytes": 38860,
+      "contentHash": "sha256:360bf6e3ed5c06e4a084e8a13ab1c844fd9e1d844f225678e1a7ee7df663843a",
+      "triangles": 299,
+      "land": {
+        "slot": 7,
+        "kind": "tree",
+        "footprint": 1,
+        "solid": true
+      },
+      "height": 5.6,
+      "radius": 1.09458
+    },
+    {
+      "id": "land.forest.08",
+      "file": "land-forest-08.glb",
+      "bytes": 59908,
+      "contentHash": "sha256:901e64ee8d1acca8c72728ac94a8d27f8fc8c0ef866d6652416c022216404be3",
+      "triangles": 466,
+      "land": {
+        "slot": 8,
+        "kind": "tree",
+        "footprint": 1,
+        "solid": true
+      },
+      "height": 5.8087,
+      "radius": 1.3939
+    },
+    {
+      "id": "land.forest.09",
+      "file": "land-forest-09.glb",
+      "bytes": 47184,
+      "contentHash": "sha256:a6f47c749e4cb0647c511bc83fe6d852e6261828e1633c38c903439444b642a7",
+      "triangles": 365,
+      "land": {
+        "slot": 9,
+        "kind": "tree",
+        "footprint": 1,
+        "solid": true
+      },
+      "height": 3.28009,
+      "radius": 0.82919
+    },
+    {
+      "id": "land.forest.10",
+      "file": "land-forest-10.glb",
+      "bytes": 60904,
+      "contentHash": "sha256:d239eab9202d9b9f60f9749f3ebeff28c98af052471d8171f57875e68de1eaa1",
+      "triangles": 474,
+      "land": {
+        "slot": 10,
+        "kind": "tree",
+        "footprint": 1,
+        "solid": true
+      },
+      "height": 6.01086,
+      "radius": 1.28307
+    },
+    {
+      "id": "land.forest.11",
+      "file": "land-forest-11.glb",
+      "bytes": 18196,
+      "contentHash": "sha256:8338c1a002e1e721414974d99445e720043c70228a90ee064999ac20c39ecd7a",
+      "triangles": 135,
+      "land": {
+        "slot": 11,
+        "kind": "bush",
+        "footprint": 1,
+        "solid": false
+      },
+      "height": 1.16266,
+      "radius": 0.85398
+    },
+    {
+      "id": "land.forest.12",
+      "file": "land-forest-12.glb",
+      "bytes": 20336,
+      "contentHash": "sha256:fa8ffae365f8a8c54ae9529af5616c699cadc2f0ca235211c7c4cd7d0bbe89ba",
+      "triangles": 152,
+      "land": {
+        "slot": 12,
+        "kind": "bush",
+        "footprint": 1,
+        "solid": false
+      },
+      "height": 0.81876,
+      "radius": 1.17312
+    },
+    {
+      "id": "land.forest.13",
+      "file": "land-forest-13.glb",
+      "bytes": 21308,
+      "contentHash": "sha256:6dc1c204ed8d0de3ff233fb1a8a14d73ee1cb4feed794038dec46c9f2bc6e10d",
+      "triangles": 160,
+      "land": {
+        "slot": 13,
+        "kind": "bush",
+        "footprint": 1,
+        "solid": false
+      },
+      "height": 1.16336,
+      "radius": 0.79316
+    },
+    {
+      "id": "land.forest.14",
+      "file": "land-forest-14.glb",
+      "bytes": 16300,
+      "contentHash": "sha256:3a2bd06f0e259cd6e95965e56c263a7fda84eab43063627fae570b2fa2bce9be",
+      "triangles": 120,
+      "land": {
+        "slot": 14,
+        "kind": "bush",
+        "footprint": 1,
+        "solid": false
+      },
+      "height": 0.51033,
+      "radius": 1.37223
+    },
+    {
+      "id": "land.forest.15",
+      "file": "land-forest-15.glb",
+      "bytes": 11260,
+      "contentHash": "sha256:994aae6d9efeb4a2fcc46db0ae6cdb9c2e5b79fa38e8230a2be203e5c3b1e05e",
+      "triangles": 80,
+      "land": {
+        "slot": 15,
+        "kind": "bush",
+        "footprint": 1,
+        "solid": false
+      },
+      "height": 0.62164,
+      "radius": 0.77309
+    },
+    {
+      "id": "land.forest.16",
+      "file": "land-forest-16.glb",
+      "bytes": 20840,
+      "contentHash": "sha256:8ce49640c40df06faca63ff2a120d082db0576fbf3bf8ef62f35ca5e91b86317",
+      "triangles": 156,
+      "land": {
+        "slot": 16,
+        "kind": "bush",
+        "footprint": 1,
+        "solid": false
+      },
+      "height": 0.85381,
+      "radius": 0.94071
+    },
+    {
+      "id": "land.forest.17",
+      "file": "land-forest-17.glb",
+      "bytes": 16300,
+      "contentHash": "sha256:4c3ed247f3891ef73dd7fd9fa64e426608fa012832474b203d20d966b2287076",
+      "triangles": 120,
+      "land": {
+        "slot": 17,
+        "kind": "rock",
+        "footprint": 1,
+        "solid": true
+      },
+      "height": 0.85997,
+      "radius": 0.41953
+    },
+    {
+      "id": "land.forest.18",
+      "file": "land-forest-18.glb",
+      "bytes": 16300,
+      "contentHash": "sha256:1715957fa92b58b49473af68af0a0655abdd3749a52a493cc642131a4eccc8d5",
+      "triangles": 120,
+      "land": {
+        "slot": 18,
+        "kind": "rock",
+        "footprint": 1,
+        "solid": true
+      },
+      "height": 1.49842,
+      "radius": 0.75091
+    },
+    {
+      "id": "land.forest.19",
+      "file": "land-forest-19.glb",
+      "bytes": 19820,
+      "contentHash": "sha256:38c8da7fff51afca598efcc253f62c75460a50bf5d544745be6a6cbea19192fb",
+      "triangles": 148,
+      "land": {
+        "slot": 19,
+        "kind": "rock",
+        "footprint": 2,
+        "solid": true
+      },
+      "height": 2.20632,
+      "radius": 1.09623
+    },
+    {
+      "id": "land.forest.20",
+      "file": "land-forest-20.glb",
+      "bytes": 8992,
+      "contentHash": "sha256:2b5d216484a3566c3528758cc814266d5ffe09233797a2d4be63d6fa35ea76ea",
+      "triangles": 62,
+      "land": {
+        "slot": 20,
+        "kind": "rock",
+        "footprint": 2,
+        "solid": true
+      },
+      "height": 1.71498,
+      "radius": 1.49947
+    },
+    {
+      "id": "land.forest.21",
+      "file": "land-forest-21.glb",
+      "bytes": 8232,
+      "contentHash": "sha256:bc3fb8022d9739c1db9f7951a5c6a701a3829793cc183eed1f678e1a9199c34c",
+      "triangles": 56,
+      "land": {
+        "slot": 21,
+        "kind": "rock",
+        "footprint": 1,
+        "solid": true
+      },
+      "height": 0.8168,
+      "radius": 1.37178
+    },
+    {
+      "id": "land.forest.22",
+      "file": "land-forest-22.glb",
+      "bytes": 5700,
+      "contentHash": "sha256:6fcc9819c482941d5c6a75f62276a84ee5d40b064e3ae150112fba3acf6134cd",
+      "triangles": 36,
+      "land": {
+        "slot": 22,
+        "kind": "rock",
+        "footprint": 1,
+        "solid": true
+      },
+      "height": 0.65184,
+      "radius": 1.11159
+    },
+    {
+      "id": "land.forest.23",
+      "file": "land-forest-23.glb",
+      "bytes": 26380,
+      "contentHash": "sha256:0d44d7519f12aafc1b638da0db23580c8312fa1ab167dbd85c04dd9397cf3bbd",
+      "triangles": 200,
+      "land": {
+        "slot": 23,
+        "kind": "rock",
+        "footprint": 1,
+        "solid": true
+      },
+      "height": 1.18037,
+      "radius": 0.66767
+    },
+    {
+      "id": "land.forest.24",
+      "file": "land-forest-24.glb",
+      "bytes": 28904,
+      "contentHash": "sha256:e8735934b2123bdfcacc4291dc370d417dc79af478f10513615a5885ef161ed8",
+      "triangles": 220,
+      "land": {
+        "slot": 24,
+        "kind": "rock",
+        "footprint": 2,
+        "solid": true
+      },
+      "height": 0.41308,
+      "radius": 1.45395
+    },
+    {
+      "id": "land.forest.25",
+      "file": "land-forest-25.glb",
+      "bytes": 14020,
+      "contentHash": "sha256:582b3d53df87677243a2538872527846a37b54a1d3bd3055aba34b4d5ca0c687",
+      "triangles": 102,
+      "land": {
+        "slot": 25,
+        "kind": "debris",
+        "footprint": 2,
+        "solid": true
+      },
+      "height": 0.72945,
+      "radius": 1.73016
+    },
+    {
+      "id": "land.forest.26",
+      "file": "land-forest-26.glb",
+      "bytes": 24356,
+      "contentHash": "sha256:e2bc4f6d49c20885c3909a90805ed5bf44d84a141f6584c5355593c8347fed76",
+      "triangles": 184,
+      "land": {
+        "slot": 26,
+        "kind": "debris",
+        "footprint": 1,
+        "solid": true
+      },
+      "height": 0.63682,
+      "radius": 0.75628
+    },
+    {
+      "id": "land.forest.27",
+      "file": "land-forest-27.glb",
+      "bytes": 7104,
+      "contentHash": "sha256:eea1af61ae3ebb33233bfe9ccb84451aecbc77e601e1e543072890f54b36c559",
+      "triangles": 47,
+      "land": {
+        "slot": 27,
+        "kind": "debris",
+        "footprint": 1,
+        "solid": true
+      },
+      "height": 0.38243,
+      "radius": 1.2
+    },
+    {
+      "id": "land.forest.28",
+      "file": "land-forest-28.glb",
+      "bytes": 20336,
+      "contentHash": "sha256:fc1f9d0e4820ae7599609188ba5433baa8041b89fae43ffe6fdc0b2474a40605",
+      "triangles": 152,
+      "land": {
+        "slot": 28,
+        "kind": "debris",
+        "footprint": 2,
+        "solid": true
+      },
+      "height": 0.89931,
+      "radius": 1.44088
+    },
+    {
+      "id": "land.forest.29",
+      "file": "land-forest-29.glb",
+      "bytes": 8224,
+      "contentHash": "sha256:b736b29c5f404318fe1e8fd0dd9cb1b27858d2e303f3f2dd4cc20f6c233aee5a",
+      "triangles": 56,
+      "land": {
+        "slot": 29,
+        "kind": "debris",
+        "footprint": 2,
+        "solid": true
+      },
+      "height": 0.49598,
+      "radius": 1.20981
+    },
+    {
+      "id": "land.forest.30",
+      "file": "land-forest-30.glb",
+      "bytes": 18824,
+      "contentHash": "sha256:90e41957a9c1541675ea489d17553632ffb0b92ff65f5eb655b27d0d1fe34fbe",
+      "triangles": 140,
+      "land": {
+        "slot": 30,
+        "kind": "debris",
+        "footprint": 1,
+        "solid": true
+      },
+      "height": 0.41205,
+      "radius": 1.1659
+    },
+    {
+      "id": "land.forest.31",
+      "file": "land-forest-31.glb",
+      "bytes": 17524,
+      "contentHash": "sha256:3af1e85b9975b6dc4e698ebebacc182a540e00123c61c38d605cbd2258e89b9a",
+      "triangles": 130,
+      "land": {
+        "slot": 31,
+        "kind": "ruin",
+        "footprint": 1,
+        "solid": true
+      },
+      "height": 3.396,
+      "radius": 0.75635
+    },
+    {
+      "id": "land.forest.32",
+      "file": "land-forest-32.glb",
+      "bytes": 26852,
+      "contentHash": "sha256:6b35e25bb053fd58a8e1b851d8262fc31177cd0c609f55e43f70a731080d29aa",
+      "triangles": 204,
+      "land": {
+        "slot": 32,
+        "kind": "ruin",
+        "footprint": 2,
+        "solid": true
+      },
+      "height": 2.75306,
+      "radius": 1.51573
+    },
+    {
+      "id": "land.forest.33",
+      "file": "land-forest-33.glb",
+      "bytes": 41472,
+      "contentHash": "sha256:8b89603711408c93845a042cf5fff69c9f976d45dc5caa21e6ba9fdd7c314313",
+      "triangles": 320,
+      "land": {
+        "slot": 33,
+        "kind": "ruin",
+        "footprint": 2,
+        "solid": true
+      },
+      "height": 2.42624,
+      "radius": 1.78074
+    },
+    {
+      "id": "land.forest.34",
+      "file": "land-forest-34.glb",
+      "bytes": 13244,
+      "contentHash": "sha256:04d4d3ecb8f3f4e0eccab1c28cfaf17d649809e159e013bc34e0b237fc8a3377",
+      "triangles": 96,
+      "land": {
+        "slot": 34,
+        "kind": "ruin",
+        "footprint": 2,
+        "solid": true
+      },
+      "height": 1.52332,
+      "radius": 1.48017
+    },
+    {
+      "id": "land.forest.35",
+      "file": "land-forest-35.glb",
+      "bytes": 8704,
+      "contentHash": "sha256:d3bb49f1ff6bc4f4d75f42f2a911a9d28c8576445f8960c69f7fa81f636145a9",
+      "triangles": 60,
+      "land": {
+        "slot": 35,
+        "kind": "ruin",
+        "footprint": 1,
+        "solid": true
+      },
+      "height": 1.71742,
+      "radius": 0.936
+    },
+    {
+      "id": "land.forest.36",
+      "file": "land-forest-36.glb",
+      "bytes": 29876,
+      "contentHash": "sha256:89cd68b2026099bcb2a68376c2594eb0f585507195da64430ee578eeca5e6ae1",
+      "triangles": 228,
+      "land": {
+        "slot": 36,
+        "kind": "ruin",
+        "footprint": 1,
+        "solid": true
+      },
+      "height": 1.41403,
+      "radius": 1
+    },
+    {
+      "id": "land.forest.37",
+      "file": "land-forest-37.glb",
+      "bytes": 21052,
+      "contentHash": "sha256:4d863c3e72d539da27193e0965baf8a1800577796d09a3c336b4c074a5084a06",
+      "triangles": 158,
+      "land": {
+        "slot": 37,
+        "kind": "bone",
+        "footprint": 1,
+        "solid": false
+      },
+      "height": 0.56084,
+      "radius": 0.43002
+    },
+    {
+      "id": "land.forest.38",
+      "file": "land-forest-38.glb",
+      "bytes": 21976,
+      "contentHash": "sha256:5eafd04ccf7dfdb322519113437d33769a1d0a0ae258cd64addf206f492a182a",
+      "triangles": 165,
+      "land": {
+        "slot": 38,
+        "kind": "bone",
+        "footprint": 1,
+        "solid": false
+      },
+      "height": 0.55067,
+      "radius": 0.65904
+    },
+    {
+      "id": "land.forest.39",
+      "file": "land-forest-39.glb",
+      "bytes": 25340,
+      "contentHash": "sha256:37e1454367e85160fdda16b4e2f6b21c64db3aa53fa916a5a9dc17882c1ef9c6",
+      "triangles": 192,
+      "land": {
+        "slot": 39,
+        "kind": "bone",
+        "footprint": 1,
+        "solid": false
+      },
+      "height": 0.34487,
+      "radius": 0.91358
+    },
+    {
+      "id": "land.forest.40",
+      "file": "land-forest-40.glb",
+      "bytes": 25844,
+      "contentHash": "sha256:6a92fc37640f03a8fe7bda09cf4eeb7427a99b35d78ddebd0c3e115b308f3d67",
+      "triangles": 196,
+      "land": {
+        "slot": 40,
+        "kind": "bone",
+        "footprint": 2,
+        "solid": false
+      },
+      "height": 0.57111,
+      "radius": 1.15606
+    }
+  ]
+}

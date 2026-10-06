@@ -24,9 +24,14 @@ export type ModelBudget = {
   weightSlots: number;
   boneInfluences: number;
   clipSeconds: number;
-  height: number;
-  footprintRadius: number;
-  pivotYTolerance: number;
+  // Optional, because the two record kinds are not the same question. `height` and
+  // `footprintRadius` are the answer to "how big is this artifact in its own file", and that answer
+  // is only a limit for a model that is about to be multiplied into a tower seat: a tree seven units
+  // tall is a tree, and refusing it for standing taller than a tower would be refusing the artefact
+  // for being a tree. A terrain record leaves both out rather than inventing a number for them.
+  height?: number;
+  footprintRadius?: number;
+  pivotYTolerance?: number;
 };
 
 export type RegistryBudget = {
@@ -98,6 +103,32 @@ export const WORLD_FOOTPRINT_BUDGET: WorldFootprintBudget = {
   radius: 1.0,
 };
 
+// A terrain model is not a tower in a smaller seat, so it is not budgeted as one. Two of the numbers
+// above have no meaning here and are left out on purpose rather than set to a value large enough to
+// never fire: `height` and `footprintRadius` exist to keep a multiplied model inside the 2x2 world a
+// tower is placed in, and a tree is not multiplied and is not placed in one. Its own extent is a
+// question about art — a canopy that overhangs its cell is what a canopy does — so there is no number
+// here that would mean anything, and inventing one would be a limit nobody could act on.
+//
+// Everything that is left is a per-file cost, which is the same question for both kinds of record:
+// how much this one artefact asks the GPU for. The triangle cap is the binding one, because forty of
+// these share one frame with everything else on it.
+export const TERRAIN_MODEL_BUDGET: ModelBudget = {
+  triangles: 1_500,
+  bytes: 1 * MIB,
+  nodes: 8,
+  meshes: 4,
+  materials: 4,
+  textures: 0,
+  skins: 0,
+  morphTargets: 0,
+  animationClips: 0,
+  bones: 0,
+  weightSlots: 0,
+  boneInfluences: 0,
+  clipSeconds: 0,
+};
+
 // What the client can instantiate out of a loaded model. A node type outside this set is refused on
 // load, because the client walks a known tree and nothing tells it how to reproduce a light node or
 // a point cloud. `SkinnedMesh` and `Bone` are in the set because `SkeletonUtils.clone` rebuilds the
@@ -160,6 +191,9 @@ export type ModelMeasurement = {
   height?: number;
   footprintRadius?: number;
   pivotY?: number;
+  /** Vertices in `POSITION`, and in `COLOR_0` where the model carries one. See `checkModelContract`. */
+  positionVertices?: number;
+  colorVertices?: number | null;
 };
 
 export type AssetFailure = { modelId: string; parameter: string; reason: string };
@@ -213,14 +247,37 @@ export const checkModelContract = (
       failures.push(overBudget(id, parameter, actual, budget[parameter]));
     }
   }
-  if (measurement.height !== undefined && measurement.height > budget.height) {
+  if (measurement.height !== undefined && budget.height !== undefined && measurement.height > budget.height) {
     failures.push(overBudget(id, 'height', measurement.height, budget.height));
   }
-  if (measurement.footprintRadius !== undefined && measurement.footprintRadius > budget.footprintRadius) {
+  if (measurement.footprintRadius !== undefined && budget.footprintRadius !== undefined && measurement.footprintRadius > budget.footprintRadius) {
     failures.push(overBudget(id, 'footprint radius', measurement.footprintRadius, budget.footprintRadius));
   }
-  if (measurement.pivotY !== undefined && Math.abs(measurement.pivotY) > budget.pivotYTolerance) {
+  if (measurement.pivotY !== undefined && budget.pivotYTolerance !== undefined && Math.abs(measurement.pivotY) > budget.pivotYTolerance) {
     failures.push(overBudget(id, 'pivot Y', measurement.pivotY, budget.pivotYTolerance));
+  }
+  // The colour buffer has to be exactly as long as the position buffer, and this is the one check in
+  // the file that nothing before it can catch.
+  //
+  // A `COLOR_0` three times the length of `POSITION` is a valid glTF file. The renderer reads it,
+  // `GLTFLoader` parses it, the builder hashes it and every budget above is satisfied — and the mesh
+  // is painted with the wrong vertices, in a way that is only visible by looking at it. Our accepted
+  // artefacts carry their colour exactly this way (`COLOR_0`, no material), so the shape is not
+  // hypothetical: it is how all fifty of them are coloured. A missing colour buffer is not this
+  // defect — that is a model with no colour at all, which is a different question and not a failure.
+  if (
+    measurement.positionVertices !== undefined &&
+    typeof measurement.colorVertices === 'number' &&
+    measurement.colorVertices !== measurement.positionVertices
+  ) {
+    failures.push({
+      modelId: id,
+      parameter: 'color vertices',
+      reason:
+        `${id}: COLOR_0 carries ${measurement.colorVertices} vertices but POSITION carries ` +
+        `${measurement.positionVertices} · a colour buffer of another length passes the renderer, the ` +
+        `loader and every budget above, and paints the mesh with the wrong vertices`,
+    });
   }
   // A clip length is a duration rather than a count, so it cannot ride the table above: a loop the
   // mixer has to seek inside costs more the longer it is, and two seconds is what one idle sway of

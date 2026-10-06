@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import {
   MODEL_BUDGET,
   REGISTRY_BUDGET,
+  TERRAIN_MODEL_BUDGET,
   checkClipTargets,
   checkModelContract,
   checkNodeTypes,
@@ -26,7 +27,7 @@ import {
   isTerrainRecord,
   parseAssetManifest,
 } from '../src/asset-registry.ts';
-import type { AssetManifest, ModelManifestEntry } from '../src/asset-registry.ts';
+import type { AssetManifest, ModelManifestEntry, TerrainModelEntry, TerrainPlacement } from '../src/asset-registry.ts';
 
 // Own zero-dependency glTF 2.0 binary generator. Models live in this file as text,
 // artifacts are written to public/models and are not committed, so a diff of the model
@@ -42,6 +43,14 @@ const MANIFEST_PATH = join(OUTPUT_DIR, 'manifest.json');
 // input. `build-assets.ts` copies them, so the copy can never drift from the source it claims to be.
 const ACCEPTED_DIR = join(PROJECT_ROOT, 'assets', 'accepted');
 const ACCEPTED_MANIFEST_PATH = join(ACCEPTED_DIR, 'manifest.json');
+// The third source, and it is a third directory rather than more records in the second one. The forty
+// terrain models came out of `NexusModeler` as their own export with their own manifest, and keeping
+// them beside the towers and creatures would mix two producers' bytes into one file that claims to be
+// one export — and the day the sets diverge there would be nothing in the tree saying whose is whose.
+// Same reason, same treatment: files in the repository as they arrived, copied here so the copy cannot
+// drift from what it claims to be.
+const LAND_DIR = join(ACCEPTED_DIR, 'land');
+const LAND_MANIFEST_PATH = join(LAND_DIR, 'manifest.json');
 const PRECISION = 1e5;
 
 const GLB_MAGIC = 0x46546c67;
@@ -128,10 +137,17 @@ type ManifestEntry = {
   bytes: number;
   contentHash: string;
   triangles: number;
-  emissiveNode: string;
+  // Optional, because a terrain record may honestly have nothing to light and the towers and creatures
+  // may not. The client's parser is what decides which records must name one; here the field is only
+  // ever read when the file being verified claims it.
+  emissiveNode?: string;
   // Carried through from the accepted export untouched: a model that declares a gap above the ground
   // has to reach the client in the published manifest, or the field the exporter wrote is a comment.
   hoverY?: number;
+  // The placement a terrain record carries from the producer. Never written by this generator — it
+  // publishes towers and creatures of its own — but read off the records it copies, so a republish
+  // cannot drop the one field that says which cell a prop stands on.
+  land?: TerrainPlacement;
 };
 
 type ModelBuild = {
@@ -1059,6 +1075,39 @@ const readAccessorValues = (
   return { values, count, components };
 };
 
+/**
+ * How many vertices `POSITION` and `COLOR_0` carry in each mesh of a file, for the budget to compare.
+ *
+ * Read off the file rather than declared by it, because the whole point is that a manifest cannot be
+ * trusted on this and neither can the accessor count in isolation: what has to be compared is one
+ * primitive's `COLOR_0` against the same primitive's `POSITION`, and only a walk knows which is which.
+ * A file with no colour attribute reports null, which is a different answer from zero — a model whose
+ * colour lives in its material is legitimate, and a `COLOR_0` of the wrong length is not.
+ */
+const readVertexCounts = (bytes: Buffer): { positionVertices: number; colorVertices: number | null } => {
+  const { gltf } = readGltfJson(bytes, 'colour counts');
+  const accessors = asArray(gltf.accessors, 'colour counts accessors');
+  let positionVertices = 0;
+  let colorVertices: number | null = null;
+  for (const mesh of asArray(gltf.meshes, 'colour counts meshes')) {
+    for (const primitive of asArray(mesh.primitives, 'colour counts primitives')) {
+      const attributes = primitive.attributes as Json | undefined;
+      const position = attributes?.POSITION;
+      if (position === undefined) {
+        continue;
+      }
+      // The first primitive with positions is the one measured, and the colour read beside it rather
+      // than separately: a file whose second primitive has a longer colour buffer is still a file the
+      // renderer will draw wrong, and `verifyGlb` walks every primitive to catch exactly that.
+      const colors = attributes?.COLOR_0;
+      positionVertices = asNumber((accessors[asNumber(position, 'POSITION')] as Json).count, 'POSITION count');
+      colorVertices = colors === undefined ? null : asNumber((accessors[asNumber(colors, 'COLOR_0')] as Json).count, 'COLOR_0 count');
+      return { positionVertices, colorVertices };
+    }
+  }
+  return { positionVertices, colorVertices };
+};
+
 const verifyGlb = (bytes: Buffer, entry: ManifestEntry): void => {
   const label = entry.file;
   if (bytes.length !== entry.bytes) {
@@ -1166,6 +1215,23 @@ const verifyGlb = (bytes: Buffer, entry: ManifestEntry): void => {
       if (normals.count !== positions.count) {
         fail(`${where}: NORMAL count ${normals.count} does not match POSITION count ${positions.count}`);
       }
+      // And the colour buffer, which is the one attribute whose length nothing else in the pipeline
+      // looks at. A `COLOR_0` of any other length is a valid file that the renderer, the loader, the
+      // budget and this function all accept, and it paints the mesh with the wrong vertices — so it is
+      // checked here, against POSITION, at the one point where both lengths are already in hand. The
+      // colour of the accepted models lives exactly this way: no material, all of it in `COLOR_0`.
+      if (attributes.COLOR_0 !== undefined) {
+        const colors = readAccessorValues(
+          bytes,
+          gltf,
+          bin,
+          asNumber(attributes.COLOR_0, `${where} COLOR_0`),
+          where,
+        );
+        if (colors.count !== positions.count) {
+          fail(`${where}: COLOR_0 count ${colors.count} does not match POSITION count ${positions.count}`);
+        }
+      }
       if (primitive.mode !== undefined && primitive.mode !== MODE_TRIANGLES) {
         fail(`${where}: mode ${String(primitive.mode)} is not TRIANGLES`);
       }
@@ -1225,6 +1291,14 @@ const verifyGlb = (bytes: Buffer, entry: ManifestEntry): void => {
     fail(`${label}: ${triangleCount} triangles in the file but the manifest claims ${entry.triangles}`);
   }
 
+  // The lit node is looked up only of a record that claims one. A terrain record may honestly carry
+  // none — a rock, a stump and a skull have nothing to light — and the parser is what refuses a record
+  // that promises a node it does not have, so the two halves of that rule live in one place each and
+  // neither has to make an exception for the other.
+  if (entry.emissiveNode === undefined) {
+    verifySkeleton(bytes, gltf, bin, label);
+    return;
+  }
   const emissiveNode = nodes.find((node) => node.name === entry.emissiveNode);
   if (!emissiveNode) {
     fail(`${label}: no node named ${entry.emissiveNode}`);
@@ -1439,6 +1513,80 @@ const expectFailure = (action: () => void, pattern: RegExp, label: string): void
 
 const expectRejection = (bytes: Buffer, entry: ManifestEntry, pattern: RegExp, label: string): void =>
   expectFailure(() => verifyGlb(bytes, entry), pattern, label);
+
+/**
+ * A real accepted file with its `COLOR_0` made three times as long as its `POSITION`.
+ *
+ * This is the red run the colour check exists for, and it is built out of a file the project actually
+ * ships rather than out of a probe object, because the defect is precisely that a valid file gets
+ * through: the container, the bufferViews, the accessors, the triangles and the manifest all agree with
+ * each other on the way in. So the surgery has to be honest about all of them — the colour data is
+ * repeated in the buffer, the view grows by the same amount, the accessor's count triples and the
+ * manifest's `bytes` and `contentHash` are recomputed to match, which is what the build itself would
+ * write. Only one thing is wrong with the result, and it has to be the one thing the check names.
+ *
+ * A file whose `COLOR_0` merely *claimed* to be longer would prove nothing: the structural checks
+ * would refuse it first, on the accessor not fitting its view, and the colour check would never run.
+ */
+const stretchColorBuffer = (bytes: Buffer, times: number): Buffer => {
+  const chunks = readChunks(bytes, 'colour probe');
+  const json = chunks.get(CHUNK_JSON);
+  const bin = chunks.get(CHUNK_BIN);
+  if (!json || !bin) {
+    fail('colour probe: file has no JSON or BIN chunk');
+  }
+  const gltf = JSON.parse(bytes.subarray(json.start, json.start + json.length).toString('utf8')) as Json;
+  const accessors = asArray(gltf.accessors, 'colour probe accessors');
+  const views = asArray(gltf.bufferViews, 'colour probe bufferViews');
+  const mesh = asArray(gltf.meshes, 'colour probe meshes')[0];
+  const primitive = asArray(mesh?.primitives ?? [], 'colour probe primitives')[0];
+  const attributes = primitive?.attributes as Json | undefined;
+  const colorIndex = attributes?.COLOR_0;
+  if (colorIndex === undefined) {
+    fail('colour probe: the file carries no COLOR_0 to stretch');
+  }
+  const accessor = accessors[asNumber(colorIndex, 'colour probe COLOR_0')] as Json;
+  const view = views[asNumber(accessor.bufferView, 'colour probe bufferView')] as Json;
+  const viewOffset = asNumber(view.byteOffset ?? 0, 'colour probe view offset');
+  const viewLength = asNumber(view.byteLength, 'colour probe view length');
+  const original = Buffer.from(bytes.subarray(bin.start + viewOffset, bin.start + viewOffset + viewLength));
+  const grown = Buffer.concat(Array.from({ length: times }, () => original));
+  // The extra data goes at the end of the buffer so no existing view has to move, and the old view's
+  // length is left alone: a second view is opened on the tail, which is how a real exporter would have
+  // written it and which leaves every other accessor in the file exactly where it was.
+  const tailOffset = bin.length;
+  const grownView = { buffer: 0, byteOffset: tailOffset, byteLength: grown.length, target: TARGET_ARRAY_BUFFER };
+  const grownAccessor = {
+    ...accessor,
+    bufferView: views.length,
+    count: asNumber(accessor.count, 'colour probe accessor count') * times,
+  };
+  gltf.bufferViews = [...views, grownView];
+  gltf.accessors = [...accessors, grownAccessor];
+  (mesh.primitives as Json[])[0] = {
+    ...(primitive as Json),
+    attributes: { ...attributes, COLOR_0: accessors.length },
+  };
+  const binChunk = Buffer.concat([bytes.subarray(bin.start, bin.start + bin.length), grown]);
+  const paddedBin = binChunk.length % 4 === 0 ? binChunk : Buffer.concat([binChunk, Buffer.alloc(4 - (binChunk.length % 4))]);
+  const buffers = asArray(gltf.buffers, 'colour probe buffers');
+  buffers[0] = { ...buffers[0], byteLength: paddedBin.length };
+  const jsonChunk = Buffer.from(JSON.stringify(gltf), 'utf8');
+  const paddedJson = jsonChunk.length % 4 === 0 ? jsonChunk : Buffer.concat([jsonChunk, Buffer.alloc(4 - (jsonChunk.length % 4), 0x20)]);
+  const total = 12 + 8 + paddedJson.length + 8 + paddedBin.length;
+  const out = Buffer.alloc(total);
+  out.writeUInt32LE(GLB_MAGIC, 0);
+  out.writeUInt32LE(GLB_VERSION, 4);
+  out.writeUInt32LE(total, 8);
+  out.writeUInt32LE(paddedJson.length, 12);
+  out.writeUInt32LE(CHUNK_JSON, 16);
+  paddedJson.copy(out, 20);
+  let cursor = 20 + paddedJson.length;
+  out.writeUInt32LE(paddedBin.length, cursor);
+  out.writeUInt32LE(CHUNK_BIN, cursor + 4);
+  paddedBin.copy(out, cursor + 8);
+  return out;
+};
 
 // The gate every write goes through. Nothing reaches the disk before it: a refused model must
 // leave no artifact and no manifest entry behind, or a broken model would ship next to a
@@ -1674,6 +1822,47 @@ const runContractRedChecks = (published: readonly ManifestEntry[]): void => {
     /models\[0\]\.land must be an object with slot, kind, footprint and solid, found 7/,
     'land block that is not an object',
   );
+
+  // The colour check, driven from a file this project actually ships. The probe is a real prop with a
+  // real colour buffer tripled: the container, the views, the accessors, the triangle count and the
+  // manifest are all made to agree with the stretched file, so the only thing wrong with it is the one
+  // thing the check is for.
+  const stretched = stretchColorBuffer(readFileSync(join(LAND_DIR, 'land-forest-37.glb')), 3);
+  const stretchedEntry: ManifestEntry = {
+    id: 'land.forest.37',
+    file: 'land-forest-37.glb',
+    bytes: stretched.length,
+    contentHash: sha256(stretched),
+    triangles: 158,
+    land: { slot: 37, kind: 'bone', footprint: 1, solid: false },
+  };
+  // And the same file untouched has to pass, or the probe proves only that something refuses everything.
+  verifyGlb(readFileSync(join(LAND_DIR, 'land-forest-37.glb')), {
+    ...stretchedEntry,
+    bytes: 21052,
+    contentHash: 'sha256:4d863c3e72d539da27193e0965baf8a1800577796d09a3c336b4c074a5084a06',
+  });
+  const measured = readVertexCounts(stretched);
+  expectRejection(
+    stretched,
+    stretchedEntry,
+    /COLOR_0 count \d+ does not match POSITION count \d+/,
+    'a colour buffer three times the length of the positions',
+  );
+  // The same file through the client-side check, which is the one the browser runs. Two gates and two
+  // red runs, because they are two gates: the build refuses the file before it is ever served, and the
+  // client refuses it again if something serves it anyway.
+  expectFailure(
+    () => {
+      const failures = checkModelContract({ ...stretchedEntry, ...measured }, TERRAIN_MODEL_BUDGET);
+      if (failures.length === 0) {
+        fail(`a COLOR_0 of ${String(measured.colorVertices)} vertices beside ${measured.positionVertices} positions was accepted, so this check proves nothing`);
+      }
+      throw new Error(describeFailures(failures));
+    },
+    /COLOR_0 carries 1422 vertices but POSITION carries 474/,
+    'the client-side colour check refusing the same file',
+  );
   expectFailure(
     () => parseAssetManifest(withBlock(valid, { triangles: TERRAIN_TRIANGLE_LIMIT + 1 })),
     new RegExp(`claims ${TERRAIN_TRIANGLE_LIMIT + 1} triangles, a terrain model allows ${TERRAIN_TRIANGLE_LIMIT}`),
@@ -1686,25 +1875,19 @@ const runContractRedChecks = (published: readonly ManifestEntry[]): void => {
   );
 };
 
+// The published manifest is read back through the client's own parser, not through a second reader of
+// our own. That reader existed because the generator had no other one; it was a duplicate contract, and
+// the duplicate is exactly what refused the first terrain record over the one field a terrain record is
+// allowed not to carry. One contract means the file this build writes is checked by the same code the
+// browser will parse it with, and a disagreement between the two cannot survive a build.
 const parseManifest = (raw: string): { version: number; models: ManifestEntry[] } => {
-  const parsed = JSON.parse(raw) as Json;
-  const version = asNumber(parsed.version, 'manifest version');
-  if (version !== 1) {
-    fail(`manifest version ${version} is not supported`);
+  let parsed: AssetManifest;
+  try {
+    parsed = parseAssetManifest(JSON.parse(raw));
+  } catch (error) {
+    return fail(`published manifest: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const models = asArray(parsed.models, 'manifest models');
-  if (models.length === 0) {
-    fail('manifest lists no models');
-  }
-  for (const [index, model] of models.entries()) {
-    for (const field of ['id', 'file', 'contentHash', 'emissiveNode'] as const) {
-      asString(model[field], `manifest model ${index} ${field}`);
-    }
-    for (const field of ['bytes', 'triangles'] as const) {
-      asNumber(model[field], `manifest model ${index} ${field}`);
-    }
-  }
-  return { version, models: models as unknown as ManifestEntry[] };
+  return { version: parsed.version, models: parsed.models as ManifestEntry[] };
 };
 
 // Everything that has to be true before a byte reaches the disk, in one place: build, verify and
@@ -1767,16 +1950,58 @@ const readAccepted = (): ManifestEntry[] => {
   return entries;
 };
 
-const build = (): { entries: ManifestEntry[]; own: ManifestEntry[]; built: Map<string, ModelBuild> } => {
+// The forty terrain records, read through the same client parser and verified against the same file
+// rules. `verifyGlb` is shared on purpose — the terrain files carry no material and no lit node, and the
+// two things that made them unpublishable a moment ago (a missing `emissiveNode`, which `verifyGlb`
+// looks up by name) have to be optional in it rather than worked around in a second verifier. So the
+// check asks for a lit node only of a record that claims one, and a terrain record passes without it.
+const readTerrain = (): TerrainModelEntry[] => {
+  let parsed: AssetManifest;
+  try {
+    parsed = parseAssetManifest(JSON.parse(readFileSync(LAND_MANIFEST_PATH, 'utf8')));
+  } catch (error) {
+    return fail(`terrain export: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const entries: TerrainModelEntry[] = [];
+  for (const entry of parsed.models) {
+    // The other half of the rule the prefix enforces: a record this directory publishes has to be a
+    // terrain record. A tower here would be a file the plate never places and a slot nothing fills,
+    // and the towers and creatures have a directory of their own to come from.
+    if (!isTerrainRecord(entry)) {
+      fail(`terrain export: ${entry.id} is not a terrain record, and only ids starting with land. belong to the plate`);
+    }
+    const bytes = readFileSync(join(LAND_DIR, entry.file));
+    verifyGlb(bytes, entry);
+    const failures = checkModelContract(
+      { id: entry.id, bytes: entry.bytes, triangles: entry.triangles, ...readVertexCounts(bytes) },
+      TERRAIN_MODEL_BUDGET,
+    );
+    if (failures.length > 0) {
+      fail(`terrain export: budget check refused: ${describeFailures(failures)}`);
+    }
+    entries.push(entry);
+  }
+  const slots = new Set(entries.map((entry) => entry.land.slot));
+  if (entries.length !== TERRAIN_SLOT_COUNT || slots.size !== TERRAIN_SLOT_COUNT) {
+    return fail(
+      `terrain export: ${entries.length} records covering ${slots.size} slots · the plate expects ${TERRAIN_SLOT_COUNT}`,
+    );
+  }
+  return entries;
+};
+
+const build = (): { entries: ManifestEntry[]; own: ManifestEntry[]; terrain: TerrainModelEntry[]; built: Map<string, ModelBuild> } => {
   const { entries: own, built } = assemble(MODELS);
   const accepted = readAccepted();
+  const terrain = readTerrain();
   // One id, one file. The generator and the accepted export both claim `pulse-spire`, and a registry
   // that listed both would leave the client to choose, so the accepted artifact takes the id: the
   // models the game shows are the ones that were exported for it. The generated one is still built,
   // hashed and self-tested, because it is the only model here that carries a skeleton, and the
-  // determinism and clip checks hang on it.
+  // determinism and clip checks hang on it. A terrain id can collide with neither — the plate owns the
+  // whole `land.` namespace — so all forty go in as they are.
   const claimed = new Set(accepted.map((entry) => entry.id));
-  const entries = [...own.filter((entry) => !claimed.has(entry.id)), ...accepted];
+  const entries = [...own.filter((entry) => !claimed.has(entry.id)), ...accepted, ...terrain];
   const registryFailures = checkRegistryBudgets(entries);
   if (registryFailures.length > 0) {
     fail(`registry budget refused: ${describeFailures(registryFailures)}`);
@@ -1790,9 +2015,14 @@ const build = (): { entries: ManifestEntry[]; own: ManifestEntry[]; built: Map<s
   for (const entry of accepted) {
     writeFileSync(join(OUTPUT_DIR, entry.file), readFileSync(join(ACCEPTED_DIR, entry.file)));
   }
-  // Last, because it is the description of what the two sources above put on disk.
+  // Copied, not linked and not generated: the plate has to show the file the producer accepted, and
+  // the copy is what the client's content hash is compared against.
+  for (const entry of terrain) {
+    writeFileSync(join(OUTPUT_DIR, entry.file), readFileSync(join(LAND_DIR, entry.file)));
+  }
+  // Last, because it is the description of what the three sources above put on disk.
   writeFileSync(MANIFEST_PATH, `${JSON.stringify({ version: 1, models: entries }, null, 2)}\n`);
-  return { entries, own, built };
+  return { entries, own, terrain, built };
 };
 
 const check = (): ManifestEntry[] => {
