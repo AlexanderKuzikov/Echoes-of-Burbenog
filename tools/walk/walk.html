@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>прогон существа по карте</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #4a90d8; overflow: hidden; }
+      canvas { display: block; }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "/node_modules/three/build/three.module.js",
+          "three/examples/jsm/loaders/GLTFLoader.js": "/node_modules/three/examples/jsm/loaders/GLTFLoader.js",
+          "three/examples/jsm/environments/RoomEnvironment.js": "/node_modules/three/examples/jsm/environments/RoomEnvironment.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <!-- Прогон одного существа по настоящей карте игры. Не витрина форм: карта, кожа и модель
+         берутся теми же файлами, что берёт игра, и идут по той же земле. -->
+    <script type="module" src="./walk.ts"></script>
+  </body>
+</html>
