@@ -273,27 +273,8 @@ const groundYAt = (x: number, z: number): number => {
 // шире щель на максимальном отклонении. На 0.169 от стыка щель была 0.013 клетки, то есть 15
 // пикселей зелёного фона под зверём; у самого стыка она схлопывается.
 
-// Анатомия ноги хаска. Замерено по геометрии `husk.glb`: нога стоит вертикальным столбом из трёх
-// частей, и стыки между ними — это готовые шарниры, а не выдуманные точки:
-//
-//   копыто  y 0.0000…0.0393   24 треугольника
-//   балка   y 0.0449…0.0880   18 треугольников
-//   верх    y 0.0880…0.1242   14 треугольников
-//
-// Между копытом и балкой уже есть зазор 0.0393…0.0449, между балкой и верхом — стык на 0.088.
-// Поэтому поры здесь не нужны: режем по этим двум границам, и ступня, голень и бедро получаются
-// настоящими частями, которые можно сгибать по-настоящему.
-const FOOT_Y = 0.042;
-const KNEE_Y = 0.088;
 const LEG_Y = 0.126;
-// Допуск вокруг оси ноги и по ширине грани. Модель не сварена вообще — 2424 вершины на 808
-// треугольников, ни одной общей, — поэтому по связности не разделить и по высоте не хватает:
-// грудь хаска опускается до 0.112 и в ноги по порогу попадала. Ось берём из копыт, они стоят
-// квадратом и отстоят от груди, а широкую грань отсекаем по размаху.
-const LEG_RX = 0.075;
-const LEG_RZ = 0.055;
-const LEG_TRI_W = 0.085;
-const LEG_TRI_D = 0.070;
+const PIVOT_ABOVE = 0.005;
 
 type Leg = 'frontLeft' | 'frontRight' | 'backLeft' | 'backRight';
 
@@ -301,77 +282,26 @@ const LEG_NAME: [string, number, number][] = [
   ['frontLeft', -1, 1], ['frontRight', 1, 1], ['backLeft', -1, -1], ['backRight', 1, -1],
 ];
 
-// Фаза шага каждой ноги в долях цикла. Диагональные пары идут в такт: передняя левая и задняя
-// правая в одной фазе, передняя правая и задняя левая в противофазе — половина цикла. Это рысь.
-const LEG_PHASE: [Leg, number][] = [
-  ['frontLeft', 0], ['backRight', 0],
-  ['frontRight', 0.5], ['backLeft', 0.5],
-];
-
-type LegRig = { hip: THREE.Group; knee: THREE.Group; ankle: THREE.Group };
-type LegParts = { rig: LegRig; axisX: number; axisZ: number; drop: number };
-
-const splitLegs = (source: THREE.Mesh): { core: THREE.Mesh; legs: Map<Leg, THREE.Group>; rig: Map<Leg, LegParts> } => {
+const splitLegs = (source: THREE.Mesh): { core: THREE.Mesh; legs: Map<Leg, THREE.Group> } => {
   const geo = source.geometry as THREE.BufferGeometry;
   const pos = geo.getAttribute('position');
   const idx = geo.getIndex();
   const count = idx ? idx.count : pos.count;
   const triCount = Math.floor(count / 3);
   const vert = (t: number, k: number) => (idx ? idx.getX(t * 3 + k) : t * 3 + k);
-  const midX = (t: number) => (pos.getX(vert(t, 0)) + pos.getX(vert(t, 1)) + pos.getX(vert(t, 2))) / 3;
-  const midZ = (t: number) => (pos.getZ(vert(t, 0)) + pos.getZ(vert(t, 1)) + pos.getZ(vert(t, 2))) / 3;
-
-  // Ось ноги — центр копыта. Копыто самая нижняя и самая узкая часть, стоит квадратом, и по нему
-  // нога опознаётся однозначно: грудь сюда не попадает, а вот порог по высоте её впускал.
-  const hoofTris = new Map<Leg, number[]>(LEG_NAME.map(([n]) => [n as Leg, []]));
-  for (let t = 0; t < triCount; t += 1) {
-    const a = vert(t, 0), b = vert(t, 1), c = vert(t, 2);
-    if (pos.getY(a) > FOOT_Y || pos.getY(b) > FOOT_Y || pos.getY(c) > FOOT_Y) continue;
-    const name = LEG_NAME.find(([, sx, sz]) => Math.sign(midX(t)) === sx && Math.sign(midZ(t)) === sz)?.[0];
-    if (name) hoofTris.get(name as Leg)?.push(t);
-  }
 
   const coreTris: number[] = [];
-  const segTris = new Map<Leg, { foot: number[]; shin: number[]; thigh: number[] }>(
-    LEG_NAME.map(([n]) => [n as Leg, { foot: [], shin: [], thigh: [] }]),
-  );
-  const legAxis = new Map<Leg, { x: number; z: number }>();
-
-  for (const name of hoofTris.keys()) {
-    const list = hoofTris.get(name) as number[];
-    legAxis.set(name, {
-      x: list.reduce((s, t) => s + midX(t), 0) / list.length,
-      z: list.reduce((s, t) => s + midZ(t), 0) / list.length,
-    });
-  }
-
+  const legTris = new Map<Leg, number[]>(LEG_NAME.map(([n]) => [n as Leg, []]));
   for (let t = 0; t < triCount; t += 1) {
-    const xs = [vert(t, 0), vert(t, 1), vert(t, 2)];
-    const ys = xs.map((v) => pos.getY(v));
-    // Грань берётся по самой высокой и самой низкой своей вершине, а не по центру. По центру
-    // грань высотой в пол-бедра попадала сразу в два сегмента: бедро начиналось с y 0, то есть
-    // с пола, и при повороте таза уезжало под землю, а колено со ступнёй переворачивались.
-    const yLo = Math.min(...ys);
-    const yHi = Math.max(...ys);
-    if (yLo >= LEG_Y) { coreTris.push(t); continue; }
-    const w = Math.max(...xs.map((v) => pos.getX(v))) - Math.min(...xs.map((v) => pos.getX(v)));
-    const d = Math.max(...xs.map((v) => pos.getZ(v))) - Math.min(...xs.map((v) => pos.getZ(v)));
-    let hit = false;
-    for (const [name, axis] of legAxis) {
-      if (Math.abs(midX(t) - axis.x) > LEG_RX || Math.abs(midZ(t) - axis.z) > LEG_RZ) continue;
-      if (w > LEG_TRI_W || d > LEG_TRI_D) continue;
-      const seg = segTris.get(name) as { foot: number[]; shin: number[]; thigh: number[] };
-      // По верхней вершине: грань целиком ниже порога ступни — это ступня, целиком ниже
-      // колена — балка, иначе верх ноги. Грань, пересекающая стык, уходит в корпус: так на
-      // шарнире не появляется дыра, и стык при сгибе остаётся закрытым.
-      if (yHi < FOOT_Y) seg.foot.push(t);
-      else if (yHi < KNEE_Y) seg.shin.push(t);
-      else if (yLo >= KNEE_Y) seg.thigh.push(t);
-      else continue;
-      hit = true;
-      break;
-    }
-    if (!hit) coreTris.push(t);
+    const a = vert(t, 0), b = vert(t, 1), c = vert(t, 2);
+    const low = pos.getY(a) < LEG_Y && pos.getY(b) < LEG_Y && pos.getY(c) < LEG_Y;
+    // грань, пересекающая границу, остаётся в корпусе: так на стыке не появляется дыра
+    if (!low) { coreTris.push(t); continue; }
+    const mx = (pos.getX(a) + pos.getX(b) + pos.getX(c)) / 3;
+    const mz = (pos.getZ(a) + pos.getZ(b) + pos.getZ(c)) / 3;
+    const name = LEG_NAME.find(([, sx, sz]) => Math.sign(mx) === sx && Math.sign(mz) === sz)?.[0];
+    if (name) legTris.get(name as Leg)?.push(t);
+    else coreTris.push(t);
   }
 
   const build = (tris: number[]) => {
@@ -397,56 +327,57 @@ const splitLegs = (source: THREE.Mesh): { core: THREE.Mesh; legs: Map<Leg, THREE
   };
 
   const mat = (): THREE.Material => (source.material as THREE.Material).clone();
-
-// Часть ноги собирается в свой меш и вешается на узел шарнира. Здесь важно не перепутать два
-// вектора, и в них путаница стоила двух замеров подряд:
-//
-//   joint — точка шарнира в координатах модели. Меш сдвигается на минус этот вектор, потому что
-//   вершины геометрии лежат в координатах модели, и после сдвига шарнир оказывается в нуле.
-//
-//   node  — где стоит узел относительно родителя. Узел таза стоит в точке таза модели, а узел
-//   колена — на разнице между точками таза и колени, то есть относительно родителя, а не модели.
-//   Если задать узлу координату модели, он уедет вверх ещё на всю длину бедра.
-const segment = (parent: THREE.Group, tris: number[], node: THREE.Vector3, joint: THREE.Vector3) => {
-  const group = new THREE.Group();
-  group.position.copy(node);
-  const mesh = new THREE.Mesh(build(tris), mat());
-  mesh.position.copy(joint).negate();
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  group.add(mesh);
-  parent.add(group);
-  return group;
-};
-
   const coreMesh = new THREE.Mesh(build(coreTris), mat());
   coreMesh.castShadow = true;
   coreMesh.receiveShadow = true;
 
   const legs = new Map<Leg, THREE.Group>();
-  const rig = new Map<Leg, LegParts>();
 
-  for (const [name, seg] of segTris) {
-    // Три шарнира на одной вертикали: таз у корпуса, колено на стыке балки и верха, голеностоп
-    // над копытом. У хаска нога стоит вертикальным столбом, поэтому все три точки лежат на её оси,
-    // и в покое нога собрана ровно в ту линию, какой вырезана из модели. Ноги стоят не под x=0,
-    // а на своём квадрате, поэтому каждый шарнир несёт смещение по x и z: иначе вся нога уехала бы
-    // к центру тела и перекрыла соседнюю.
-    const axis = legAxis.get(name) as { x: number; z: number };
-    const at = (y: number) => new THREE.Vector3(axis.x, y, axis.z);
+  // Точка качания — это стык ноги с корпусом, а не центр ноги. Ставить её в центр нельзя: у хаска
+  // стык смещён от центра на 0.042 вперёд у передних ног и на 0.049 вбок у задних, и при качании
+  // вокруг центра верх ноги выскакивал из-под корпуса, а ноги выглядели подвешенными. Стык ищется
+  // как середина ближайшей пары вершин ноги и корпуса — работает на любой модели, где ноги
+  // стоят квадратом, и не требует знать анатомию заранее.
+  const jointFor = (tris: number[]): THREE.Vector3 => {
+    const own = new Set<number>();
+    for (const t of tris) for (let k = 0; k < 3; k += 1) own.add(vert(t, k));
+    let bi = -1, bj = -1, bd = Infinity;
+    for (const i of own) {
+      const ax = pos.getX(i), ay = pos.getY(i), az = pos.getZ(i);
+      for (let j = 0; j < pos.count; j += 1) {
+        if (pos.getY(j) < LEG_Y) continue;
+        const dx = ax - pos.getX(j), dy = ay - pos.getY(j), dz = az - pos.getZ(j);
+        const d = dx * dx + dy * dy + dz * dz;
+        if (d < bd) { bd = d; bi = i; bj = j; }
+      }
+    }
+    if (bi < 0) return new THREE.Vector3(0, LEG_Y, 0);
+    return new THREE.Vector3(
+      (pos.getX(bi) + pos.getX(bj)) / 2,
+      (pos.getY(bi) + pos.getY(bj)) / 2 + PIVOT_ABOVE,
+      (pos.getZ(bi) + pos.getZ(bj)) / 2,
+    );
+  };
+
+  for (const name of legTris.keys()) {
+    const tris = legTris.get(name) as number[];
+    const g = build(tris);
+    const at = jointFor(tris);
+    const pivot = new THREE.Group();
+    pivot.position.copy(at);
+    const mesh = new THREE.Mesh(g, mat());
+    mesh.position.copy(at).negate();
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    pivot.add(mesh);
+    // внешняя группа держит посадку на землю, внутренняя — точку качания: иначе посадка
+    // затирает точку поворота и нога вращается вокруг нуля
     const outer = new THREE.Group();
-    const hip = segment(outer, seg.thigh, at(LEG_Y), at(LEG_Y));
-    const knee = segment(hip, seg.shin, new THREE.Vector3(0, KNEE_Y - LEG_Y, 0), at(KNEE_Y));
-    const ankle = segment(knee, seg.foot, new THREE.Vector3(0, FOOT_Y - KNEE_Y, 0), at(FOOT_Y));
-    // Посадка ноги — по её собственному копыту, а не по общей нижней точке зверя: у хаска
-    // передние копыта ниже задних, и по общей точке задние висели бы в воздухе.
-    let drop = Infinity;
-    for (const t of seg.foot) for (let k = 0; k < 3; k += 1) drop = Math.min(drop, pos.getY(vert(t, k)));
+    outer.add(pivot);
     legs.set(name, outer);
-    rig.set(name, { rig: { hip, knee, ankle }, axisX: axis.x, axisZ: axis.z, drop });
   }
 
-  return { core: coreMesh, legs, rig };
+  return { core: coreMesh, legs };
 };
 const HUSK = 'husk';
 const query = new URLSearchParams(location.search);
@@ -476,10 +407,6 @@ const bodyMesh = (() => {
 })();
 
 const wholeBox = new THREE.Box3().setFromObject(gltf.scene);
-// Посадка зверя на землю — по самой нижней точке модели. Но у хаска копыта стоят на разной
-// высоте: передние опускаются ниже, задние сильно выше, и разница доходит до 0.05 клетки. Если
-// сажать всех по общей нижней точке, задние копыта повиснут в воздухе, а зверь встанет на
-// передние. Поэтому каждая нога сажается по своему копыту — см. `legDrop` в `splitLegs`.
 const standOn = -wholeBox.min.y;
 
 // прочие узлы зверя — кристалл и что ещё есть — едут вместе с корпусом
@@ -487,35 +414,6 @@ const extrasTemplate = new THREE.Group();
 gltf.scene.traverse((o) => { if (o !== bodyMesh && o.parent !== bodyMesh && o instanceof THREE.Mesh) extrasTemplate.add(o); });
 extrasTemplate.position.y = standOn;
 extrasTemplate.traverse((o) => { if (o instanceof THREE.Mesh) { o.castShadow = true; o.receiveShadow = true; } });
-
-// Самая нижняя точка всех копыт относительно корня зверя. Считается по фактическим вершинам
-// ступней в их текущих поворотах, поэтому учитывает и наклон корпуса, и сгиб ноги, и разницу
-// длин ног — всё, что двигает копыто по высоте. Зверь сажается по этому замеру.
-// Самая нижняя точка копыт относительно корня зверя. Считаются только ступни: бедро при сгибе
-// таза уходит ниже копыта, и если мерить по всей ноге, зверь сажался бы по бедру и копыто тонуло
-// в земле на 0.037 клетки.
-//
-// Возвращается `min` — самая нижняя точка из всех копыт. Чтобы ни одна ступня не ушла в грунт,
-// зверь надо поднять ровно настолько, насколько самая низкая ступня утоплена, а не опустить до
-// самой низкой. Это разные знаки, и перепутать их значит утопить ноги в дороге.
-const hoofVertex = new THREE.Vector3();
-const lowestHoof = (beast: Beast): { min: number; max: number } => {
-  let min = Infinity;
-  let max = -Infinity;
-  for (const [name] of beast.rig) {
-    beast.joint(name).ankle.traverse((o) => {
-      if (!(o instanceof THREE.Mesh)) return;
-      const pos = o.geometry.getAttribute('position');
-      for (let i = 0; i < pos.count; i += 1) {
-        hoofVertex.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld);
-        if (hoofVertex.y < min) min = hoofVertex.y;
-        if (hoofVertex.y > max) max = hoofVertex.y;
-      }
-    });
-  }
-  const y = beast.root.position.y;
-  return { min: min - y, max: max - y };
-};
 
 // ---------------------------------------------------------------------------------------------
 // существо: собирается из того же меша сколько угодно раз
@@ -530,8 +428,7 @@ type Beast = {
   root: THREE.Group;
   torso: THREE.Group;
   legs: Map<Leg, THREE.Group>;
-  rig: Map<Leg, LegRig>;
-  joint: (name: Leg) => LegRig;
+  leg: (name: Leg) => THREE.Group;
 };
 
 const makeBeast = (): Beast => {
@@ -544,18 +441,10 @@ const makeBeast = (): Beast => {
   torso.add(core, extras);
 
   const legs = parts.legs;
-  const rig = new Map<Leg, LegRig>();
-  const drop = new Map<Leg, number>();
-  for (const [name, outer] of legs) {
-    const part = parts.rig.get(name) as LegParts;
-    // Нога садится на землю по своему копыту: своя точка низа зверя у всех ног разная.
-    outer.position.y = standOn - part.drop;
-    drop.set(name, part.drop);
-    rig.set(name, part.rig);
-  }
+  for (const outer of legs.values()) outer.position.y = standOn;
 
   // Ноги — дети корпуса, а не соседи по сцене: иначе они не наследуют его наклон и поворот по
-  // курсу, и стык расползается — ноги висели бы под корпусом отдельными деталями.
+  // курсу, и стык расползается на 0.08 клетки — ноги висели бы под корпусом отдельными деталями.
   // В системе координат корпуса нога и живёт, её шаг считается относительно корпуса.
   const root = new THREE.Group();
   torso.add(...legs.values());
@@ -566,57 +455,27 @@ const makeBeast = (): Beast => {
     root,
     torso,
     legs,
-    rig,
-    joint: (name: Leg) => rig.get(name) as LegRig,
+    leg: (name: Leg) => (legs.get(name) as THREE.Group).children[0] as THREE.Group,
   };
+};
+
+const LOOKS: Record<string, { bob: number; bobRate: number; sway: number; swayRate: number; yaw: number; yawRate: number }> = {
+  // те же значения, что в таблице видов игры, чтобы качание было тем же самым
+  husk: { bob: 0.016, bobRate: 1.5, sway: 0.045, swayRate: 1.5, yaw: 0.1, yawRate: 0.35 },
+  runner: { bob: 0.028, bobRate: 5, sway: 0.075, swayRate: 2.8, yaw: 0.06, yawRate: 0.6 },
+  wisp: { bob: 0.045, bobRate: 1, sway: 0, swayRate: 1, yaw: 0.5, yawRate: 0.45 },
+  swarmling: { bob: 0.022, bobRate: 9, sway: 0.05, swayRate: 6, yaw: 0.16, yawRate: 3.2 },
+  carapace: { bob: 0.008, bobRate: 0.55, sway: 0.022, swayRate: 0.42, yaw: 0.05, yawRate: 0.24 },
+  mote: { bob: 0.03, bobRate: 1.7, sway: 0.09, swayRate: 1.1, yaw: 0.22, yawRate: 0.9 },
+  maw: { bob: 0.026, bobRate: 0.8, sway: 0.038, swayRate: 0.6, yaw: 0.12, yawRate: 0.3 },
 };
 const HEIGHT = wholeBox.max.y - wholeBox.min.y;
 
 // Колонна: пять зверей друг за другом по полотну дороги. Все идут с одной скоростью и отстоят друг
-// от друга на постоянном расстоянии, поэтому строй держитя сам: у колонны одна пройденная дистанция,
+// от друга на постоянном расстоянии, поэтому строй держится сам: у колонны одна пройденная дистанция,
 // а у каждого зверя своя точка на маршруте, сдвинутая на интервал назад.
-//
-// Интервал 1.6 клетки, а не 4.2: зверь длиной 0.78 клетки при промежутке 4.2 стоял в колонне как
-// точки через четыре клетки друг от друга, и ног на нём не было видно вовсе — на кадре звери
-// занимали крохотную часть экрана. Колонна читается как колонна, когда промежуток сопоставим с
-// длиной зверя.
 const BEASTS = num('beasts', 5);
-const GAP = 1.6;
-
-// ---------------------------------------------------------------------------------------------
-// походка: длины и углы
-// ---------------------------------------------------------------------------------------------
-//
-// Ноги настоящие, трёхзвенные: таз, колено, голеностоп, и походка считается фазой опоры и
-// переноса, как у живого четвероногого. Раньше нога была одна цельная колонна, которую качали
-// туда-сюда, и это читалось как маятник, а не как шаг: у ноги не было ни колена, ни фазы, в
-// которую она оторвана от земли.
-//
-// Цикл ноги состоит из двух фаз:
-//
-//   ОПОРА (duty) — копыто стоит на земле, нога прямая, таз идёт от переднего положения к
-//   заднему. Тело над этой ногой едет, и нога держит вес: это настоящая опора.
-//   ПЕРЕНОС — копыто отрывается, таз идёт от заднего положения к переднему, колено при этом
-//   сгибается и выносит ступню вперёд, голеностоп доворачивает копыто вниз к земле. Нога
-//   собирается в три сгиба и встаёт заново.
-//
-// Шаг в клетках — это ровно длина дуги, которую нога проносит под корпусом за цикл. Он не
-// задаётся числом: он выводится из длины ноги и угла шага. Иначе получается то, что было
-// раньше: шаг 0.3 клетки при ноге длиной 0.126 — нога в 2.4 раза короче шага, она физически
-// не могла донести копыто до земли, и зверь скользил, не касаясь пола ни в одной точке цикла.
-//
-// Ноги идут диагональными парами — передняя левая и задняя правая в такт, вторая пара в
-// противофазе. Это рысь, и она единственная честно ложится на четыре ноги: опора распределена
-// по диагонали, корпус не проваливается.
-const LEG_LEN = LEG_Y;
-const DUTY = 0.6;
-// Угол шага: таз уходит от нейтрали на столько, на сколько нога может вынести копыто, не
-// отрывая его от земли и не ломая угол в тазу. Таз не доводится до прямого угла в шарнире —
-// тогда нога легла бы вдоль корпуса.
-const HIP_ANGLE = 0.55;
-const KNEE_ANGLE = 0.85;
-// Шаг в клетках выводится из геометрии: дуга, которую копыто проходит под корпусом за цикл.
-const STRIDE = LEG_LEN * (2 * HIP_ANGLE + KNEE_ANGLE * 0.35);
+const GAP = 4.2;
 
 // ---------------------------------------------------------------------------------------------
 // маршрут: полотно дороги, взятое из сети карты
@@ -639,6 +498,8 @@ const STRIDE = LEG_LEN * (2 * HIP_ANGLE + KNEE_ANGLE * 0.35);
 // Ходьба туда-обратно: у сети владельца концы упираются в край плиты и в край базы, то есть колец
 // на земле нет. При развороте у края колонна переходит на обратный отсчёт задом наперёд, и так
 // обход замыкается сам.
+const LOOK = LOOKS[KIND] ?? LOOKS.husk;
+
 const routeRun = (() => {
   let best = { row: -1, from: 0, to: 0, length: 0 };
   for (let y = 0; y < grid.height; y += 1) {
@@ -726,14 +587,7 @@ let elapsed = 0;
 // начала цикла обе ветки давали `base ± π`, то есть один и тот же угол, и разворота не было там
 // вовсе. Теперь разворот распределён на TURN_CELLS клеток у обоих концов, и зверь доворачивает
 // один раз за конец пути.
-//
-// Окно разворота обязано быть короче длины колонны. Длина колонны — GAP × (N − 1), и при
-// промежутке 1.6 и пяти зверях это 6.4 клетки. Окно в 6 клеток шире колонны целиком, поэтому в
-// момент разворота в зоне поворота оказывались все пять зверей сразу: вожак уже доворачивал,
-// а задний ещё не дошёл до края, и строй изгибался петлёй вместо того, чтобы идти следом.
-// Окно взято вчетверо короче колонны, чтобы разворот успевал пройти раньше, чем в него въедет
-// второй зверь, и колонна входила в поворот и выходила из него строем.
-const TURN_CELLS = Math.max(2, (GAP * (BEASTS - 1)) / 4);
+const TURN_CELLS = 6;
 const smoothstep = (u: number): number => {
   const t = u < 0 ? 0 : u > 1 ? 1 : u;
   return t * t * (3 - 2 * t);
@@ -778,8 +632,6 @@ const resize = () => {
 addEventListener('resize', resize);
 resize();
 
-let lastCorrection = 0;
-
 const frame = () => {
   if (!paused) {
     elapsed += 1 / 60;
@@ -788,80 +640,39 @@ const frame = () => {
   }
 
   // ---------------------------------------------------------------------------------------------
-  // походка
+  // шаг
   // ---------------------------------------------------------------------------------------------
   //
-  // Длины и углы заданы выше, у карты: здесь только фаза. Частота такта считается от скорости,
-  // поэтому длина шага в клетках и частота шагов остаются связанными: быстрее зверь — значит
-  // чаще переступает, а не реже, и ноги не едут сквозь пол.
-  const stepsPerSecond = speed / STRIDE;
-  const gaitPhase = elapsed * stepsPerSecond;
+  // Шаг собран из настоящих ног и корпуса. Зверь четвероногий, идут ноги диагональными парами:
+  // передняя левая и задняя правая идут в такт друг другу, вторая пара — в противофазе. Это рысь,
+  // и на медленной скорости она читается как переступание, а на быстрой как бег. Корпус переваливается
+  // с пары на пару и идёт с наклоном вперёд, частота такта считается от скорости: шаг занимает
+  // примерно треть клетки, поэтому медленно зверь переступает, а быстро шагает часто и коротко.
+  const STEP_CELLS = 0.3;
+  const stepsPerSecond = speed / STEP_CELLS;
+  const stepPhase = elapsed * stepsPerSecond * Math.PI * 2;
+  const swing = Math.sin(stepPhase);
+  const liftStep = Math.abs(Math.sin(stepPhase));
+
+  // Углы небольшие: ноги короткие, большой наклон уводил бы копыто сквозь землю, а это читается
+  // хуже, чем короткий шаг. Подъём копыта при переносе делает подъёмом всего зверя.
+  const LEG_SWING = 0.35;
   const leader = place(walked);
 
   for (let i = 0; i < herd.length; i += 1) {
     const beast = herd[i]!;
     const spot = i === 0 ? leader : place(walked - i * GAP);
 
-    // Фаза каждой ноги: диагональные пары сдвинуты на полцикла. Ноги в одной паре идут в такт,
-    // поэтому обе в одной фазе — сдвига 0 у второй пары нет, у неё ровно половина цикла.
-    for (const [name, offset] of LEG_PHASE) {
-      const j = beast.joint(name);
-      const phase = (gaitPhase + offset) % 1;
+    beast.leg('frontLeft').rotation.x = swing * LEG_SWING;
+    beast.leg('backRight').rotation.x = swing * LEG_SWING;
+    beast.leg('frontRight').rotation.x = -swing * LEG_SWING;
+    beast.leg('backLeft').rotation.x = -swing * LEG_SWING;
 
-      if (phase < DUTY) {
-        // Опора. Копыто стоит на земле, а таз почти не качается: нога держит вес, и тело едет
-        // над ней. Качать таз в опоре нельзя — копыто пойдёт по дуге и оторвётся от земли, то
-        // есть зверь заскользит, а это ровно то, что было раньше. Небольшой наклон оставлен
-        // для живости: на 0.05 рад копыто приподнимается на 0.0002 клетки, глазом не видно.
-        j.hip.rotation.x = HIP_ANGLE * 0.09;
-        j.knee.rotation.x = 0;
-        // Голеностоп придерживает копыто плоским: ступня в опоре лежит плашмя, а не висит.
-        j.ankle.rotation.x = -j.hip.rotation.x;
-      } else {
-        // Перенос. Нога отрывается и проходит цикл целиком: сначала отталкивается назад от
-        // корпуса, потом сгибается и несёт ступню вперёд, потом выпрямляется и встаёт. Каждая
-        // из трёх частей отрабатывает своё, поэтому нога собирается в три сгиба, а не качается
-        // целиком. К концу переноса таз и колено возвращаются в ноль — нога готова к опоре.
-        const u = (phase - DUTY) / (1 - DUTY);
-        // Отталкивание назад и вынос вперёд: таз идёт по дуге назад в начале и возвращается
-        // вперёд к концу переноса, поэтому ступня встаёт там же, где стояла.
-        const push = Math.sin(Math.PI * Math.min(1, u * 1.35));
-        j.hip.rotation.x = -HIP_ANGLE * push;
-        // Колено гнётся в середине переноса и разгибается к концу: в начале нога ещё толкает
-        // корпус, в конце уже выпрямляется под опору, и сгиб там только мешал бы.
-        const fold = Math.sin(Math.PI * u) ** 0.85;
-        j.knee.rotation.x = KNEE_ANGLE * fold;
-        // Голеностоп держит копыто горизонтальным и в переносе: ступня не опрокидывается
-        // вверх пяткой, а идёт вперёд плашмя и встаёт на землю.
-        j.ankle.rotation.x = -j.hip.rotation.x - j.knee.rotation.x * 0.6;
-      }
-    }
-
-    // Корпус идёт с наклоном вперёд и чуть переваливается на ходу. Подъём зверя от шага убран
-    // совсем: раньше зверя целиком подбрасывало на копыте, потому что копыто не касалось земли
-    // и нечего было опереться.
-    beast.torso.rotation.z = Math.sin(gaitPhase * Math.PI * 2) * 0.045;
-    beast.torso.rotation.x = 0.09;
-    // Курс зверя — ровно курс маршрута, без бокового рыска. Рыск остался от одиночного зверя,
-    // где он читался как жизнь, а в колонне из пяти звери вставали вразнобой: последний уходил
-    // на 1.13 рад в сторону от соседей, и строй рассыпался на глазах.
-    beast.torso.rotation.y = spot.heading;
-
-    // Зверь садится по самой нижней копытной точке, а не по заранее посчитанной высоте. Разница
-    // между копытами реальная: у хаска передние ниже задних, и наклон корпуса вперёд уводит зад
-    // ещё ниже, поэтому по постоянной высоте задние копыта уходили в землю на 0.015 клетки.
-    // Единственная честная посадка — та, что ищется по факту, каждый кадр, по самой нижней точке
-    // всех четырёх копыт: зверь стоит на той ноге, которая ниже всех, и ни одна не проваливается.
-    beast.root.position.set(spot.x, spot.y, spot.z);
-    // Посадка на землю идёт в два прохода. Первый кладёт зверя на точку маршрута, второй сдвигает
-    // по высоте так, чтобы самая низкая ступня встала на дорогу. Оба прохода обязаны кончиться
-    // пересчётом матриц: считать замер по матрице, собранной до сдвига, — значит мерять
-    // предыдущий кадр и получить ровно ту ошибку, которую ты чинишь.
-    beast.root.updateWorldMatrix(true, true);
-    const before = lowestHoof(beast);
-    if (before.min < 0) beast.root.position.y -= before.min;
-    beast.root.updateWorldMatrix(true, true);
-    lastCorrection = lowestHoof(beast).min;
+    beast.root.position.set(spot.x, spot.y + liftStep * HEIGHT * 0.035, spot.z);
+    beast.torso.rotation.z = swing * 0.05;
+    beast.torso.rotation.x = 0.11;
+    beast.torso.position.y = liftStep * HEIGHT * 0.02;
+    beast.torso.rotation.y = spot.heading + Math.sin(elapsed * LOOK.yawRate + i) * LOOK.yaw;
   }
 
 // Камера смотрит на середину колонны, а не на вожака: вожак — это конец строя длиной в
@@ -1003,9 +814,6 @@ window.__WALK__ = {
   terrain,
   props,
   groundYAt,
-  THREE,
-  gait: () => ({ stride: STRIDE, legLen: LEG_LEN, duty: DUTY, hip: HIP_ANGLE, knee: KNEE_ANGLE, speed }),
-  lastCorrection: () => lastCorrection,
 };
 
 declare global { interface Window { __WALK__?: unknown } }
